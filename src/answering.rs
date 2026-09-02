@@ -54,6 +54,12 @@ pub enum Then {
     Nothing,
     /// Put this in the inbox.
     Keep(Message),
+    /// Put this in front of the person, and hold it until they answer.
+    ///
+    /// The one effect this process cannot carry out. Everything else here is decided from the
+    /// directory and the call; whether one session may direct another is decided by somebody at
+    /// a keyboard, and all this layer does is carry the question up and the answer back down.
+    Ask(crate::wire::Request),
     /// End this instance.
     Stop,
 }
@@ -107,7 +113,9 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
     let theirs = policy::between(caller, &me);
     let wanted = match call.call.as_str() {
         "identity" | "kin" | "status" | "inbox" => Reach::Ask,
-        "tell" => Reach::Tell,
+        // Reaching as far as a message does, and no further. Asking costs the far end a prompt
+        // and nothing else — the weight is all in the answer, which is not this layer's to give.
+        "tell" | "adopt" => Reach::Tell,
         "stop" => Reach::Stop,
         other => {
             return (
@@ -178,6 +186,48 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
             (
                 Reply::done(),
                 Then::Keep(Message::sent(&from, &text, sort, about_what)),
+            )
+        }
+        // Asked, never granted here. The reply says the question has been put, not that it was
+        // answered — a caller told "yes" by the process it asked would be reading its own
+        // request back.
+        "adopt" => {
+            // A main, and only a main. A session that already has a parent has one line of
+            // authority over it, and a second would make "who may direct this" unanswerable.
+            if about.parent.is_some() {
+                return (
+                    Reply::refused(format!(
+                        "`{}` already answers to `{}`, so it cannot take another session on",
+                        about.me.full(),
+                        about.parent.as_deref().unwrap_or_default()
+                    )),
+                    Then::Nothing,
+                );
+            }
+            if !caller.is_main() {
+                return (
+                    Reply::refused(
+                        "only a main may ask to be adopted: a session that already has a parent \
+                         would be changing who directs it behind that parent's back",
+                    ),
+                    Then::Nothing,
+                );
+            }
+            let why = text_at(call, 0).unwrap_or_default();
+            let from = Identity {
+                project: caller.project.clone(),
+                role: Identity::read(call.from.as_deref().unwrap_or_default())
+                    .map_or_else(|| "main".to_owned(), |claimed| claimed.role),
+                id: caller.id.clone(),
+            }
+            .full();
+            let request = crate::wire::Request::made(&from, &why);
+            (
+                Reply::of(serde_json::json!({
+                    "asked": request.id,
+                    "of": about.me.full(),
+                })),
+                Then::Ask(request),
             )
         }
         "stop" => {
@@ -429,5 +479,105 @@ mod tests {
             let (reply, _) = answer(&call, &about, Some(&parent));
             assert!(reply.ok, "{name} is listed and refuses: {reply:?}");
         }
+    }
+}
+
+/// Being adopted is asked for, never taken.
+///
+/// The whole point of the handshake: one session cannot make itself another's master, and cannot
+/// make itself another's child either. It can only put the question, and somebody at a keyboard
+/// on the other side answers it.
+#[cfg(test)]
+mod adopting {
+    use super::*;
+    use crate::wire::Call;
+
+    fn call_from(why: &str) -> Call {
+        Call {
+            call: "adopt".to_owned(),
+            args: vec![serde_json::Value::String(why.to_owned())],
+            from: Some("demo/main/beta-nu".to_owned()),
+            token: None,
+        }
+    }
+
+    fn a_main() -> About {
+        About {
+            me: Identity {
+                project: "demo".to_owned(),
+                role: "main".to_owned(),
+                id: "alpha-rho".to_owned(),
+            },
+            parent: None,
+            token: None,
+            busy: false,
+            working_for: 0,
+            inbox: Vec::new(),
+        }
+    }
+
+    fn caller(parent: Option<&str>) -> Whom {
+        Whom {
+            project: "demo".to_owned(),
+            id: "beta-nu".to_owned(),
+            parent: parent.map(ToOwned::to_owned),
+        }
+    }
+
+    #[test]
+    fn asking_puts_the_question_and_settles_nothing() {
+        // The reply must not read as a yes. A caller told "accepted" by the process it asked
+        // would be reading its own request back, and would carry on as though it had a parent.
+        let (reply, then) = answer(
+            &call_from("I want your grants"),
+            &a_main(),
+            Some(&caller(None)),
+        );
+        assert!(reply.ok, "{reply:?}");
+        let Then::Ask(request) = then else {
+            panic!("a request must be held for a person, not acted on: {then:?}");
+        };
+        assert_eq!(request.from, "demo/main/beta-nu");
+        assert_eq!(request.why, "I want your grants");
+        assert!(
+            !request.id.is_empty(),
+            "an answer has to be able to name it"
+        );
+    }
+
+    #[test]
+    fn a_session_that_already_answers_to_somebody_is_not_taken_on() {
+        // Two lines of authority over one session makes "who may direct this" unanswerable.
+        //
+        // Refused twice over, and either is enough: the wall gets there first — a session with a
+        // parent is not a main, and another instance's main may not reach it — and the rule in
+        // the `adopt` arm catches the cases the wall lets through. What matters is that nothing
+        // reaches a person: a prompt is the only thing that can turn into a yes.
+        let mut held = a_main();
+        held.parent = Some("demo/main/gamma-xi".to_owned());
+        let (reply, then) = answer(&call_from("be mine"), &held, Some(&caller(None)));
+        assert!(!reply.ok, "{reply:?}");
+        assert_eq!(then, Then::Nothing, "it must not reach a person at all");
+    }
+
+    #[test]
+    fn a_session_with_a_parent_may_not_go_looking_for_another() {
+        // Behind its parent's back, which is the objection: the parent lent it authority on the
+        // understanding that it answers to them.
+        let (reply, then) = answer(
+            &call_from("adopt me too"),
+            &a_main(),
+            Some(&caller(Some("demo/main/gamma-xi"))),
+        );
+        assert!(!reply.ok);
+        assert_eq!(then, Then::Nothing);
+    }
+
+    #[test]
+    fn a_stranger_that_says_nothing_about_itself_is_not_asked_about() {
+        // `None` is a caller that did not name itself. Everything here is about who they are.
+        let (reply, then) = answer(&call_from("hello"), &a_main(), None);
+        assert!(!reply.ok);
+        assert_eq!(then, Then::Nothing);
     }
 }

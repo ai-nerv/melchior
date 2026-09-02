@@ -161,6 +161,14 @@ fn said(held: &mut asking::Held, wanted: &Wanted) -> std::io::Result<Reply> {
             Vec::new(),
             wanted.token.as_deref().unwrap_or_default(),
         ),
+        // The reason travels with it: somebody is about to be asked to take responsibility for
+        // a session, and "why" is the whole of what they have to go on.
+        "adopt" => held.call(
+            "adopt",
+            vec![serde_json::json!(
+                wanted.message.clone().unwrap_or_default()
+            )],
+        ),
         // Everything else is a message. The sort is what makes them different verbs rather than
         // a wording choice: `attention` and `note` travel identically and mean entirely
         // different things to whoever reads them.
@@ -195,6 +203,13 @@ fn landed(wanted: &Wanted, reply: &Reply) -> String {
         "attention" | "trouble" => {
             format!("`{who}` has it, marked so it can interrupt whatever they are doing.")
         }
+        // Said carefully, because the model must not carry on as though it now had a parent.
+        // Nothing has changed yet and nothing may change: a person has to say yes first, and
+        // the answer arrives later as a message.
+        "adopt" => format!(
+            "Asked `{who}` to take this session on. Nothing has changed yet — somebody there \
+             has to accept, and their answer will arrive in this session's inbox."
+        ),
         _ => format!("In `{who}`'s inbox."),
     }
 }

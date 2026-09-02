@@ -336,6 +336,49 @@ pub fn forget(me: &Identity) {
     let _ = std::fs::remove_file(kin_at(me));
 }
 
+/// Record that `them` now answers to `parent`.
+///
+/// Written by the session that *consented*, never by the one that asked. The note is what every
+/// other session reads to work out the tree, so a session that could write its own would be
+/// appointing its own parent — which is the whole thing the handshake exists to prevent.
+///
+/// It says nothing about what the child may then do. That is handed over separately, by the
+/// parent's harness to the child's, so a forged note buys the forger a word and no authority.
+pub fn adopted(them: &Identity, parent: &str) {
+    let path = kin_at(them);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, parent);
+}
+
+/// Tell whoever asked what was decided.
+///
+/// Sent as an ordinary message, because that is what it is once the decision is made — and it
+/// goes into their inbox where a model will read it. Told either way: a refusal that arrived as
+/// silence is one a session cannot tell from an answer that never came, and it would wait for
+/// good.
+pub fn answer_request(who: &str, me: &Identity, accept: bool) {
+    let Some(them) = Identity::read(who) else {
+        return;
+    };
+    let Ok(mut held) = crate::asking::Held::to(&them, me) else {
+        return;
+    };
+    let said = if accept {
+        format!("`{}` accepted: it is this session's parent now.", me.full())
+    } else {
+        format!("`{}` declined to take this session on.", me.full())
+    };
+    let _ = held.call(
+        "tell",
+        vec![
+            serde_json::Value::String(said),
+            serde_json::Value::String("answer".to_owned()),
+        ],
+    );
+}
+
 /// What is known about a session in `project`, read off the directory.
 ///
 /// Read rather than asked, so a session cannot describe its own place in the tree. The answer is

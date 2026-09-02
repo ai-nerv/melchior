@@ -233,12 +233,7 @@ impl Message {
     /// A message of any sort, stamped now.
     #[must_use]
     pub fn sent(from: &str, text: &str, sort: Sort, about: Option<String>) -> Self {
-        let at = u64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |since| since.as_millis()),
-        )
-        .unwrap_or(0);
+        let at = now_ms();
         Self {
             // The clock plus the sender, which is unique enough for something two processes
             // exchange and short enough for a model to quote back without mistyping it.
@@ -250,6 +245,17 @@ impl Message {
             at,
         }
     }
+}
+
+/// Milliseconds since the epoch, for stamping something two processes exchange.
+#[must_use]
+pub fn now_ms() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis()),
+    )
+    .unwrap_or(0)
 }
 
 /// The shape is the family's, and a refusal is a reply.
@@ -412,5 +418,44 @@ mod client_tests {
         // Without it a session answers `verbs` and refuses everything else, which reads as
         // "that instance is broken" rather than as a client that never introduced itself.
         assert!(crate::CLIENT.contains("from = self.from"));
+    }
+}
+
+/// One session asking another to become its parent.
+///
+/// A *request*, not a message, because it is answered by a person rather than read by a model.
+/// It sits pending until the session it was put to says yes or no, and the answer changes what
+/// the asker is — so it cannot travel as a note somebody might merely have seen.
+///
+/// # Why the asker volunteers
+///
+/// The request runs downhill: a session asks to *become a child*, it never claims to be somebody
+/// else's parent. Consent then sits with the party that gives something up — the prospective
+/// parent, who is being asked to take responsibility for another session and to lend it what it
+/// is allowed to do. A verb that let one session declare itself another's master would put the
+/// decision with whoever spoke first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Request {
+    /// This request, so an answer names one and not merely "the last thing asked".
+    pub id: String,
+    /// Who is asking, as `project/role/id`.
+    pub from: String,
+    /// Why, in their words. The person answering has no other way to know.
+    pub why: String,
+    /// When, in milliseconds since the epoch.
+    pub at: u64,
+}
+
+impl Request {
+    /// One from `from`, made now.
+    #[must_use]
+    pub fn made(from: &str, why: &str) -> Self {
+        let at = now_ms();
+        Self {
+            id: format!("{}-{at:x}", from.replace('/', "-")),
+            from: from.to_owned(),
+            why: why.to_owned(),
+            at,
+        }
     }
 }

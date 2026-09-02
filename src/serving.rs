@@ -33,6 +33,12 @@ pub struct Serving {
     pub about: tokio::sync::watch::Receiver<About>,
     /// Messages that arrived, on their way to the inbox.
     pub arrived: mpsc::Sender<Message>,
+    /// Requests that arrived, on their way to the person at the keyboard.
+    ///
+    /// Separate from `arrived` because the two end differently. A message is read by a model and
+    /// is done; a request waits for an answer that changes what this session is, and only a
+    /// person can give it.
+    pub asked: mpsc::Sender<crate::wire::Request>,
     /// Somebody with the right to stop this instance did.
     pub stopped: mpsc::Sender<()>,
 }
@@ -88,6 +94,7 @@ pub async fn accept(listener: tokio::net::UnixListener, serving: Serving) -> std
         let serving = Serving {
             about: serving.about.clone(),
             arrived: serving.arrived.clone(),
+            asked: serving.asked.clone(),
             stopped: serving.stopped.clone(),
         };
         tokio::spawn(async move {
@@ -139,6 +146,9 @@ async fn talk(stream: tokio::net::UnixStream, serving: Serving) -> std::io::Resu
             Then::Nothing => {}
             Then::Keep(message) => {
                 let _ = serving.arrived.send(message).await;
+            }
+            Then::Ask(request) => {
+                let _ = serving.asked.send(request).await;
             }
             Then::Stop => {
                 let _ = serving.stopped.send(()).await;
@@ -274,6 +284,7 @@ mod tests {
             let _ = serve(
                 &at,
                 Serving {
+                    asked: tokio::sync::mpsc::channel(4).0,
                     about: about_rx,
                     arrived: arrived_tx,
                     stopped: stopped_tx,
@@ -420,6 +431,7 @@ mod tests {
             let _ = serve(
                 &at,
                 Serving {
+                    asked: tokio::sync::mpsc::channel(4).0,
                     about: about_rx,
                     arrived: arrived_tx,
                     stopped: stopped_tx,

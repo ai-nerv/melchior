@@ -160,6 +160,10 @@ const VERBS: &[(&str, &str)] = &[
         "answer a question that was asked of this session, quoting its id",
     ),
     ("announce", "send the same note to every instance listening"),
+    (
+        "adopt",
+        "ask an instance to become this session's parent -- a person there has to accept",
+    ),
     // Asking for something. The difference between these and `send` is what the far end does
     // when it arrives, which is why they are verbs rather than a wording choice.
     (

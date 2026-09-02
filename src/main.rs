@@ -85,6 +85,17 @@ enum Told {
         #[serde(default)]
         waiting: usize,
     },
+    /// What the person said to a request this session was asked to answer.
+    ///
+    /// Comes back up rather than being decided here, because the question was never this
+    /// process's to answer: it asks whether another session may act with this one's authority,
+    /// and only somebody at a keyboard can say.
+    Answered {
+        /// Which request, as [`Heard::Asked`] named it.
+        id: String,
+        /// Whether they said yes.
+        accept: bool,
+    },
 }
 
 /// What we tell the parent, one JSON object per line on stdout.
@@ -128,6 +139,19 @@ enum Heard {
     },
     /// Somebody with the right to stop this session did.
     Stopped,
+    /// Another session is asking to become this one's child, and a person has to answer.
+    ///
+    /// Up the pipe rather than into the inbox, because the answer is not a model's to give: it
+    /// decides whether another session may act with this one's authority. A model accepting on
+    /// its own behalf would be granting itself a second pair of hands.
+    Asked {
+        /// The request, so an answer names one rather than "the last thing asked".
+        id: String,
+        /// Who is asking, as `project/role/id`.
+        who: String,
+        /// Why, in their words. The person answering has no other way to know.
+        why: String,
+    },
 }
 
 /// Bind this session's socket and answer for it until the parent goes away.
@@ -168,6 +192,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
             inbox: Vec::new(),
         });
         let (arrived_tx, mut arrived) = tokio::sync::mpsc::channel(64);
+        let (asked_tx, mut asked) = tokio::sync::mpsc::channel(16);
         let (stopped_tx, mut stopped) = tokio::sync::mpsc::channel(1);
 
         // The note beside the socket, so the tree can be read off the directory: a session that
@@ -196,6 +221,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                 atom::serving::Serving {
                     about: about_rx,
                     arrived: arrived_tx,
+                    asked: asked_tx,
                     stopped: stopped_tx,
                 },
             )
@@ -233,6 +259,10 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         });
 
         let mut inbox: Vec<atom::wire::Message> = Vec::new();
+        // Requests put to this session and not yet answered. Held here rather than in the
+        // serving task because the answer arrives on the *pipe*, from the person, long after the
+        // connection that carried the question has closed.
+        let mut pending: Vec<atom::wire::Request> = Vec::new();
         loop {
             tokio::select! {
                 Some(message) = arrived.recv() => {
@@ -244,6 +274,17 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                     });
                     inbox.push(message);
                     about_tx.send_modify(|about| about.inbox.clone_from(&inbox));
+                }
+                // Held here until the person answers. Kept rather than answered on the spot,
+                // because the socket call that carried it has already been replied to: the
+                // caller was told the question was put, not what the answer was.
+                Some(request) = asked.recv() => {
+                    say(&Heard::Asked {
+                        id: request.id.clone(),
+                        who: request.from.clone(),
+                        why: request.why.clone(),
+                    });
+                    pending.push(request);
                 }
                 // **`None` here is the parent letting go, and it is the whole lifetime rule.**
                 // Matched rather than left to `else`, because a `select!` arm whose pattern
@@ -264,6 +305,24 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                             // falling behind when it is keeping up.
                             about.inbox.truncate(waiting.min(about.inbox.len()));
                         });
+                    }
+                    // What the person said. Taking a session on is written to the directory
+                    // *here*, by the side that consented — the asker writing its own note would
+                    // be a session appointing its own parent, which is the one thing the whole
+                    // handshake exists to prevent.
+                    Some(Told::Answered { id, accept }) => {
+                        let Some(at) = pending.iter().position(|held| held.id == id) else {
+                            continue;
+                        };
+                        let request = pending.remove(at);
+                        if accept && let Some(them) = atom::identity::Identity::read(&request.from)
+                        {
+                            atom::directory::adopted(&them, &me.full());
+                        }
+                        // Told either way, and told by us: the asker has been waiting since its
+                        // call was answered with "the question has been put", and a silence it
+                        // could not tell from a refusal would leave it waiting for good.
+                        atom::directory::answer_request(&request.from, &me, accept);
                     }
                 },
                 Some(()) = stopped.recv() => {
