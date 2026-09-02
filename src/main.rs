@@ -95,6 +95,14 @@ enum Told {
         id: String,
         /// Whether they said yes.
         accept: bool,
+        /// Anything the accepting harness wants the adopted one to have, carried unread.
+        ///
+        /// **Opaque on purpose.** What a harness lends a session it has taken on — permissions,
+        /// in axon's case — is that harness's own idea. A layer that understood it would be a
+        /// second place needing a change every time it changed. This goes in one side and comes
+        /// out the other, and nothing here looks at it.
+        #[serde(default)]
+        handover: Option<String>,
     },
 }
 
@@ -152,6 +160,19 @@ enum Heard {
         /// Why, in their words. The person answering has no other way to know.
         why: String,
     },
+    /// A session this one asked to be taken on by has accepted.
+    ///
+    /// Its own line rather than the message that also arrives, because the two have different
+    /// readers. The message is for the model — somebody said yes, here is who. This is for the
+    /// harness, and carries what the accepting session lent it, which no model should see:
+    /// permissions written into a transcript are permissions a model can read and reason about
+    /// acquiring.
+    Adopted {
+        /// Who took this session on, as `project/role/id`.
+        by: String,
+        /// What they handed over, exactly as they wrote it.
+        handover: Option<String>,
+    },
 }
 
 /// Bind this session's socket and answer for it until the parent goes away.
@@ -193,6 +214,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         });
         let (arrived_tx, mut arrived) = tokio::sync::mpsc::channel(64);
         let (asked_tx, mut asked) = tokio::sync::mpsc::channel(16);
+        let (adopted_tx, mut adopted) = tokio::sync::mpsc::channel(4);
         let (stopped_tx, mut stopped) = tokio::sync::mpsc::channel(1);
 
         // The note beside the socket, so the tree can be read off the directory: a session that
@@ -222,6 +244,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                     about: about_rx,
                     arrived: arrived_tx,
                     asked: asked_tx,
+                    adopted: adopted_tx,
                     stopped: stopped_tx,
                 },
             )
@@ -286,6 +309,12 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                     });
                     pending.push(request);
                 }
+                // Straight up the pipe, never into the inbox. What a parent lends a session it
+                // has taken on is for the harness; a model that could read it in its own
+                // transcript could reason about acquiring more.
+                Some((by, handover)) = adopted.recv() => {
+                    say(&Heard::Adopted { by, handover });
+                }
                 // **`None` here is the parent letting go, and it is the whole lifetime rule.**
                 // Matched rather than left to `else`, because a `select!` arm whose pattern
                 // does not match is *disabled*, not taken: with `Some(..) = told.recv()` the
@@ -310,7 +339,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                     // *here*, by the side that consented — the asker writing its own note would
                     // be a session appointing its own parent, which is the one thing the whole
                     // handshake exists to prevent.
-                    Some(Told::Answered { id, accept }) => {
+                    Some(Told::Answered { id, accept, handover }) => {
                         let Some(at) = pending.iter().position(|held| held.id == id) else {
                             continue;
                         };
@@ -322,7 +351,12 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                         // Told either way, and told by us: the asker has been waiting since its
                         // call was answered with "the question has been put", and a silence it
                         // could not tell from a refusal would leave it waiting for good.
-                        atom::directory::answer_request(&request.from, &me, accept);
+                        atom::directory::answer_request(
+                            &request.from,
+                            &me,
+                            accept,
+                            handover.as_deref(),
+                        );
                     }
                 },
                 Some(()) = stopped.recv() => {

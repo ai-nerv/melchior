@@ -39,6 +39,8 @@ pub struct Serving {
     /// is done; a request waits for an answer that changes what this session is, and only a
     /// person can give it.
     pub asked: mpsc::Sender<crate::wire::Request>,
+    /// What a parent handed over when it took this session on, for the harness.
+    pub adopted: mpsc::Sender<(String, Option<String>)>,
     /// Somebody with the right to stop this instance did.
     pub stopped: mpsc::Sender<()>,
 }
@@ -95,6 +97,7 @@ pub async fn accept(listener: tokio::net::UnixListener, serving: Serving) -> std
             about: serving.about.clone(),
             arrived: serving.arrived.clone(),
             asked: serving.asked.clone(),
+            adopted: serving.adopted.clone(),
             stopped: serving.stopped.clone(),
         };
         tokio::spawn(async move {
@@ -135,8 +138,17 @@ async fn talk(stream: tokio::net::UnixStream, serving: Serving) -> std::io::Resu
             }
             Err(_) => return Ok(()),
         };
-        let about = serving.about.borrow().clone();
-        // Looked up per call rather than once per connection: a session that forks a child
+        let mut about = serving.about.borrow().clone();
+        // Both ends of the relation, read here rather than trusted from startup, and for the same
+        // reason: the directory is the shared truth and this process holds a snapshot of it.
+        //
+        // This session's own parent changes *from outside* — somebody at another session accepts
+        // it as a child and writes the note — and the loop that would notice ticks every couple of
+        // seconds. The call carrying what that parent lends arrives immediately after the note is
+        // written, so a check against the startup copy refused the very handover the acceptance
+        // had just authorised, every single time.
+        about.parent = crate::directory::parent_of(&about.me);
+        // And the caller's, per call rather than per connection: a session that forks a child
         // mid-conversation has a new child, and a connection held open would go on answering
         // with the tree as it stood when it was opened.
         let caller = placed(call.from.as_deref(), &about);
@@ -146,6 +158,9 @@ async fn talk(stream: tokio::net::UnixStream, serving: Serving) -> std::io::Resu
             Then::Nothing => {}
             Then::Keep(message) => {
                 let _ = serving.arrived.send(message).await;
+            }
+            Then::Adopted { by, handover } => {
+                let _ = serving.adopted.send((by, handover)).await;
             }
             Then::Ask(request) => {
                 let _ = serving.asked.send(request).await;
@@ -285,6 +300,7 @@ mod tests {
                 &at,
                 Serving {
                     asked: tokio::sync::mpsc::channel(4).0,
+                    adopted: tokio::sync::mpsc::channel(4).0,
                     about: about_rx,
                     arrived: arrived_tx,
                     stopped: stopped_tx,
@@ -432,6 +448,7 @@ mod tests {
                 &at,
                 Serving {
                     asked: tokio::sync::mpsc::channel(4).0,
+                    adopted: tokio::sync::mpsc::channel(4).0,
                     about: about_rx,
                     arrived: arrived_tx,
                     stopped: stopped_tx,

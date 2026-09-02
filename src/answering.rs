@@ -60,6 +60,17 @@ pub enum Then {
     /// directory and the call; whether one session may direct another is decided by somebody at
     /// a keyboard, and all this layer does is carry the question up and the answer back down.
     Ask(crate::wire::Request),
+    /// A parent has taken this session on, and handed it this.
+    ///
+    /// Carried up to the harness rather than into the inbox: it is for the harness, not the
+    /// model: what a parent lends is not something a model should read, reason about, or ask
+    /// for more of.
+    Adopted {
+        /// Who took it on, as `project/role/id`.
+        by: String,
+        /// What they handed over, unread by anything here.
+        handover: Option<String>,
+    },
     /// End this instance.
     Stop,
 }
@@ -115,7 +126,7 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
         "identity" | "kin" | "status" | "inbox" => Reach::Ask,
         // Reaching as far as a message does, and no further. Asking costs the far end a prompt
         // and nothing else — the weight is all in the answer, which is not this layer's to give.
-        "tell" | "adopt" => Reach::Tell,
+        "tell" | "adopt" | "adopted" => Reach::Tell,
         "stop" => Reach::Stop,
         other => {
             return (
@@ -186,6 +197,30 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
             (
                 Reply::done(),
                 Then::Keep(Message::sent(&from, &text, sort, about_what)),
+            )
+        }
+        // The other half of the handshake, arriving at the session that asked. Believed only
+        // from the session the *directory* says is this one's parent — a caller that merely
+        // claims to have adopted us is a caller handing over authority nobody consented to.
+        //
+        // The check is against the note, which was written by whoever accepted; a session that
+        // never accepted anything has no note naming it and gets nowhere.
+        "adopted" => {
+            if about.parent.as_deref() != Some(caller.id.as_str()) {
+                return (
+                    Reply::refused(format!(
+                        "`{}` is not this session's parent, so it has nothing to hand over",
+                        caller.id
+                    )),
+                    Then::Nothing,
+                );
+            }
+            (
+                Reply::done(),
+                Then::Adopted {
+                    by: text_at(call, 0).unwrap_or_else(|| caller.id.clone()),
+                    handover: text_at(call, 1),
+                },
             )
         }
         // Asked, never granted here. The reply says the question has been put, not that it was
@@ -577,6 +612,84 @@ mod adopting {
     fn a_stranger_that_says_nothing_about_itself_is_not_asked_about() {
         // `None` is a caller that did not name itself. Everything here is about who they are.
         let (reply, then) = answer(&call_from("hello"), &a_main(), None);
+        assert!(!reply.ok);
+        assert_eq!(then, Then::Nothing);
+    }
+}
+
+/// What a parent lends is taken only from a parent.
+#[cfg(test)]
+mod handover {
+    use super::*;
+    use crate::wire::Call;
+
+    fn call_from(who: &str) -> Call {
+        Call {
+            call: "adopted".to_owned(),
+            args: vec![
+                serde_json::Value::String(format!("demo/main/{who}")),
+                serde_json::Value::String("[{\"verb\":\"run\"}]".to_owned()),
+            ],
+            from: Some(format!("demo/main/{who}")),
+            token: None,
+        }
+    }
+
+    fn me(parent: Option<&str>) -> About {
+        About {
+            me: Identity {
+                project: "demo".to_owned(),
+                role: "main".to_owned(),
+                id: "alpha-rho".to_owned(),
+            },
+            parent: parent.map(ToOwned::to_owned),
+            token: None,
+            busy: false,
+            working_for: 0,
+            inbox: Vec::new(),
+        }
+    }
+
+    fn caller(id: &str) -> Whom {
+        Whom {
+            project: "demo".to_owned(),
+            id: id.to_owned(),
+            parent: None,
+        }
+    }
+
+    #[test]
+    fn a_parent_may_hand_over() {
+        let (reply, then) = answer(
+            &call_from("beta-nu"),
+            &me(Some("beta-nu")),
+            Some(&caller("beta-nu")),
+        );
+        assert!(reply.ok, "{reply:?}");
+        let Then::Adopted { handover, .. } = then else {
+            panic!("it must reach the harness: {then:?}");
+        };
+        assert_eq!(handover.as_deref(), Some("[{\"verb\":\"run\"}]"));
+    }
+
+    #[test]
+    fn a_session_that_is_not_the_parent_may_not() {
+        // The one that matters. Anybody who could send this could lend a session permissions
+        // nobody consented to — so it is believed only from the session the *directory* says
+        // took this one on, and that note was written by whoever accepted.
+        let (reply, then) = answer(
+            &call_from("gamma-xi"),
+            &me(Some("beta-nu")),
+            Some(&caller("gamma-xi")),
+        );
+        assert!(!reply.ok, "a stranger handed over permissions");
+        assert_eq!(then, Then::Nothing);
+    }
+
+    #[test]
+    fn a_session_with_no_parent_takes_nothing_from_anybody() {
+        // Nothing accepted it, so there is nobody whose authority this could be.
+        let (reply, then) = answer(&call_from("beta-nu"), &me(None), Some(&caller("beta-nu")));
         assert!(!reply.ok);
         assert_eq!(then, Then::Nothing);
     }

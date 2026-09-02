@@ -384,7 +384,11 @@ pub fn adopted(them: &Identity, parent: &str) {
 /// goes into their inbox where a model will read it. Told either way: a refusal that arrived as
 /// silence is one a session cannot tell from an answer that never came, and it would wait for
 /// good.
-pub fn answer_request(who: &str, me: &Identity, accept: bool) {
+/// `handover` is whatever the accepting harness wants the adopted one to have, carried unread.
+/// It goes by a separate call from the message, because the message ends up in a transcript a
+/// model reads and this must not: what a harness lends a session it has taken on is not something
+/// a model should be able to read, reason about, or ask for more of.
+pub fn answer_request(who: &str, me: &Identity, accept: bool, handover: Option<&str>) {
     let Some(them) = Identity::read(who) else {
         return;
     };
@@ -403,6 +407,19 @@ pub fn answer_request(who: &str, me: &Identity, accept: bool) {
             serde_json::Value::String("answer".to_owned()),
         ],
     );
+    if accept {
+        // Second, and only on a yes. The order matters no more than that both arrive; what
+        // matters is that they are two calls, so the payload never lands in an inbox.
+        let _ = held.call(
+            "adopted",
+            vec![
+                serde_json::Value::String(me.full()),
+                handover.map_or(serde_json::Value::Null, |said| {
+                    serde_json::Value::String(said.to_owned())
+                }),
+            ],
+        );
+    }
 }
 
 /// What is known about a session in `project`, read off the directory.
