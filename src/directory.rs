@@ -66,13 +66,20 @@ pub const ROLE: &str = "ATOM_ROLE";
 /// The last of the three, and the only one the socket is named after.
 pub const ID: &str = "ATOM_ID";
 
+/// How far this session may reach, as [`Talk`](crate::policy::Talk) names it.
+///
+/// A setting rather than a name, and it travels the same way the names do because it has to
+/// reach the same two processes: the one holding the socket and the one a model calls. A harness
+/// that set it on only one of them would have a tool refusing what the socket allows.
+pub const TALK: &str = "ATOM_TALK";
+
 /// What one of those says, if it says anything.
 ///
 /// `ATOM_*` first, then the `AXON_*` name the same variable grew up under. Both, because this
 /// layer was lifted out of one harness and that harness is still setting the old names — and a
 /// variable written under one name and read under another is a session that cannot find itself,
 /// which presents as "nobody is running" rather than as a rename anybody would guess at.
-fn said(name: &str) -> Option<String> {
+pub(crate) fn said(name: &str) -> Option<String> {
     let older = format!("AXON_{}", name.trim_start_matches("ATOM_"));
     std::env::var(name)
         .ok()

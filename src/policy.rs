@@ -77,19 +77,28 @@ impl Talk {
 /// What the config chose, filled once at startup.
 static CHOSEN: OnceLock<Talk> = OnceLock::new();
 
-/// Take the config's answer, before anything asks.
+/// Take an answer from somewhere other than the environment, before anything asks.
 ///
-/// The same `OnceLock` shape the UI settings use, and the same trap: the first *read* fills it
-/// with the default, so this has to run before any call is answered. It does, because the socket
-/// is bound after the config is loaded.
+/// The same `OnceLock` shape a UI's settings use, and the same trap: the first *read* fills it,
+/// so this has to run before any call is answered.
 pub fn adopt(talk: Talk) {
     let _ = CHOSEN.set(talk);
 }
 
 /// How far a session may reach.
+///
+/// From the environment, because the two processes that ask are started separately: the one
+/// holding the socket and the one a model calls. A setting only one of them could see would
+/// leave a tool refusing what the socket allows.
+///
+/// Anything unreadable is the default rather than a guess — a typo must not open a wall.
 #[must_use]
 pub fn talk() -> Talk {
-    *CHOSEN.get_or_init(Talk::default)
+    *CHOSEN.get_or_init(|| {
+        crate::directory::said(crate::directory::TALK)
+            .and_then(|name| Talk::read(&name))
+            .unwrap_or_default()
+    })
 }
 
 /// Who a session is, as far as the tree is concerned.
