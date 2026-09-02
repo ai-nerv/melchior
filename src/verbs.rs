@@ -322,6 +322,16 @@ pub fn answer(arguments: &Value, standing: &Standing) -> Answer {
         "whoami" => Answer::said(saying::whoami(standing)),
         "list" => Answer::said(saying::list(standing)),
         "inbox" => Answer::said(saying::inbox(standing)),
+        // Answered without a `who`, because the message being quoted already says who to answer.
+        // Asking for both would have a model look up something it just handed over, and the two
+        // could disagree — an answer addressed to somebody who never asked.
+        "reply" => match answering(arguments, standing) {
+            Ok(who) => match doing::decide(verb, &who, arguments, standing) {
+                Ok(wanted) => doing::perform(&wanted, standing),
+                Err(refused) => refused,
+            },
+            Err(refused) => refused,
+        },
         _ if ALONE.contains(&verb) => Answer::said(format!(
             "`{verb}` is understood but not yet carried out: the socket call it makes is \
                  not wired into the turn loop."
@@ -337,6 +347,50 @@ pub fn answer(arguments: &Value, standing: &Standing) -> Answer {
             None => Answer::refused(format!("`{verb}` needs `who` — which instance to reach.")),
         },
     }
+}
+
+/// Who a `reply` goes to: whoever sent the message it quotes.
+///
+/// Looked up rather than asked for. A model that has just read its inbox has the id in hand, and
+/// making it also name the sender is an invitation to answer the wrong session — the id is the
+/// authority on who asked, so it is the only thing this takes.
+///
+/// An `about` that names nothing is refused with what the inbox actually holds. It is the likely
+/// mistake: an id invented, or one from a message already acted on, and "no such message" alone
+/// leaves a model with nowhere to go.
+fn answering(arguments: &Value, standing: &Standing) -> Result<String, Answer> {
+    let about = arguments
+        .get("about")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if let Some(message) = standing.inbox.iter().find(|held| held.id == about) {
+        return Ok(message.from.clone());
+    }
+    // Named explicitly, and the id is not one of ours: let it through rather than refuse. A
+    // session may be answering something it was told about out of band, and the wall still has
+    // to be passed before anything is sent.
+    if let Some(who) = arguments
+        .get("who")
+        .and_then(Value::as_str)
+        .filter(|who| !who.is_empty())
+    {
+        return Ok(who.to_owned());
+    }
+    if standing.inbox.is_empty() {
+        return Err(Answer::refused(format!(
+            "nothing has been sent to this session, so there is no `{about}` to answer. \
+             `send` or `ask` reaches an instance that has not written first."
+        )));
+    }
+    let held: Vec<String> = standing
+        .inbox
+        .iter()
+        .map(|message| format!("`{}` from {}", message.id, message.from))
+        .collect();
+    Err(Answer::refused(format!(
+        "`{about}` is not a message in this session's inbox. It holds: {}.",
+        held.join(", ")
+    )))
 }
 
 /// The tool refuses what it should and asks for what it needs.
@@ -628,5 +682,79 @@ mod surface_tests {
         let back: Message = serde_json::from_str(&text).expect("decodes");
         assert_eq!(back.id, message.id);
         assert_eq!(back.sort, Sort::Question);
+    }
+}
+
+/// `reply` finds who to answer from the message it quotes.
+///
+/// The verb the whole thing turns on: a conversation is an `ask` and a `reply`, and while this
+/// was a stub two agents could open a conversation and never continue one. It read as the model
+/// being unwilling — it said "reply is not wired, sending instead" — rather than as a gap here.
+#[cfg(test)]
+mod replying {
+    use super::*;
+    use crate::wire::{Message, Sort};
+
+    fn asked_by(from: &str) -> Standing {
+        Standing {
+            me: "axon/main/alpha-rho".to_owned(),
+            parent: None,
+            forked: Vec::new(),
+            minted: std::collections::BTreeMap::new(),
+            inbox: vec![Message::sent(from, "which parser?", Sort::Question, None)],
+        }
+    }
+
+    #[test]
+    fn it_goes_to_whoever_asked() {
+        let standing = asked_by("axon/main/beta-nu");
+        let about = standing.inbox[0].id.clone();
+        let who = answering(&json!({"verb": "reply", "about": about}), &standing);
+        assert_eq!(who.as_deref().ok(), Some("axon/main/beta-nu"));
+    }
+
+    #[test]
+    fn an_id_that_names_nothing_is_refused_with_what_the_inbox_holds() {
+        // The likely mistake is an invented id or one already acted on, and "no such message"
+        // on its own leaves a model with nowhere to go.
+        let standing = asked_by("axon/main/beta-nu");
+        let Err(refused) = answering(&json!({"verb": "reply", "about": "made-up"}), &standing)
+        else {
+            panic!("an id that names nothing must not resolve to somebody");
+        };
+        assert!(refused.failed);
+        assert!(refused.said.contains("beta-nu"), "{}", refused.said);
+    }
+
+    #[test]
+    fn an_empty_inbox_says_so_rather_than_listing_nothing() {
+        let mut standing = asked_by("axon/main/beta-nu");
+        standing.inbox.clear();
+        let Err(refused) = answering(&json!({"verb": "reply", "about": "m1"}), &standing) else {
+            panic!("refused");
+        };
+        assert!(refused.said.contains("send") || refused.said.contains("ask"));
+    }
+
+    #[test]
+    fn a_named_recipient_still_wins_when_the_id_is_not_ours() {
+        // A session may be answering something it was told about out of band. The wall is still
+        // between it and the far end, so letting this through refuses nothing that matters.
+        let standing = asked_by("axon/main/beta-nu");
+        let who = answering(
+            &json!({"verb": "reply", "about": "elsewhere", "who": "gamma-xi"}),
+            &standing,
+        );
+        assert_eq!(who.as_deref().ok(), Some("gamma-xi"));
+    }
+
+    #[test]
+    fn reply_without_an_about_is_still_refused_before_anything_is_looked_up() {
+        let out = answer(
+            &json!({"verb": "reply", "message": "yes"}),
+            &asked_by("x/y/z"),
+        );
+        assert!(out.failed);
+        assert!(out.said.contains("about"), "{}", out.said);
     }
 }

@@ -14,23 +14,33 @@ struct Serving {
     runtime: std::path::PathBuf,
     /// Where it said it was listening, rather than where a test guessed it would be.
     at: std::path::PathBuf,
+    /// What it said it is called, for addressing it and for checking who a message came from.
+    named: String,
 }
 
 impl Serving {
-    /// Start one, and wait until it says it is listening.
+    /// Start one alone in its own runtime directory.
     fn start(name: &str) -> Self {
         // Short, because a unix socket path is capped at about a hundred bytes and a temp
         // directory under a long prefix silently exhausts it.
         let runtime =
             std::path::PathBuf::from(format!("/tmp/atom-t-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&runtime);
-        std::fs::create_dir_all(&runtime).expect("mkdir");
+        Self::beside(&runtime, "alpha-rho")
+    }
 
+    /// Start one in a runtime directory somebody else may already be in.
+    ///
+    /// What a conversation needs: two sessions that can see each other. `start` gives each its
+    /// own directory — the project wall doing its job — which means two of them are, by
+    /// construction, unable to say anything to one another.
+    fn beside(runtime: &std::path::Path, id: &str) -> Self {
+        std::fs::create_dir_all(runtime).expect("mkdir");
         let mut child = Command::new(env!("CARGO_BIN_EXE_atom"))
             .arg("serve")
             .env("ATOM_PROJECT", "demo")
-            .env("ATOM_ID", "alpha-rho")
-            .env("XDG_RUNTIME_DIR", &runtime)
+            .env("ATOM_ID", id)
+            .env("XDG_RUNTIME_DIR", runtime)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -43,12 +53,24 @@ impl Serving {
         let said: serde_json::Value = serde_json::from_str(&first).expect("one JSON object");
         assert_eq!(said["heard"], "listening", "{first}");
         let at = std::path::PathBuf::from(said["at"].as_str().expect("it says where"));
+        let named = said["as"].as_str().expect("it says who").to_owned();
         Self {
             child,
             out,
-            runtime,
+            runtime: runtime.to_path_buf(),
             at,
+            named,
         }
+    }
+
+    /// What it calls itself, as `project/role/id`.
+    fn named(&self) -> String {
+        self.named.clone()
+    }
+
+    /// The runtime directory it listens in, for putting a second session beside it.
+    fn runtime(&self) -> std::path::PathBuf {
+        self.runtime.clone()
     }
 
     /// Where it said it is listening.
@@ -187,4 +209,106 @@ fn a_line_it_cannot_read_does_not_stop_it_answering() {
     let status = serving.asked(r#"{"call":"status","from":"demo/main/socat"}"#);
     assert_eq!(status["result"][0]["busy"], true, "{status}");
     assert!(serving.let_go());
+}
+
+/// Two sessions holding a conversation: `ask`, then `reply`, through the tool a model calls.
+///
+/// The verb the whole thing turns on. `reply` was a stub for as long as the layer existed, so
+/// two agents could open a conversation and never continue one — and the way it presented was
+/// the model saying "reply is not wired, sending instead" and falling back to a note, which
+/// wakes nobody. One exchange, then silence, and nothing in the harness to point at.
+#[test]
+fn an_ask_and_a_reply_are_a_conversation() {
+    let mut asker = Serving::start("asker");
+    let answerer = Serving::beside(&asker.runtime(), "beta-nu");
+    let (me, them) = (asker.named(), answerer.named());
+    let runtime = asker.runtime();
+
+    let asked = tool(
+        &runtime,
+        &me,
+        &[
+            "--verb=ask",
+            &format!("--who={}", id_of(&them)),
+            "--message=which file?",
+        ],
+    );
+    assert!(asked.status.success(), "{}", stderr(&asked));
+
+    // The id is the authority on who asked, so the answerer reads it back out of its own inbox
+    // rather than being told: an id it invented would answer somebody who never asked.
+    let listed = stdout(&tool(&runtime, &them, &["--verb=inbox"]));
+    assert!(listed.contains("[question]"), "{listed}");
+    let about = listed
+        .split("about: \"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("the inbox names the id to quote")
+        .to_owned();
+
+    // No `who`: it goes to whoever asked, worked out from the message being quoted.
+    let replied = tool(
+        &runtime,
+        &them,
+        &[
+            "--verb=reply",
+            &format!("--about={about}"),
+            "--message=command.rs",
+        ],
+    );
+    assert!(replied.status.success(), "{}", stderr(&replied));
+
+    let heard = asker.heard("message");
+    assert_eq!(heard["who"], them);
+    assert_eq!(heard["text"], "command.rs");
+    assert_eq!(
+        heard["sort"], "answer",
+        "a reply that travelled as a note would reach the asker's transcript and never be read"
+    );
+    assert_eq!(heard["about"], about, "it must quote what it answers");
+}
+
+#[test]
+fn an_id_that_names_nothing_is_refused_rather_than_sent_to_somebody() {
+    // The failure worth guarding: an invented id resolving to whoever happens to be first in
+    // the inbox would put an answer in front of a session that never asked.
+    let answerer = Serving::start("stray");
+    let refused = tool(
+        &answerer.runtime(),
+        &answerer.named(),
+        &["--verb=reply", "--about=made-up", "--message=x"],
+    );
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("nothing has been sent"),
+        "{}",
+        stderr(&refused)
+    );
+}
+
+/// One `atom tool` call, as the session `named`, in the directory it is listening in.
+fn tool(runtime: &std::path::Path, named: &str, args: &[&str]) -> std::process::Output {
+    let mut parts = named.split('/');
+    Command::new(env!("CARGO_BIN_EXE_atom"))
+        .arg("tool")
+        .args(args)
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env("ATOM_PROJECT", parts.next().unwrap_or_default())
+        .env("ATOM_ROLE", parts.next().unwrap_or_default())
+        .env("ATOM_ID", parts.next().unwrap_or_default())
+        .output()
+        .expect("atom tool runs")
+}
+
+fn stdout(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn stderr(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// The last segment, which is what a sibling is addressed by inside one project.
+fn id_of(named: &str) -> &str {
+    named.rsplit('/').next().unwrap_or_default()
 }
