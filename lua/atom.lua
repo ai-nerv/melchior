@@ -1,35 +1,35 @@
--- The agent layer's client library: what another program requires to talk to a running axon.
+-- atom's client library: what another program requires to talk to a running session.
 -- Plain Lua, so siblings copy it rather than port it. The transport arrives as the chunk's
--- argument; inside axon that is `axon.stream`, found automatically when nothing is passed.
+-- argument; inside a host that is its own stream primitive, found automatically when nothing is passed.
 --
---   local agent = load(src)(my_transport)
---   local them  = agent.connect("beta-nu")
+--   local atom = load(src)(my_transport)
+--   local them = atom.connect("beta-nu")
 --   print(them.status())
 --
--- What is on the other end is one *session* — one axon, one conversation, one name. There is no
+-- What is on the other end is one *session* — one agent, one conversation, one name. There is no
 -- server for the layer as a whole: every session binds its own socket and answers for itself, so
--- "connect to the agent layer" is always "connect to somebody".
+-- "connect to atom" is always "connect to somebody".
 --
---   $XDG_RUNTIME_DIR/axon/<project>/<id>          the socket a session listens on
---   $XDG_RUNTIME_DIR/axon/<project>/<id>.parent   who started it, when somebody did
+--   $XDG_RUNTIME_DIR/atom/<project>/<id>          the socket a session listens on
+--   $XDG_RUNTIME_DIR/atom/<project>/<id>.parent   who started it, when somebody did
 --
 -- A name is `project/role/id`, and the role is what a session says it is *for* — it never
 -- decides which socket is meant. The id does. So `review/iota-mu` and `scratch/iota-mu` are the
--- same session described two ways, and `agent.connect` reaches it by the last part either way.
+-- same session described two ways, and `atom.connect` reaches it by the last part either way.
 
 local transport = ...
 
--- Where the socket primitive comes from when the caller did not say. Inside axon the whole
+-- Where the socket primitive comes from when the caller did not say. Inside a host the whole
 -- library is already there; elsewhere a host that named its own `__stream` is honoured too.
 if not transport then
-  transport = (_G.axon and _G.axon.stream) or _G.__stream
+  transport = (_G.atom and _G.atom.stream) or (_G.axon and _G.axon.stream) or _G.__stream
 end
 
-local M = { _NAME = "agent", _VERSION = 1 }
+local M = { _NAME = "atom", _VERSION = 1 }
 
 -- Every global this family answers to. The file is copied between siblings, so a lookup that knew
 -- only its own name would fail on exactly the hosts it is meant to run in.
-local FAMILY = { "axon", "aeon", "oslo", "hexe" }
+local FAMILY = { "atom", "axon", "aeon", "oslo", "hexe" }
 
 -- ---------------------------------------------------------------- JSON, in Lua
 
@@ -285,8 +285,8 @@ end
 --- The runtime directory sessions live under.
 local function runtime()
   local dir = os.getenv("XDG_RUNTIME_DIR")
-  if dir and dir ~= "" then return dir .. "/axon" end
-  return "/tmp/axon-" .. (os.getenv("UID") or "0")
+  if dir and dir ~= "" then return dir .. "/atom" end
+  return "/tmp/atom-" .. (os.getenv("UID") or "0")
 end
 
 --- Who this process belongs to, if it belongs to a session at all.
@@ -295,9 +295,10 @@ end
 --- starts. It is the one thing a separate process cannot work out for itself: names are made
 --- when a session starts, and nothing on disk says which of several a given process came from.
 function M.me()
-  local project, id = os.getenv("AXON_PROJECT"), os.getenv("AXON_ID")
+  local project = os.getenv("ATOM_PROJECT") or os.getenv("AXON_PROJECT")
+  local id = os.getenv("ATOM_ID") or os.getenv("AXON_ID")
   if not project or project == "" or not id or id == "" then return nil end
-  local role = os.getenv("AXON_ROLE")
+  local role = os.getenv("ATOM_ROLE") or os.getenv("AXON_ROLE")
   if not role or role == "" then role = "main" end
   return { project = project, role = role, id = id, full = project .. "/" .. role .. "/" .. id }
 end
@@ -337,7 +338,7 @@ end
 --- sit beside the sockets are told apart by the dot they contain.
 function M.instances(project)
   project = project or (M.me() or {}).project
-  if not project then return nil, "no project: pass one, or set AXON_PROJECT" end
+  if not project then return nil, "no project: pass one, or set ATOM_PROJECT" end
   local out = {}
   for _, name in ipairs(entries(runtime() .. "/" .. project)) do
     if not name:find("%.") and name ~= "" then out[#out + 1] = name end
@@ -372,7 +373,7 @@ end
 
 --- Open a connection to a running session.
 ---
---- `where` is a name — `"iota-mu"`, `"review/iota-mu"`, `"axon/review/iota-mu"` — or a table
+--- `where` is a name — `"iota-mu"`, `"review/iota-mu"`, `"myproject/review/iota-mu"` — or a table
 --- with a `path`. Nothing means this process's own session, which is how a peer asks itself
 --- what has arrived.
 ---
@@ -380,7 +381,7 @@ end
 --- dies on its *second* call with a broken pipe, so this hands back something with a `close`.
 function M.connect(where)
   if not transport then
-    return nil, "no transport: pass one to the chunk, as load(src)(axon.stream)"
+    return nil, "no transport: pass one to the chunk, as load(src)(host.stream)"
   end
   local mine = M.me()
   local path, named
@@ -389,7 +390,7 @@ function M.connect(where)
   else
     local project, id
     if where == nil then
-      if not mine then return nil, "no session: name one, or set AXON_PROJECT and AXON_ID" end
+      if not mine then return nil, "no session: name one, or set ATOM_PROJECT and ATOM_ID" end
       project, id = mine.project, mine.id
     else
       project, id = read(where, mine)
@@ -413,7 +414,7 @@ function M.connect(where)
     -- which presents as "that instance does not work" rather than as a client that never
     -- introduced itself.
     from = mine and mine.full or nil,
-    token = os.getenv("AXON_TOKEN"),
+    token = os.getenv("ATOM_TOKEN") or os.getenv("AXON_TOKEN"),
   }, Session))
 end
 
@@ -445,7 +446,7 @@ end
 
 --- This file's own source, as the session it is talking to has it.
 ---
---- `agent lua-api` prints it, which is enough for a host that can shell out and useless to one
+--- `atom lua-api` prints it, which is enough for a host that can shell out and useless to one
 --- that cannot: a sandboxed VM with no `io.popen` has no way to run it. So a session hands the
 --- library out over the wire too, and a sibling that speaks the framing can fetch the right
 --- vocabulary using the wrong one, in code, with nothing written to disk.

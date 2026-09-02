@@ -120,6 +120,35 @@ fn name() -> String {
     from_seed(seed)
 }
 
+/// A name nothing in `project` is already listening under.
+///
+/// **Naming belongs here, not to a harness.** A harness that named itself would be choosing out
+/// of a namespace it cannot see: two started in the same second draw the same clock, and the
+/// collision surfaces only as one of them failing to bind — by which point it has already told
+/// somebody what it is called. Atom is what holds the directory, so it is what can look first.
+///
+/// Still a guess, deliberately. The look and the bind are not one act, so two callers a
+/// microsecond apart can still agree on a name; what this removes is the *likely* collision,
+/// and the bind settles the rest.
+#[must_use]
+pub fn free_in(project: &str) -> Identity {
+    let taken = crate::directory::listening(project);
+    let from = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos() as usize);
+    // Every pair, walking on from wherever the clock landed, so a busy project moves through the
+    // space rather than retrying the same handful of names.
+    let picked = (0..GREEK.len() * (GREEK.len() - 1))
+        .map(|step| from_seed(from.wrapping_add(step)))
+        .find(|name| !taken.contains(name))
+        .unwrap_or_else(|| from_seed(from));
+    Identity {
+        project: project.to_owned(),
+        role: ROLE.to_owned(),
+        id: picked,
+    }
+}
+
 /// The name a seed picks, so the shape can be tested without waiting for a clock.
 ///
 /// Always a pair — `delta-rho`, never `delta`. One word looks like a placeholder and reads as

@@ -33,8 +33,13 @@ use std::io::{BufRead, Write};
 fn main() -> std::io::Result<()> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
-        Some("serve") => serve(args.collect()),
+        Some("serve") => serve(&flags(args)),
         Some("tool") => tool::run(),
+        Some("brief") => {
+            let asked = flags(args);
+            brief(asked.get("project").map(String::as_str), &asked);
+            Ok(())
+        }
         Some("lua-api") => {
             print!("{}", atom::CLIENT);
             Ok(())
@@ -47,14 +52,15 @@ fn main() -> std::io::Result<()> {
         }
         Some(other) => {
             eprintln!("atom: no such command: {other}");
-            eprintln!("usage: atom serve | tool | lua-api | verbs");
+            eprintln!("usage: atom serve | tool | brief | lua-api | verbs");
             std::process::exit(2);
         }
         None => {
-            eprintln!("usage: atom serve | tool | lua-api | verbs");
+            eprintln!("usage: atom serve | tool | brief | lua-api | verbs");
             eprintln!();
             eprintln!("  serve     bind this session's socket and answer for it");
-            eprintln!("  tool      the tool a model calls, over the harness's pipe protocol");
+            eprintln!("  tool      the vocabulary a model calls, one exec per request");
+            eprintln!("  brief     what to tell a model about the sessions a prompt named");
             eprintln!("  lua-api   print the Lua client library");
             eprintln!("  verbs     what a session answers");
             std::process::exit(2);
@@ -89,6 +95,12 @@ enum Heard {
     Listening {
         /// Where, so a parent can say so and a test can find it.
         at: String,
+        /// And as whom, since the name may have been chosen here rather than handed down.
+        ///
+        /// A parent that passed only `--project` has no other way to learn it, and it needs to:
+        /// the name goes on its own screen and into what it signs.
+        #[serde(rename = "as")]
+        named: String,
     },
     /// A message arrived for this session.
     Message {
@@ -110,15 +122,24 @@ enum Heard {
 /// Everything it needs to *be* somebody comes from the environment, the same way it did when
 /// this ran inside a harness: `ATOM_PROJECT`, `ATOM_ROLE`, `ATOM_ID`, and the `AXON_*` names
 /// they replaced. That is the one thing a separate process cannot work out for itself.
-fn serve(_args: Vec<String>) -> std::io::Result<()> {
-    let Some(me) = atom::directory::mine() else {
-        eprintln!(
-            "atom serve: no session to be. Set {} and {} — they say which session this is \
-             answering for, and nothing on disk can be asked instead.",
-            atom::directory::PROJECT,
-            atom::directory::ID
-        );
-        std::process::exit(2);
+fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
+    // Named here when the caller only says which project it is in, and that is the useful way
+    // round: a harness choosing its own name is choosing out of a namespace it cannot see, and
+    // the collision would surface as a failed bind after it had told everyone what it was
+    // called. Whoever holds the directory should be the one that looks first.
+    let me = match (atom::directory::mine(), asked.get("project")) {
+        (Some(me), _) => me,
+        (None, Some(project)) => atom::identity::free_in(project),
+        (None, None) => {
+            eprintln!(
+                "atom serve: no session to be. Pass --project, or set {} and {} — one of them \
+                 has to say which session this is answering for, and nothing on disk can be \
+                 asked instead.",
+                atom::directory::PROJECT,
+                atom::directory::ID
+            );
+            std::process::exit(2);
+        }
     };
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -154,6 +175,7 @@ fn serve(_args: Vec<String>) -> std::io::Result<()> {
         };
         say(&Heard::Listening {
             at: at.display().to_string(),
+            named: me.full(),
         });
         tokio::spawn(async move {
             let _ = atom::serving::accept(
@@ -256,4 +278,60 @@ fn say(heard: &Heard) {
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "{line}");
     let _ = out.flush();
+}
+
+/// `--name value` pairs, as a caller wrote them.
+///
+/// Repeats accumulate under one key, separated by newlines, because `--name a --name b` is how
+/// a shell says "these several" and dropping all but the last would silently brief on one.
+fn flags(args: impl Iterator<Item = String>) -> std::collections::BTreeMap<String, String> {
+    let mut out: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut args = args.peekable();
+    while let Some(flag) = args.next() {
+        let Some(key) = flag.strip_prefix("--") else {
+            continue;
+        };
+        let (key, value) = match key.split_once('=') {
+            Some((key, value)) => (key.to_owned(), value.to_owned()),
+            None => (key.to_owned(), args.next().unwrap_or_default()),
+        };
+        if value.is_empty() {
+            continue;
+        }
+        out.entry(key)
+            .and_modify(|held| {
+                held.push('\n');
+                held.push_str(&value);
+            })
+            .or_insert(value);
+    }
+    out
+}
+
+/// What a harness should put in front of a model about the sessions a prompt named.
+///
+/// Printed rather than returned, because the caller is a program that runs this and reads what
+/// it said. It is the one piece of the surface that is *about* a prompt, and it still does not
+/// read one: scanning for a name means knowing what a prompt, a cursor and a sigil table are,
+/// and none of those are atom's. It is handed the names.
+fn brief(project: Option<&str>, asked: &std::collections::BTreeMap<String, String>) {
+    let named: Vec<String> = asked
+        .get("name")
+        .map(|names| names.lines().map(ToOwned::to_owned).collect())
+        .unwrap_or_default();
+    if named.is_empty() {
+        return;
+    }
+    let me = atom::directory::mine().or_else(|| project.map(atom::identity::free_in));
+    let standing = me.map(|me| atom::verbs::Standing {
+        inbox: atom::directory::inbox_of(&me),
+        forked: atom::directory::children(&me),
+        parent: atom::directory::parent(),
+        minted: std::collections::BTreeMap::new(),
+        me: me.full(),
+    });
+    print!(
+        "{}",
+        atom::briefing::about(&named, &standing.unwrap_or_default())
+    );
 }

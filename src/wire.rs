@@ -403,7 +403,7 @@ mod client_tests {
         // `include_str!` of the wrong path, or a file that got truncated, both present as a
         // client that will not load — in the sibling, not here.
         assert!(crate::CLIENT.len() > 4_000, "that is not the whole file");
-        assert!(crate::CLIENT.contains("local M = { _NAME = \"agent\""));
+        assert!(crate::CLIENT.contains("local M = { _NAME = \"atom\""));
         assert!(crate::CLIENT.trim_end().ends_with("return M"));
     }
 
