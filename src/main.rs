@@ -286,6 +286,9 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         }
         atom::directory::forget(&me);
         let _ = std::fs::remove_file(&at);
+        // And the directory itself, if this was the last session in the project. It refuses
+        // while anybody else is still there, so whoever leaves last does it.
+        atom::directory::leave(&me.project);
         Ok(())
     })
 }

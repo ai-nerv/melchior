@@ -371,9 +371,51 @@ pub fn listening(project: &str) -> Vec<String> {
         // The `.parent` notes sit beside the sockets. An id is two Greek words and a dash, so
         // anything with a dot in it is not one.
         .filter(|name| !name.contains('.') && !name.is_empty())
+        .filter(|id| {
+            // Dialled, not merely found. This is what the paragraph above promises and what the
+            // code did not do: a name was listed because a file was there, so every session that
+            // crashed — and every one from a build that named its socket differently — stayed in
+            // the roster for good. A model was then offered names nobody answered, and found out
+            // one failed send at a time.
+            if answers(&socket(project, id)) {
+                return true;
+            }
+            forget_id(project, id);
+            false
+        })
         .collect();
     out.sort();
     out
+}
+
+/// Whether anything is serving at `path`.
+///
+/// Connecting is the whole test, and the only one that cannot be raced: a path is not a session,
+/// and the file outlives the process that made it. A listener answers from the moment it is
+/// bound — the kernel queues the connection whether or not anybody has called accept — so this
+/// is never a false negative against a session that is merely busy.
+#[must_use]
+pub fn answers(path: &Path) -> bool {
+    std::os::unix::net::UnixStream::connect(path).is_ok()
+}
+
+/// Take a dead session out of the directory: its socket, and the note beside it.
+///
+/// Swept where the roster is read, because the sessions needing a sweep are exactly the ones
+/// that never got to run their own exit path. Anything already gone is not an error — two
+/// sessions may notice the same corpse at once.
+fn forget_id(project: &str, id: &str) {
+    let _ = std::fs::remove_file(socket(project, id));
+    let _ = std::fs::remove_file(home(project).join(format!("{}.parent", safe(id))));
+}
+
+/// Last one out turns off the lights: drop the project's directory if nothing is left in it.
+///
+/// `remove_dir` refuses a directory that still holds something, which is exactly the test — no
+/// listing, and no race against a session binding as this one leaves. Without it a machine
+/// collects an empty directory per project, which is how the runtime directory filled up.
+pub fn leave(project: &str) {
+    let _ = std::fs::remove_dir(home(project));
 }
 
 /// Everyone `me` may actually reach, with how they stand to it.

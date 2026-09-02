@@ -312,3 +312,42 @@ fn stderr(out: &std::process::Output) -> String {
 fn id_of(named: &str) -> &str {
     named.rsplit('/').next().unwrap_or_default()
 }
+
+#[test]
+fn a_session_that_is_gone_leaves_the_roster_and_the_directory() {
+    // The leftovers. `listening` promised in its own doc comment that a socket nothing answers
+    // is discovered rather than trusted, and then listed filenames — so every session that
+    // crashed, and every one from a build that named its socket differently, stayed in the
+    // roster for good. A model was offered names nobody answered and found out one failed send
+    // at a time.
+    let alive = Serving::start("sweep");
+    let runtime = alive.runtime();
+    let project = runtime.join("atom").join("demo");
+
+    // A corpse of each kind: a plain file where a socket would be, and the note beside it.
+    std::fs::write(project.join("zeta-mu"), b"").expect("a dead socket");
+    std::fs::write(project.join("zeta-mu.parent"), b"demo/main/alpha-rho").expect("its note");
+
+    let gone = Serving::beside(&runtime, "iota-phi");
+    let seen = stdout(&tool(&runtime, &gone.named(), &["--verb=list"]));
+    assert!(
+        seen.contains("alpha-rho"),
+        "the live one is missing: {seen}"
+    );
+    assert!(
+        !seen.contains("zeta-mu"),
+        "a session nothing answers is still being offered: {seen}"
+    );
+    assert!(
+        !project.join("zeta-mu").exists() && !project.join("zeta-mu.parent").exists(),
+        "the corpse was listed out but not swept"
+    );
+
+    // And when the last of them goes, so does the directory.
+    drop(gone);
+    assert!(alive.let_go());
+    assert!(
+        !project.exists(),
+        "the project directory outlived every session in it"
+    );
+}
