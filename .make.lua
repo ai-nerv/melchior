@@ -81,16 +81,6 @@ local function report(path)
   print("")
 end
 
--- The same, for artifacts whose exact path the build system decides. Walked with find rather than
--- globbed: oslo's `**` matches a single directory level, and build trees nest deeper than that.
-local function report_found(root, pattern)
-  local found = oslo.run{ "find", root, "-type", "f", "-name", pattern, capture = true }
-  for path in (found.out or ""):gmatch("[^\n]+") do
-    report(path)
-    return
-  end
-end
-
 
 make.recipe{ name = "version", desc = "what this checkout calls itself",
              run = function() print(("%s v%s"):format(NAME, VERSION)) end }
@@ -122,20 +112,38 @@ make.recipe{
 
 ---------------------------------------------------------------------------- rust
 
-local EXAMPLE = os.getenv("EXAMPLE") or "main"
-
-make.recipe{ name = "build", desc = "the library",
+make.recipe{ name = "build", desc = "the binary",
              run = function()
-               sh.cargo("build", "--lib")
-               report_found("target", "*.rlib")
+               sh.cargo("build", "--release")
+               report("target/release/" .. NAME)
              end }
 make.alias("b", "build")
 
 make.recipe{
+  name = "install",
+  desc = ("install the binary to %s/bin"):format(PREFIX),
+  -- The binary and nothing else. atom has no configuration of its own: what it needs in order
+  -- to be somebody arrives in the environment from whatever started it, and the Lua client is
+  -- printed by `atom lua-api` for a sibling to redirect wherever it keeps such things.
+  deps = { "build" },
+  run = function()
+    local bin = PREFIX .. "/bin"
+    assert(oslo.run{ "mkdir", "-p", bin }.ok, "could not create " .. bin)
+    assert(oslo.run{ "install", "-m", "755", "target/release/" .. NAME, bin .. "/" .. NAME }.ok,
+           "could not install to " .. bin)
+    print(("installed %s"):format(bin .. "/" .. NAME))
+  end,
+}
+
+make.recipe{
   name = "run",
-  desc = "run a development example: --example NAME",
-  params = { { "--example", desc = "which example to run", default = EXAMPLE } },
-  run = function(a) sh.cargo("run", "--example", a.example or EXAMPLE) end,
+  desc = "run it: --args \"serve --project axon\"",
+  params = { { "--args", desc = "what to pass it", default = "verbs" } },
+  run = function(a)
+    local out = { "run", "--" }
+    for word in tostring(a.args or "verbs"):gmatch("%S+") do out[#out + 1] = word end
+    sh.cargo(table.unpack(out))
+  end,
 }
 make.alias("r", "run")
 
