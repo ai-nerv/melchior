@@ -68,7 +68,7 @@ fn brief(address: &Address, app: &Standing) -> String {
     // session and then refused when it tries has been lied to by the harness.
     let relation = app.stands(&whole);
     let mut said = format!(
-        "`{}` is another axon, addressed as `{}`. It is {}.",
+        "`{}` is another magi, addressed as `{}`. It is {}.",
         whole.full(),
         address.written(),
         relation.named()
@@ -111,7 +111,7 @@ mod tests {
     /// What the harness would have found in a prompt.
     ///
     /// Scanning is not this crate's job -- a prompt, a cursor and a sigil table are all the
-    /// harness's -- so the real one is `axon_tui::trigger`. This is the same answer, badly, for
+    /// harness's -- so the real one is `magi_tui::trigger`. This is the same answer, badly, for
     /// tests that want to say what they mean.
     fn named(text: &str) -> Vec<String> {
         text.split_whitespace()
@@ -122,7 +122,7 @@ mod tests {
 
     fn app() -> Standing {
         Standing {
-            me: "axon/main/alpha-rho".to_owned(),
+            me: "magi/main/alpha-rho".to_owned(),
             ..Standing::default()
         }
     }
@@ -147,7 +147,7 @@ mod tests {
         // spliced onto the end, it put a page of facts into the transcript under their name.
         let said = about(&named("tell $beta-nu to stop"), &app());
         assert!(!said.contains("tell $beta-nu to stop"), "{said}");
-        assert!(said.contains("axon/main/beta-nu"), "{said}");
+        assert!(said.contains("magi/main/beta-nu"), "{said}");
     }
 
     #[test]
@@ -183,7 +183,7 @@ mod tests {
         // as though it were the last.
         let mut app = app();
         for text in ["first", "second", "third"] {
-            app.inbox.push(Message::new("axon/main/beta-nu", text));
+            app.inbox.push(Message::new("magi/main/beta-nu", text));
         }
         let said = about(&named("what did $beta-nu want"), &app);
         let first = said.find("first").expect("the first is there");
@@ -195,9 +195,9 @@ mod tests {
     fn only_that_instance_s_messages_are_repeated() {
         let mut app = app();
         app.inbox
-            .push(Message::new("axon/main/beta-nu", "from beta"));
+            .push(Message::new("magi/main/beta-nu", "from beta"));
         app.inbox
-            .push(Message::new("axon/main/gamma-xi", "from gamma"));
+            .push(Message::new("magi/main/gamma-xi", "from gamma"));
         let said = about(&named("what did $beta-nu want"), &app);
         assert!(said.contains("from beta"), "{said}");
         assert!(!said.contains("from gamma"), "it leaked another's: {said}");
@@ -209,7 +209,7 @@ mod tests {
         let mut app = app();
         for at in 0..50 {
             app.inbox
-                .push(Message::new("axon/main/beta-nu", &format!("message {at}")));
+                .push(Message::new("magi/main/beta-nu", &format!("message {at}")));
         }
         let said = about(&named("what did $beta-nu want"), &app);
         assert!(!said.contains("message 0"), "it pasted the whole exchange");

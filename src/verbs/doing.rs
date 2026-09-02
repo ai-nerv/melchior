@@ -229,7 +229,7 @@ mod tests {
 
     fn standing() -> Standing {
         Standing {
-            me: "axon/main/alpha-rho".to_owned(),
+            me: "magi/main/alpha-rho".to_owned(),
             parent: None,
             forked: Vec::new(),
             minted: std::collections::BTreeMap::new(),
@@ -248,7 +248,7 @@ mod tests {
             &standing(),
         )
         .expect("a call worth making");
-        assert_eq!(wanted.who.full(), "axon/main/beta-nu");
+        assert_eq!(wanted.who.full(), "magi/main/beta-nu");
         assert_eq!(wanted.sort, Sort::Note);
     }
 

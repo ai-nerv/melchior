@@ -1,18 +1,18 @@
 //! The family's framing: four bytes of length, then JSON.
 //!
-//! Not `axon_ipc`, which is what the UI and the daemon speak to each other. That is CBOR
+//! Not `magi_ipc`, which is what the UI and the daemon speak to each other. That is CBOR
 //! inside an `Envelope` carrying a protocol version, and it is right for two halves of one
 //! program that ship together — a peer from another build should be turned away at the
 //! boundary rather than after its fields have been read.
 //!
-//! This socket is the opposite case. Anything may knock on it: another axon, a sibling tool,
+//! This socket is the opposite case. Anything may knock on it: another magi, a sibling tool,
 //! somebody with `socat` working out why a message never arrived. So it speaks what the family
 //! agreed and what [`crate::wire`] documents — a big-endian `u32`, then a JSON body, and
 //! nothing wrapped around it.
 //!
-//! **This was the bug this file exists to fix.** The socket was framed with `axon_ipc` and
+//! **This was the bug this file exists to fix.** The socket was framed with `magi_ipc` and
 //! documented as JSON, which is the failure the family's own guidance names first: it works
-//! perfectly when axon talks to axon, and no sibling can say a word to it. Nothing inside the
+//! perfectly when magi talks to magi, and no sibling can say a word to it. Nothing inside the
 //! tool that owns it can see that — every test passes, both ends agree — and it presents much
 //! later as "that peer never answers".
 //!
@@ -130,7 +130,7 @@ mod tests {
         let sent = Call {
             call: "tell".to_owned(),
             args: vec![serde_json::json!("hello")],
-            from: Some("axon/main/alpha-rho".to_owned()),
+            from: Some("magi/main/alpha-rho".to_owned()),
             token: None,
         };
         let mut wire = Vec::new();

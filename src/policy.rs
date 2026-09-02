@@ -4,7 +4,7 @@
 //!
 //! **The project wall.** A session can see and reach only what is inside its own project's
 //! runtime directory. Not "should not" — cannot: the directory it lists and the directory it
-//! dials are the one it belongs to, so an axon in `~/work/other` is not refused, it is not
+//! dials are the one it belongs to, so an magi in `~/work/other` is not refused, it is not
 //! there. Nothing in this file can turn that off, which is the point of putting it in the
 //! filesystem rather than in a check.
 //!
@@ -27,7 +27,7 @@
 //! governs it — a subagent that cannot report back to its parent cannot raise `attention` or
 //! `trouble`, which is most of why it can speak at all.
 //!
-//! | `axon.agent_talk` | and also |
+//! | `magi.agent_talk` | and also |
 //! |---|---|
 //! | `"mains"` *(default)* | — |
 //! | `"instance"` | siblings: two subagents of the same parent |
@@ -246,7 +246,7 @@ pub fn refusal_at(me: &Whom, relation: Relation, reach: Reach, talk: Talk) -> St
     let verb = reach.named();
     if relation == Relation::Elsewhere {
         return format!(
-            "that is {}, and axon does not reach across projects",
+            "that is {}, and magi does not reach across projects",
             relation.named()
         );
     }
@@ -263,7 +263,7 @@ pub fn refusal_at(me: &Whom, relation: Relation, reach: Reach, talk: Talk) -> St
         _ => Talk::Project,
     };
     format!(
-        "this session may not {verb} {} while `axon.agent_talk` is \"{}\"; it would need \"{}\"",
+        "this session may not {verb} {} while `magi.agent_talk` is \"{}\"; it would need \"{}\"",
         relation.named(),
         talk.named(),
         needed.named()
@@ -279,37 +279,37 @@ mod tests {
 
     #[test]
     fn a_main_has_no_parent_and_a_subagent_does() {
-        assert!(main_of("axon", "alpha-rho").is_main());
-        assert!(!under("axon", "iota-mu", "alpha-rho").is_main());
+        assert!(main_of("magi", "alpha-rho").is_main());
+        assert!(!under("magi", "iota-mu", "alpha-rho").is_main());
     }
 
     #[test]
     fn two_mains_in_one_project_are_each_other_s_front_door() {
-        let me = main_of("axon", "alpha-rho");
-        let them = main_of("axon", "beta-nu");
+        let me = main_of("magi", "alpha-rho");
+        let them = main_of("magi", "beta-nu");
         assert_eq!(between(&me, &them), Relation::Main);
     }
 
     #[test]
     fn the_spawn_link_reads_the_same_from_both_ends() {
-        let parent = main_of("axon", "alpha-rho");
-        let child = under("axon", "iota-mu", "alpha-rho");
+        let parent = main_of("magi", "alpha-rho");
+        let child = under("magi", "iota-mu", "alpha-rho");
         assert_eq!(between(&parent, &child), Relation::Child);
         assert_eq!(between(&child, &parent), Relation::Parent);
     }
 
     #[test]
     fn two_subagents_of_one_parent_are_siblings() {
-        let one = under("axon", "iota-mu", "alpha-rho");
-        let other = under("axon", "zeta-pi", "alpha-rho");
+        let one = under("magi", "iota-mu", "alpha-rho");
+        let other = under("magi", "zeta-pi", "alpha-rho");
         assert_eq!(between(&one, &other), Relation::Sibling);
     }
 
     #[test]
     fn two_subagents_of_different_parents_are_cousins_not_siblings() {
         // The instance wall. Both are in one project and neither is behind the other's door.
-        let mine = under("axon", "iota-mu", "alpha-rho");
-        let theirs = under("axon", "tau-chi", "beta-nu");
+        let mine = under("magi", "iota-mu", "alpha-rho");
+        let theirs = under("magi", "tau-chi", "beta-nu");
         assert_eq!(between(&mine, &theirs), Relation::Cousin);
     }
 
@@ -317,14 +317,14 @@ mod tests {
     fn two_mains_are_not_siblings_for_both_having_no_parent() {
         // The bug an option comparison would have written: `None == None` makes every pair of
         // mains siblings, and then `"instance"` quietly becomes `"project"` for them.
-        let me = main_of("axon", "alpha-rho");
-        let them = main_of("axon", "beta-nu");
+        let me = main_of("magi", "alpha-rho");
+        let them = main_of("magi", "beta-nu");
         assert_ne!(between(&me, &them), Relation::Sibling);
     }
 
     #[test]
     fn a_different_project_is_elsewhere_whoever_is_asking() {
-        let me = main_of("axon", "alpha-rho");
+        let me = main_of("magi", "alpha-rho");
         for them in [
             main_of("other", "beta-nu"),
             under("other", "tau-chi", "beta-nu"),
@@ -336,7 +336,7 @@ mod tests {
     #[test]
     fn nothing_reaches_across_projects_at_any_setting() {
         // The project wall, and the reason it is enforced by the directory as well as here.
-        let me = main_of("axon", "alpha-rho");
+        let me = main_of("magi", "alpha-rho");
         for reach in [Reach::Ask, Reach::Tell, Reach::Stop] {
             assert!(!may(&me, Relation::Elsewhere, reach), "{reach:?} escaped");
         }
@@ -346,7 +346,7 @@ mod tests {
     fn the_spawn_link_works_without_any_setting() {
         // The default is `mains`, and a subagent that cannot report back to its parent cannot
         // raise attention or trouble, which is most of why it can speak.
-        let child = under("axon", "iota-mu", "alpha-rho");
+        let child = under("magi", "iota-mu", "alpha-rho");
         assert_eq!(talk(), Talk::Mains, "the default moved");
         assert!(may(&child, Relation::Parent, Reach::Tell));
         assert!(may(&child, Relation::Parent, Reach::Ask));
@@ -354,14 +354,14 @@ mod tests {
 
     #[test]
     fn mains_reach_each_other_at_the_default() {
-        let me = main_of("axon", "alpha-rho");
+        let me = main_of("magi", "alpha-rho");
         assert!(may(&me, Relation::Main, Reach::Ask));
         assert!(may(&me, Relation::Main, Reach::Tell));
     }
 
     #[test]
     fn siblings_and_cousins_are_refused_at_the_default() {
-        let child = under("axon", "iota-mu", "alpha-rho");
+        let child = under("magi", "iota-mu", "alpha-rho");
         assert!(!may(&child, Relation::Sibling, Reach::Tell));
         assert!(!may(&child, Relation::Cousin, Reach::Tell));
         assert!(
@@ -372,7 +372,7 @@ mod tests {
 
     #[test]
     fn only_the_parent_may_stop_a_session() {
-        let me = main_of("axon", "alpha-rho");
+        let me = main_of("magi", "alpha-rho");
         for relation in [
             Relation::Myself,
             Relation::Parent,
@@ -397,7 +397,7 @@ mod tests {
     #[test]
     fn a_refusal_names_the_setting_that_would_have_allowed_it() {
         // Otherwise somebody concludes the feature is broken rather than switched off.
-        let child = under("axon", "iota-mu", "alpha-rho");
+        let child = under("magi", "iota-mu", "alpha-rho");
         let said = refusal(&child, Relation::Sibling, Reach::Tell);
         assert!(said.contains("agent_talk"), "{said}");
         assert!(said.contains("instance"), "{said}");
@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn a_refusal_across_projects_does_not_offer_a_setting_that_would_help() {
         // There is none, and suggesting one would be a lie.
-        let me = main_of("axon", "alpha-rho");
+        let me = main_of("magi", "alpha-rho");
         let said = refusal(&me, Relation::Elsewhere, Reach::Ask);
         assert!(!said.contains("agent_talk"), "{said}");
         assert!(said.contains("across projects"), "{said}");
@@ -421,7 +421,7 @@ mod levels {
 
     #[test]
     fn instance_opens_siblings_and_leaves_the_instance_wall_standing() {
-        let child = under("axon", "iota-mu", "alpha-rho");
+        let child = under("magi", "iota-mu", "alpha-rho");
         assert!(may_at(
             &child,
             Relation::Sibling,
@@ -437,7 +437,7 @@ mod levels {
 
     #[test]
     fn project_opens_everything_inside_the_project() {
-        let child = under("axon", "iota-mu", "alpha-rho");
+        let child = under("magi", "iota-mu", "alpha-rho");
         for relation in [Relation::Sibling, Relation::Cousin, Relation::Main] {
             assert!(
                 may_at(&child, relation, Reach::Tell, Talk::Project),
@@ -449,7 +449,7 @@ mod levels {
     #[test]
     fn no_setting_opens_the_project_wall_or_widens_who_may_stop() {
         // The two things a config cannot buy.
-        let me = main_of("axon", "alpha-rho");
+        let me = main_of("magi", "alpha-rho");
         for talk in [Talk::Mains, Talk::Instance, Talk::Project] {
             assert!(!may_at(&me, Relation::Elsewhere, Reach::Ask, talk));
             assert!(!may_at(&me, Relation::Main, Reach::Stop, talk));
@@ -461,8 +461,8 @@ mod levels {
     fn each_step_only_ever_adds() {
         // A looser setting that refused something a tighter one allowed would be a trap.
         let who = [
-            main_of("axon", "alpha-rho"),
-            under("axon", "iota-mu", "alpha-rho"),
+            main_of("magi", "alpha-rho"),
+            under("magi", "iota-mu", "alpha-rho"),
         ];
         let relations = [
             Relation::Myself,

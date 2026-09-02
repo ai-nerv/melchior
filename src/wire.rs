@@ -1,12 +1,12 @@
 //! What one instance says to another.
 //!
-//! **Mirrored on purpose.** Every axon both listens and dials, and both halves are these types:
+//! **Mirrored on purpose.** Every magi both listens and dials, and both halves are these types:
 //! a main agent asking a fork what it is doing, and the fork asking back, are the same frames
 //! travelling the other way. There is no supervisor vocabulary and no worker vocabulary,
 //! because the moment there were two an agent could be one but not the other, and a subagent
 //! that cannot ask its parent a question is a subagent that has to guess.
 //!
-//! # The shape is the family's, not axon's
+//! # The shape is the family's, not magi's
 //!
 //! ```text
 //! -> {"call":"status","args":[]}
@@ -21,7 +21,7 @@
 //! the socket. It is settled here before either side ships.
 //!
 //! A refused call is a **reply**, not a dropped connection: `{"ok":false,"error":…}`. The caller
-//! then sees axon's error rather than a transport error, and "no such call: nope" says what to
+//! then sees magi's error rather than a transport error, and "no such call: nope" says what to
 //! fix where "connection reset" does not.
 
 use serde::{Deserialize, Serialize};
@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 /// One call, as it arrives.
 ///
 /// `call` and `args` are the family shape and nothing else belongs in them. `from` and `token`
-/// are axon`s own, and both are optional so a sibling tool poking the socket with `socat` still
+/// are magi`s own, and both are optional so a sibling tool poking the socket with `socat` still
 /// gets an answer to `verbs` rather than a parse error.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Call {
@@ -107,7 +107,7 @@ impl Reply {
 
 /// The verbs an instance answers.
 ///
-/// A named, small subset, and deliberately not a mirror of everything axon can do. Most of what
+/// A named, small subset, and deliberately not a mirror of everything magi can do. Most of what
 /// a session knows is meaningless to a peer and some of it is dangerous — anything that runs a
 /// command is a remote shell wearing a friendly name, and none of that is in the first cut.
 ///
@@ -345,8 +345,8 @@ mod tests {
     #[test]
     fn a_message_remembers_who_sent_it() {
         // A message with no sender cannot be replied to, which is the whole point of mirroring.
-        let message = Message::new("axon/main/alpha-rho", "stop what you are doing");
-        assert_eq!(message.from, "axon/main/alpha-rho");
+        let message = Message::new("magi/main/alpha-rho", "stop what you are doing");
+        assert_eq!(message.from, "magi/main/alpha-rho");
         assert!(message.at > 0, "and when it was sent");
     }
 }
@@ -409,7 +409,7 @@ mod client_tests {
         // `include_str!` of the wrong path, or a file that got truncated, both present as a
         // client that will not load — in the sibling, not here.
         assert!(crate::CLIENT.len() > 4_000, "that is not the whole file");
-        assert!(crate::CLIENT.contains("local M = { _NAME = \"atom\""));
+        assert!(crate::CLIENT.contains("local M = { _NAME = \"melchior\""));
         assert!(crate::CLIENT.trim_end().ends_with("return M"));
     }
 

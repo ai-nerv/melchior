@@ -3,9 +3,9 @@
 //! Naming, finding, reaching and refusing: everything about a session's relationship to the
 //! other sessions on the machine, and nothing about what a session *is*. There are no turns
 //! here, no transcript, no model and no screen — those belong to whatever harness is using
-//! this, and atom is deliberately ignorant of all of them.
+//! this, and melchior is deliberately ignorant of all of them.
 //!
-//! It began inside axon and was lifted out whole. The rule that made that possible is the one
+//! It began inside magi and was lifted out whole. The rule that made that possible is the one
 //! worth keeping:
 //!
 //! > **Nothing here knows what a harness is.**
@@ -18,7 +18,7 @@
 //! # Where sessions live
 //!
 //! ```text
-//! $XDG_RUNTIME_DIR/axon/
+//! $XDG_RUNTIME_DIR/magi/
 //!   myproject/                 <- one directory per project
 //!     alpha-rho                <- a socket, named by the id and nothing else
 //!     iota-mu
@@ -58,13 +58,13 @@ pub use identity::Identity;
 pub use policy::{Relation, Talk, Whom};
 
 /// What this crate is called, wherever a name is printed.
-pub const NAME: &str = "atom";
+pub const NAME: &str = "melchior";
 
 /// The Lua client library, as source.
 ///
-/// Shipped here and copied by whoever wants to talk to atom — that is the family's arrangement,
+/// Shipped here and copied by whoever wants to talk to melchior — that is the family's arrangement,
 /// and it is why there is one implementation of the framing rather than one per sibling. It is
 /// handed out three ways, because a host that can do one of them often cannot do the others: as
-/// this constant to anything linking the crate, on stdout as `atom lua-api` for anything that
+/// this constant to anything linking the crate, on stdout as `melchior lua-api` for anything that
 /// can shell out, and over the wire as the `client` verb for a sandboxed VM that can do neither.
-pub const CLIENT: &str = include_str!("../lua/atom.lua");
+pub const CLIENT: &str = include_str!("../lua/melchior.lua");

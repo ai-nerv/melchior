@@ -3,16 +3,6 @@
 version = 4
 
 [[package]]
-name = "atom"
-version = "0.1.0"
-dependencies = [
- "rustix",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -73,6 +63,16 @@ name = "linux-raw-sys"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
+
+[[package]]
+name = "melchior"
+version = "0.1.0"
+dependencies = [
+ "rustix",
+ "serde",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "memchr"

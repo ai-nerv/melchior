@@ -1,6 +1,6 @@
 //! Listening, so another instance can reach this one.
 //!
-//! The other half of the mirror. Every axon binds this, so being asked and asking are the same
+//! The other half of the mirror. Every magi binds this, so being asked and asking are the same
 //! session in two directions rather than a supervisor and a worker with different vocabularies.
 //!
 //! Nothing here decides anything: it frames bytes, works out where the caller sits in the tree,
@@ -126,7 +126,7 @@ async fn talk(stream: tokio::net::UnixStream, serving: Serving) -> std::io::Resu
             // had closed the *write* half and was still reading, so a one-shot
             // `printf … | socat - UNIX-CONNECT:…` got the answer it asked for and then
             // `{"ok":false,"error":"early eof"}` — a second frame, saying something untrue,
-            // that anything parsing until EOF chokes on. Invisible from inside, because axon's
+            // that anything parsing until EOF chokes on. Invisible from inside, because magi's
             // own client holds its connection and reads exactly one reply per call.
             Ok(Err(why)) if why.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
             // A frame that is genuinely malformed still gets an answer, so the caller sees this
@@ -218,7 +218,7 @@ async fn bind(path: &Path) -> std::io::Result<tokio::net::UnixListener> {
 /// refuses it as `elsewhere` and the refusal can say which wall it met. `None` is kept for a
 /// caller that said nothing at all, which is a different mistake and gets a different answer.
 fn placed(from: Option<&str>, about: &About) -> Option<Whom> {
-    // Parsed as a whole name, never split at the first slash: `axon/review/iota-mu` cut that way
+    // Parsed as a whole name, never split at the first slash: `magi/review/iota-mu` cut that way
     // gives a session called `review/iota-mu`, which is nobody, and every relation it has is
     // wrong. The role in it is dropped here on purpose — it is the caller's own description of
     // itself and nothing is decided by it.
@@ -239,9 +239,9 @@ fn placed(from: Option<&str>, about: &About) -> Option<Whom> {
 /// vocabulary, the refusals. This is the one thing that cannot be: that the client half and the
 /// server half agree about what goes on the wire.
 ///
-/// They did not, once. The socket was framed with `axon_ipc` — CBOR inside an envelope carrying
+/// They did not, once. The socket was framed with `magi_ipc` — CBOR inside an envelope carrying
 /// a protocol version — and documented as the family's four-byte length and a JSON body. Both
-/// ends of axon agreed with each other perfectly, every test passed, and no sibling tool could
+/// ends of magi agreed with each other perfectly, every test passed, and no sibling tool could
 /// have said a word to it. That failure is invisible from inside the program that owns it,
 /// which is why these bind a real socket.
 #[cfg(test)]
@@ -254,12 +254,12 @@ mod tests {
 
     /// A project nothing else is using.
     ///
-    /// The runtime directory is shared with whatever axons the person has open, and the whole
+    /// The runtime directory is shared with whatever magi sessions the person has open, and the whole
     /// point of a project directory is that one project cannot see another's.
     /// One per test, because they run at once and each clears up after itself. Sharing a
     // project directory made every test tear down the sockets the others were using.
     fn project(tag: &str) -> String {
-        format!("axon-test-{}-{tag}", std::process::id())
+        format!("magi-test-{}-{tag}", std::process::id())
     }
 
     pub(super) fn named(tag: &str, id: &str) -> Identity {
@@ -498,7 +498,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_sibling_tool_speaking_the_family_shape_is_understood() {
-        // Hand-written frames, the way anything that is not axon would send them. This is the
+        // Hand-written frames, the way anything that is not magi would send them. This is the
         // test the encoding bug would have failed, and the only one that could have.
         let them = named("sibling", "theta-mu");
         let _bound = listening(&them).await;
@@ -544,7 +544,7 @@ mod handing_over {
     use super::tests::{listening, named, tidy};
     use std::time::Duration;
 
-    /// One hand-written call, the way anything that is not axon would send it.
+    /// One hand-written call, the way anything that is not magi would send it.
     fn asked(at: &std::path::Path, verb: &str) -> serde_json::Value {
         use std::io::{Read, Write};
         let mut sock = std::os::unix::net::UnixStream::connect(at).expect("connected");
@@ -674,7 +674,7 @@ mod parting {
 
     #[tokio::test]
     async fn a_one_shot_gets_one_frame_and_nothing_after_it() {
-        // Found with `socat`, and findable no other way: axon's own client holds its connection
+        // Found with `socat`, and findable no other way: magi's own client holds its connection
         // and reads exactly one reply per call, so it never saw the second frame. A sibling
         // parsing until EOF chokes on it, and what it chokes on says something untrue.
         let them = named("parting", "mu-rho");

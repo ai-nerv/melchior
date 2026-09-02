@@ -1,4 +1,4 @@
-//! `atom serve`, driven the way a harness drives it.
+//! `melchior serve`, driven the way a harness drives it.
 //!
 //! Everything else about the layer is tested against itself. This runs the real binary, with a
 //! real pipe and a real socket, because the two things it has to get right are only true at
@@ -7,7 +7,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
 
-/// A running `atom serve`, and the runtime directory it is alone in.
+/// A running `melchior serve`, and the runtime directory it is alone in.
 struct Serving {
     child: Child,
     out: BufReader<std::process::ChildStdout>,
@@ -24,7 +24,7 @@ impl Serving {
         // Short, because a unix socket path is capped at about a hundred bytes and a temp
         // directory under a long prefix silently exhausts it.
         let runtime =
-            std::path::PathBuf::from(format!("/tmp/atom-t-{}-{name}", std::process::id()));
+            std::path::PathBuf::from(format!("/tmp/melchior-t-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&runtime);
         Self::beside(&runtime, "alpha-rho")
     }
@@ -36,16 +36,16 @@ impl Serving {
     /// construction, unable to say anything to one another.
     fn beside(runtime: &std::path::Path, id: &str) -> Self {
         std::fs::create_dir_all(runtime).expect("mkdir");
-        let mut child = Command::new(env!("CARGO_BIN_EXE_atom"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_melchior"))
             .arg("serve")
-            .env("ATOM_PROJECT", "demo")
-            .env("ATOM_ID", id)
+            .env("MAGI_MELCHIOR_PROJECT", "demo")
+            .env("MAGI_MELCHIOR_ID", id)
             .env("XDG_RUNTIME_DIR", runtime)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .expect("atom serve");
+            .expect("melchior serve");
 
         let mut out = BufReader::new(child.stdout.take().expect("stdout"));
         let mut first = String::new();
@@ -132,7 +132,7 @@ impl Serving {
         }
         let _ = self.child.kill();
         let _ = std::fs::remove_dir_all(&self.runtime);
-        panic!("atom serve outlived the parent that started it");
+        panic!("melchior serve outlived the parent that started it");
     }
 }
 
@@ -286,18 +286,18 @@ fn an_id_that_names_nothing_is_refused_rather_than_sent_to_somebody() {
     );
 }
 
-/// One `atom tool` call, as the session `named`, in the directory it is listening in.
+/// One `melchior tool` call, as the session `named`, in the directory it is listening in.
 fn tool(runtime: &std::path::Path, named: &str, args: &[&str]) -> std::process::Output {
     let mut parts = named.split('/');
-    Command::new(env!("CARGO_BIN_EXE_atom"))
+    Command::new(env!("CARGO_BIN_EXE_melchior"))
         .arg("tool")
         .args(args)
         .env("XDG_RUNTIME_DIR", runtime)
-        .env("ATOM_PROJECT", parts.next().unwrap_or_default())
-        .env("ATOM_ROLE", parts.next().unwrap_or_default())
-        .env("ATOM_ID", parts.next().unwrap_or_default())
+        .env("MAGI_MELCHIOR_PROJECT", parts.next().unwrap_or_default())
+        .env("MAGI_MELCHIOR_ROLE", parts.next().unwrap_or_default())
+        .env("MAGI_MELCHIOR_ID", parts.next().unwrap_or_default())
         .output()
-        .expect("atom tool runs")
+        .expect("melchior tool runs")
 }
 
 fn stdout(out: &std::process::Output) -> String {
@@ -322,7 +322,7 @@ fn a_session_that_is_gone_leaves_the_roster_and_the_directory() {
     // at a time.
     let alive = Serving::start("sweep");
     let runtime = alive.runtime();
-    let project = runtime.join("atom").join("demo");
+    let project = runtime.join("melchior").join("demo");
 
     // A corpse of each kind: a plain file where a socket would be, and the note beside it.
     std::fs::write(project.join("zeta-mu"), b"").expect("a dead socket");

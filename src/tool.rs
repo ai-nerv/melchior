@@ -1,9 +1,9 @@
-//! `atom tool` — the vocabulary a model calls, as one exec per request.
+//! `melchior tool` — the vocabulary a model calls, as one exec per request.
 //!
 //! The harness runs this with the model's arguments in `argv`, reads stdout, and takes the exit
 //! code as whether it worked. That is the whole protocol, and choosing it was the point:
 //!
-//! - **No framing, no encoder, no version.** A harness that can run a program can use atom.
+//! - **No framing, no encoder, no version.** A harness that can run a program can use melchior.
 //! - **Nothing of the harness crosses.** Speaking somebody's tool-peer protocol would mean
 //!   copying their message types into this crate, and then a change on their side breaks a
 //!   program they do not build.
@@ -18,7 +18,7 @@
 //! a given process was spawned under. What it started, and what has arrived, are read from the
 //! directory and asked of its own socket — neither can be talked into lying.
 
-use atom::verbs::{self, Standing};
+use melchior::verbs::{self, Standing};
 
 /// Run one call and exit.
 ///
@@ -28,7 +28,7 @@ pub fn run() -> std::io::Result<()> {
     let asked = arguments();
     if asked.get("verb").is_none_or(String::is_empty) {
         return refuse(
-            "atom tool needs --verb. Try `--verb help`, or `atom verbs` for what a session \
+            "melchior tool needs --verb. Try `--verb help`, or `melchior verbs` for what a session \
              answers over its socket.",
         );
     }
@@ -37,8 +37,8 @@ pub fn run() -> std::io::Result<()> {
         return refuse(&format!(
             "this process was not started by a session, so it does not know which instance it \
              would be speaking as. {} and {} say which, and are set by whatever started it.",
-            atom::directory::PROJECT,
-            atom::directory::ID
+            melchior::directory::PROJECT,
+            melchior::directory::ID
         ));
     };
 
@@ -87,16 +87,16 @@ fn arguments() -> std::collections::BTreeMap<String, String> {
 
 /// What this session is, as far as a separate process can tell.
 fn standing() -> Option<Standing> {
-    let me = atom::directory::mine()?;
+    let me = melchior::directory::mine()?;
     Some(Standing {
         // Asked of its own socket rather than kept: a session reads its inbox and acts on it
         // while this process does not exist, so anything remembered here would be a snapshot of
         // a moment nobody cares about.
-        inbox: atom::directory::inbox_of(&me),
+        inbox: melchior::directory::inbox_of(&me),
         // Read off the directory, never from what a child says about itself. A child that
         // declined to leave its note would otherwise have made itself unstoppable.
-        forked: atom::directory::children(&me),
-        parent: atom::directory::parent_of(&me),
+        forked: melchior::directory::children(&me),
+        parent: melchior::directory::parent_of(&me),
         // Empty, so `stop` is refused with "this session did not start it". The secrets are
         // minted by whatever spawns a child, and nothing spawns one yet; when something does,
         // it hands them down the same way a name is handed down.

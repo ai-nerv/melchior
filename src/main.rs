@@ -1,13 +1,13 @@
-//! `atom` — the agent layer, as a program.
+//! `melchior` — the agent layer, as a program.
 //!
 //! Three jobs, and they are three because each has a different lifetime and a different way of
 //! being talked to:
 //!
 //! | | |
 //! |---|---|
-//! | `atom serve` | binds this session's socket and answers for it, for as long as its parent lives |
-//! | `atom tool` | the tool a model calls, spoken over the harness's own pipe protocol |
-//! | `atom lua-api` | prints the client library, for redirecting into a config directory |
+//! | `melchior serve` | binds this session's socket and answers for it, for as long as its parent lives |
+//! | `melchior tool` | the tool a model calls, spoken over the harness's own pipe protocol |
+//! | `melchior lua-api` | prints the client library, for redirecting into a config directory |
 //!
 //! # Nothing here is a daemon
 //!
@@ -41,22 +41,22 @@ fn main() -> std::io::Result<()> {
             Ok(())
         }
         Some("lua-api") => {
-            print!("{}", atom::CLIENT);
+            print!("{}", melchior::CLIENT);
             Ok(())
         }
         Some("verbs") => {
-            for (verb, does) in atom::wire::VERBS {
+            for (verb, does) in melchior::wire::VERBS {
                 println!("{verb:<10} {does}");
             }
             Ok(())
         }
         Some(other) => {
-            eprintln!("atom: no such command: {other}");
-            eprintln!("usage: atom serve | tool | brief | lua-api | verbs");
+            eprintln!("melchior: no such command: {other}");
+            eprintln!("usage: melchior serve | tool | brief | lua-api | verbs");
             std::process::exit(2);
         }
         None => {
-            eprintln!("usage: atom serve | tool | brief | lua-api | verbs");
+            eprintln!("usage: melchior serve | tool | brief | lua-api | verbs");
             eprintln!();
             eprintln!("  serve     bind this session's socket and answer for it");
             eprintln!("  tool      the vocabulary a model calls, one exec per request");
@@ -98,7 +98,7 @@ enum Told {
         /// Anything the accepting harness wants the adopted one to have, carried unread.
         ///
         /// **Opaque on purpose.** What a harness lends a session it has taken on — permissions,
-        /// in axon's case — is that harness's own idea. A layer that understood it would be a
+        /// in magi's case — is that harness's own idea. A layer that understood it would be a
         /// second place needing a change every time it changed. This goes in one side and comes
         /// out the other, and nothing here looks at it.
         #[serde(default)]
@@ -178,23 +178,23 @@ enum Heard {
 /// Bind this session's socket and answer for it until the parent goes away.
 ///
 /// Everything it needs to *be* somebody comes from the environment, the same way it did when
-/// this ran inside a harness: `ATOM_PROJECT`, `ATOM_ROLE`, `ATOM_ID`, and the `AXON_*` names
+/// this ran inside a harness: `MAGI_MELCHIOR_PROJECT`, `MAGI_MELCHIOR_ROLE`, `MAGI_MELCHIOR_ID`, and the `MAGI_*` names
 /// they replaced. That is the one thing a separate process cannot work out for itself.
 fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
     // Named here when the caller only says which project it is in, and that is the useful way
     // round: a harness choosing its own name is choosing out of a namespace it cannot see, and
     // the collision would surface as a failed bind after it had told everyone what it was
     // called. Whoever holds the directory should be the one that looks first.
-    let me = match (atom::directory::mine(), asked.get("project")) {
+    let me = match (melchior::directory::mine(), asked.get("project")) {
         (Some(me), _) => me,
-        (None, Some(project)) => atom::identity::free_in(project),
+        (None, Some(project)) => melchior::identity::free_in(project),
         (None, None) => {
             eprintln!(
-                "atom serve: no session to be. Pass --project, or set {} and {} — one of them \
+                "melchior serve: no session to be. Pass --project, or set {} and {} — one of them \
                  has to say which session this is answering for, and nothing on disk can be \
                  asked instead.",
-                atom::directory::PROJECT,
-                atom::directory::ID
+                melchior::directory::PROJECT,
+                melchior::directory::ID
             );
             std::process::exit(2);
         }
@@ -204,10 +204,10 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         .enable_all()
         .build()?;
     runtime.block_on(async move {
-        let (about_tx, about_rx) = tokio::sync::watch::channel(atom::answering::About {
+        let (about_tx, about_rx) = tokio::sync::watch::channel(melchior::answering::About {
             me: me.clone(),
-            parent: atom::directory::parent_of(&me),
-            token: atom::directory::token(),
+            parent: melchior::directory::parent_of(&me),
+            token: melchior::directory::token(),
             busy: false,
             working_for: 0,
             inbox: Vec::new(),
@@ -220,16 +220,16 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         // The note beside the socket, so the tree can be read off the directory: a session that
         // finds this one there can tell whose subagent it is without asking it, and without
         // trusting what it would have said.
-        atom::directory::announce(&me);
-        let at = atom::directory::listening_at(&me);
+        melchior::directory::announce(&me);
+        let at = melchior::directory::listening_at(&me);
 
         // Bound *here*, and only then announced. Spawning the accept loop and saying "listening"
         // in one breath announces a future: the bind is several awaits away, and a parent that
         // started sending on the strength of it met its own session as "nothing is listening".
-        let listener = match atom::serving::listening_on(&at).await {
+        let listener = match melchior::serving::listening_on(&at).await {
             Ok(listener) => listener,
             Err(why) => {
-                eprintln!("atom serve: {}: {why}", at.display());
+                eprintln!("melchior serve: {}: {why}", at.display());
                 std::process::exit(1);
             }
         };
@@ -238,9 +238,9 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
             named: me.full(),
         });
         tokio::spawn(async move {
-            let _ = atom::serving::accept(
+            let _ = melchior::serving::accept(
                 listener,
-                atom::serving::Serving {
+                melchior::serving::Serving {
                     about: about_rx,
                     arrived: arrived_tx,
                     asked: asked_tx,
@@ -271,7 +271,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                 match serde_json::from_str::<Told>(&line) {
                     // A line we cannot read is the parent's bug, not a reason to stop answering
                     // a socket other sessions are using.
-                    Err(why) => eprintln!("atom serve: {why}"),
+                    Err(why) => eprintln!("melchior serve: {why}"),
                     Ok(told) => {
                         if told_tx.blocking_send(told).is_err() {
                             return;
@@ -281,11 +281,11 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
             }
         });
 
-        let mut inbox: Vec<atom::wire::Message> = Vec::new();
+        let mut inbox: Vec<melchior::wire::Message> = Vec::new();
         // Requests put to this session and not yet answered. Held here rather than in the
         // serving task because the answer arrives on the *pipe*, from the person, long after the
         // connection that carried the question has closed.
-        let mut pending: Vec<atom::wire::Request> = Vec::new();
+        let mut pending: Vec<melchior::wire::Request> = Vec::new();
         loop {
             tokio::select! {
                 Some(message) = arrived.recv() => {
@@ -319,7 +319,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                 // Matched rather than left to `else`, because a `select!` arm whose pattern
                 // does not match is *disabled*, not taken: with `Some(..) = told.recv()` the
                 // closed pipe silently dropped this branch and the loop went on waiting on the
-                // socket. `atom serve` outlived the session that started it, kept a name in the
+                // socket. `melchior serve` outlived the session that started it, kept a name in the
                 // directory that answers and cannot act, and a sibling sending to it would be
                 // told the message landed. Found by closing the pipe and looking.
                 told = told.recv() => match told {
@@ -344,14 +344,14 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                             continue;
                         };
                         let request = pending.remove(at);
-                        if accept && let Some(them) = atom::identity::Identity::read(&request.from)
+                        if accept && let Some(them) = melchior::identity::Identity::read(&request.from)
                         {
-                            atom::directory::adopted(&them, &me.id);
+                            melchior::directory::adopted(&them, &me.id);
                         }
                         // Told either way, and told by us: the asker has been waiting since its
                         // call was answered with "the question has been put", and a silence it
                         // could not tell from a refusal would leave it waiting for good.
-                        atom::directory::answer_request(
+                        melchior::directory::answer_request(
                             &request.from,
                             &me,
                             accept,
@@ -369,11 +369,11 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                     // a process already running. Left as it stood at startup, a session that had
                     // been taken on would go on telling callers it was a main, and its own `kin`
                     // would disagree with every other reading of the same directory.
-                    let mine = atom::directory::parent_of(&me);
+                    let mine = melchior::directory::parent_of(&me);
                     if mine != about_tx.borrow().parent {
                         about_tx.send_modify(|about| about.parent.clone_from(&mine));
                     }
-                    let now = atom::directory::listening(&me.project);
+                    let now = melchior::directory::listening(&me.project);
                     // Only on a change. A line every two seconds for the life of a session is a
                     // pipe nobody can read a log out of, and a parent that has to diff it.
                     if now != around {
@@ -386,17 +386,17 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                 else => break,
             }
         }
-        atom::directory::forget(&me);
+        melchior::directory::forget(&me);
         let _ = std::fs::remove_file(&at);
         // And the directory itself, if this was the last session in the project. It refuses
         // while anybody else is still there, so whoever leaves last does it.
-        atom::directory::leave(&me.project);
+        melchior::directory::leave(&me.project);
         Ok(())
     })
 }
 
 /// The wire name of a sort.
-fn name_of(sort: atom::wire::Sort) -> String {
+fn name_of(sort: melchior::wire::Sort) -> String {
     serde_json::to_value(sort)
         .ok()
         .and_then(|value| value.as_str().map(ToOwned::to_owned))
@@ -449,7 +449,7 @@ fn flags(args: impl Iterator<Item = String>) -> std::collections::BTreeMap<Strin
 /// Printed rather than returned, because the caller is a program that runs this and reads what
 /// it said. It is the one piece of the surface that is *about* a prompt, and it still does not
 /// read one: scanning for a name means knowing what a prompt, a cursor and a sigil table are,
-/// and none of those are atom's. It is handed the names.
+/// and none of those are melchior's. It is handed the names.
 fn brief(project: Option<&str>, asked: &std::collections::BTreeMap<String, String>) {
     let named: Vec<String> = asked
         .get("name")
@@ -458,16 +458,16 @@ fn brief(project: Option<&str>, asked: &std::collections::BTreeMap<String, Strin
     if named.is_empty() {
         return;
     }
-    let me = atom::directory::mine().or_else(|| project.map(atom::identity::free_in));
-    let standing = me.map(|me| atom::verbs::Standing {
-        inbox: atom::directory::inbox_of(&me),
-        forked: atom::directory::children(&me),
-        parent: atom::directory::parent_of(&me),
+    let me = melchior::directory::mine().or_else(|| project.map(melchior::identity::free_in));
+    let standing = me.map(|me| melchior::verbs::Standing {
+        inbox: melchior::directory::inbox_of(&me),
+        forked: melchior::directory::children(&me),
+        parent: melchior::directory::parent_of(&me),
         minted: std::collections::BTreeMap::new(),
         me: me.full(),
     });
     print!(
         "{}",
-        atom::briefing::about(&named, &standing.unwrap_or_default())
+        melchior::briefing::about(&named, &standing.unwrap_or_default())
     );
 }

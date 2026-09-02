@@ -1,4 +1,4 @@
--- atom's build, as recipes. This replaced the Makefile; there is no other.
+-- melchior's build, as recipes. This replaced the Makefile; there is no other.
 --
 --   make            the recipes, with what each of them says it does
 --   make build      the binary
@@ -17,7 +17,7 @@ local function project()
     local value = line:match("^%s*([^#%[%s]%S*)%s*$")
     if value then found[#found + 1] = value end
   end
-  return found[1] or "atom", found[2] or "0.1.0"
+  return found[1] or "melchior", found[2] or "0.1.0"
 end
 
 local NAME, VERSION = project()
@@ -122,9 +122,9 @@ make.alias("b", "build")
 make.recipe{
   name = "install",
   desc = ("install the binary to %s/bin"):format(PREFIX),
-  -- The binary and nothing else. atom has no configuration of its own: what it needs in order
+  -- The binary and nothing else. melchior has no configuration of its own: what it needs in order
   -- to be somebody arrives in the environment from whatever started it, and the Lua client is
-  -- printed by `atom lua-api` for a sibling to redirect wherever it keeps such things.
+  -- printed by `melchior lua-api` for a sibling to redirect wherever it keeps such things.
   deps = { "build" },
   run = function()
     local bin = PREFIX .. "/bin"
@@ -137,7 +137,7 @@ make.recipe{
 
 make.recipe{
   name = "run",
-  desc = "run it: --args \"serve --project axon\"",
+  desc = "run it: --args \"serve --project magi\"",
   params = { { "--args", desc = "what to pass it", default = "verbs" } },
   run = function(a)
     local out = { "run", "--" }

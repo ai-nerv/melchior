@@ -3,7 +3,7 @@
 //! # The layout
 //!
 //! ```text
-//! $XDG_RUNTIME_DIR/atom/
+//! $XDG_RUNTIME_DIR/melchior/
 //!   myproject/             <- one directory per project
 //!     alpha-rho            <- a socket, named by the id and nothing else
 //!     iota-mu
@@ -48,39 +48,39 @@ pub const TOOL: &str = "agent";
 ///
 /// Inherited across the spawn rather than passed as an argument, so a child that re-execs or
 /// starts a shell that starts another session still knows where it came from.
-pub const PARENT: &str = "ATOM_PARENT";
+pub const PARENT: &str = "MAGI_MELCHIOR_PARENT";
 
 /// The variable carrying the secret that makes a `stop` honourable.
 ///
 /// Minted by the parent, handed to the child, held by both and by nobody else.
-pub const TOKEN: &str = "ATOM_TOKEN";
+pub const TOKEN: &str = "MAGI_MELCHIOR_TOKEN";
 
 /// The three that tell a spawned process which session it belongs to.
 ///
 /// Set by whatever started the session and inherited from there by everything it starts. It is
 /// the one thing a separate process cannot work out for itself: a name is made when a session
 /// starts, and nothing on disk says which of several a given process was spawned under.
-pub const PROJECT: &str = "ATOM_PROJECT";
+pub const PROJECT: &str = "MAGI_MELCHIOR_PROJECT";
 /// What that session is for, the middle part of its name.
-pub const ROLE: &str = "ATOM_ROLE";
+pub const ROLE: &str = "MAGI_MELCHIOR_ROLE";
 /// The last of the three, and the only one the socket is named after.
-pub const ID: &str = "ATOM_ID";
+pub const ID: &str = "MAGI_MELCHIOR_ID";
 
 /// How far this session may reach, as [`Talk`](crate::policy::Talk) names it.
 ///
 /// A setting rather than a name, and it travels the same way the names do because it has to
 /// reach the same two processes: the one holding the socket and the one a model calls. A harness
 /// that set it on only one of them would have a tool refusing what the socket allows.
-pub const TALK: &str = "ATOM_TALK";
+pub const TALK: &str = "MAGI_MELCHIOR_TALK";
 
 /// What one of those says, if it says anything.
 ///
-/// `ATOM_*` first, then the `AXON_*` name the same variable grew up under. Both, because this
+/// `MAGI_MELCHIOR_*` first, then the `MAGI_*` name the same variable grew up under. Both, because this
 /// layer was lifted out of one harness and that harness is still setting the old names — and a
 /// variable written under one name and read under another is a session that cannot find itself,
 /// which presents as "nobody is running" rather than as a rename anybody would guess at.
 pub(crate) fn said(name: &str) -> Option<String> {
-    let older = format!("AXON_{}", name.trim_start_matches("ATOM_"));
+    let older = format!("MAGI_{}", name.trim_start_matches("MAGI_MELCHIOR_"));
     std::env::var(name)
         .ok()
         .or_else(|| std::env::var(&older).ok())
@@ -124,7 +124,7 @@ pub fn token() -> Option<String> {
 
 /// Which session a spawned process belongs to, from its environment.
 ///
-/// `None` outside a session — `atom tool` run by hand from a shell, which should say so rather
+/// `None` outside a session — `melchior tool` run by hand from a shell, which should say so rather
 /// than invent a name and send messages signed with it.
 #[must_use]
 pub fn mine() -> Option<Identity> {
@@ -202,7 +202,7 @@ impl Reach {
 ///
 /// The same three parts a session wears on its status line, and the short forms fill in from
 /// whoever is asking: `$iota-mu` is one in this project, `$review/iota-mu` says what it is for,
-/// `$axon/review/iota-mu` says everything.
+/// `$magi/review/iota-mu` says everything.
 ///
 /// The last of those parses and then loses — [`policy`] refuses anything outside the asker's own
 /// project, and the directory it would have to be found in is not one this session lists. It
@@ -222,7 +222,7 @@ pub struct Address {
 }
 
 impl Address {
-    /// Read `$iota-mu`, `$review/iota-mu` or `$axon/review/iota-mu`.
+    /// Read `$iota-mu`, `$review/iota-mu` or `$magi/review/iota-mu`.
     ///
     /// The sigil is optional so this reads what the trigger hands over as well as what somebody
     /// wrote. Read from the right, because the id is the part that is always there and the rest
@@ -545,7 +545,7 @@ mod tests {
 
     fn asker() -> Identity {
         Identity {
-            project: "axon".to_owned(),
+            project: "magi".to_owned(),
             role: "main".to_owned(),
             id: "alpha-rho".to_owned(),
         }
@@ -555,7 +555,7 @@ mod tests {
     fn a_bare_name_is_somebody_in_this_project() {
         let address = Address::read("$iota-mu").expect("an address");
         assert_eq!(address.id, "iota-mu");
-        assert_eq!(address.against(&asker()).full(), "axon/main/iota-mu");
+        assert_eq!(address.against(&asker()).full(), "magi/main/iota-mu");
     }
 
     #[test]
@@ -563,7 +563,7 @@ mod tests {
         let address = Address::read("$review/iota-mu").expect("an address");
         assert_eq!(address.role.as_deref(), Some("review"));
         assert_eq!(address.project, None, "which fills in from the asker");
-        assert_eq!(address.against(&asker()).full(), "axon/review/iota-mu");
+        assert_eq!(address.against(&asker()).full(), "magi/review/iota-mu");
     }
 
     #[test]
@@ -614,7 +614,7 @@ mod tests {
                 .expect("a project")
                 .file_name()
                 .expect("a name"),
-            "axon"
+            "magi"
         );
     }
 
@@ -622,7 +622,7 @@ mod tests {
     fn each_project_gets_its_own_directory() {
         // The project wall, put in the filesystem: another project's sessions are not refused,
         // they are somewhere this one never lists.
-        let mine = home("axon");
+        let mine = home("magi");
         let theirs = home("other");
         assert_ne!(mine, theirs);
         assert_eq!(mine.parent(), theirs.parent());
@@ -681,7 +681,7 @@ mod adopting {
 
     /// A project of its own, so these do not read each other's directory.
     fn alone(name: &str) -> String {
-        let project = format!("atom-adopt-{}-{name}", std::process::id());
+        let project = format!("melchior-adopt-{}-{name}", std::process::id());
         let _ = std::fs::remove_dir_all(home(&project));
         project
     }

@@ -72,13 +72,13 @@ impl Answer {
 /// The tool this crate offers, as a host needs to declare it.
 ///
 /// Handed over as data rather than as an implementation, the way aeon publishes its descriptors
-/// to axon: the vocabulary is written once, here, and a harness registers what comes back. Two
+/// to magi: the vocabulary is written once, here, and a harness registers what comes back. Two
 /// copies of nineteen verb descriptions would disagree the first time one was edited.
 #[must_use]
 pub fn described() -> Value {
     json!({
         "name": TOOL,
-        "description": "Talk to other axon instances. `verb: \"help\"` lists everything this \
+        "description": "Talk to other magi instances. `verb: \"help\"` lists everything this \
                         can do. Instances are named `id`, `role/id` or `project/role/id`; a \
                         bare id means one in this project. Use `list` to find out who is there \
                         and what may be done to each, rather than assuming a name.",
@@ -100,7 +100,7 @@ pub fn parameters() -> Value {
             "who": {
                 "type": "string",
                 "description": "which instance, as `iota-mu`, `review/iota-mu` or \
-                                `axon/review/iota-mu`. Not needed by `help`, `list` or \
+                                `magi/review/iota-mu`. Not needed by `help`, `list` or \
                                 `inbox`.",
             },
             "message": {
@@ -178,7 +178,7 @@ const VERBS: &[(&str, &str)] = &[
         "handoff",
         "give a piece of work to an instance: it is theirs now, not copied",
     ),
-    // Not treading on each other. Advisory: axon records a claim, it does not enforce one.
+    // Not treading on each other. Advisory: magi records a claim, it does not enforce one.
     (
         "claim",
         "say this session is taking a piece of work, so others leave it alone",
@@ -404,7 +404,7 @@ mod tests {
 
     fn standing() -> Standing {
         Standing {
-            me: "axon/main/alpha-rho".to_owned(),
+            me: "magi/main/alpha-rho".to_owned(),
             parent: None,
             forked: Vec::new(),
             minted: std::collections::BTreeMap::new(),
@@ -422,7 +422,7 @@ mod tests {
         let out = call(json!({"verb": "help"}), standing());
         assert!(!out.failed);
         assert!(
-            out.said.contains("axon/main/alpha-rho"),
+            out.said.contains("magi/main/alpha-rho"),
             "it never says who we are"
         );
         for (verb, _) in VERBS {
@@ -496,12 +496,12 @@ mod tests {
         let mut standing = standing();
         standing.forked.push("iota-mu".to_owned());
         let child = Identity {
-            project: "axon".to_owned(),
+            project: "magi".to_owned(),
             role: "main".to_owned(),
             id: "iota-mu".to_owned(),
         };
         let stranger = Identity {
-            project: "axon".to_owned(),
+            project: "magi".to_owned(),
             role: "main".to_owned(),
             id: "beta-nu".to_owned(),
         };
@@ -550,9 +550,9 @@ mod tests {
         let mut standing = standing();
         standing
             .inbox
-            .push(Message::new("axon/main/gamma", "the parser is fixed"));
+            .push(Message::new("magi/main/gamma", "the parser is fixed"));
         let out = call(json!({"verb": "inbox"}), standing);
-        assert!(out.said.contains("axon/main/gamma"), "{}", out.said);
+        assert!(out.said.contains("magi/main/gamma"), "{}", out.said);
         assert!(out.said.contains("the parser is fixed"));
     }
 }
@@ -566,7 +566,7 @@ mod surface_tests {
 
     fn standing() -> Standing {
         Standing {
-            me: "axon/main/alpha-rho".to_owned(),
+            me: "magi/main/alpha-rho".to_owned(),
             parent: None,
             forked: Vec::new(),
             minted: std::collections::BTreeMap::new(),
@@ -624,18 +624,18 @@ mod surface_tests {
         assert!(said.contains("root session"), "{said}");
 
         let mut child = standing();
-        child.parent = Some("axon/main/root".to_owned());
+        child.parent = Some("magi/main/root".to_owned());
         let said = call(json!({"verb": "whoami"}), child).said;
-        assert!(said.contains("axon/main/root"), "{said}");
+        assert!(said.contains("magi/main/root"), "{said}");
         assert!(said.contains("attention"), "and what to do with it: {said}");
     }
 
     #[test]
     fn whoami_says_what_it_may_stop() {
         let mut standing = standing();
-        standing.forked.push("axon/main/gamma".to_owned());
+        standing.forked.push("magi/main/gamma".to_owned());
         let said = call(json!({"verb": "whoami"}), standing).said;
-        assert!(said.contains("axon/main/gamma"), "{said}");
+        assert!(said.contains("magi/main/gamma"), "{said}");
         assert!(said.contains("may stop"), "{said}");
     }
 
@@ -653,22 +653,22 @@ mod surface_tests {
     #[test]
     fn the_inbox_marks_what_is_urgent_and_what_is_owed_an_answer() {
         let mut standing = standing();
-        standing.inbox.push(Message::new("axon/main/beta", "fyi"));
+        standing.inbox.push(Message::new("magi/main/beta", "fyi"));
         standing.inbox.push(Message::sent(
-            "axon/main/gamma",
+            "magi/main/gamma",
             "which parser?",
             Sort::Question,
             None,
         ));
         standing.inbox.push(Message::sent(
-            "axon/main/delta",
+            "magi/main/delta",
             "I am stuck",
             Sort::Attention,
             None,
         ));
         let said = call(json!({"verb": "inbox"}), standing).said;
         assert!(
-            said.contains("! `axon/main/delta`"),
+            said.contains("! `magi/main/delta`"),
             "urgent unmarked: {said}"
         );
         assert!(
@@ -681,7 +681,7 @@ mod surface_tests {
     #[test]
     fn a_message_can_be_answered_by_the_id_the_inbox_showed() {
         // The id has to survive the round trip, or `reply` quotes something nobody has.
-        let message = Message::sent("axon/main/gamma", "which parser?", Sort::Question, None);
+        let message = Message::sent("magi/main/gamma", "which parser?", Sort::Question, None);
         let text = serde_json::to_string(&message).expect("encodes");
         let back: Message = serde_json::from_str(&text).expect("decodes");
         assert_eq!(back.id, message.id);
@@ -701,7 +701,7 @@ mod replying {
 
     fn asked_by(from: &str) -> Standing {
         Standing {
-            me: "axon/main/alpha-rho".to_owned(),
+            me: "magi/main/alpha-rho".to_owned(),
             parent: None,
             forked: Vec::new(),
             minted: std::collections::BTreeMap::new(),
@@ -711,17 +711,17 @@ mod replying {
 
     #[test]
     fn it_goes_to_whoever_asked() {
-        let standing = asked_by("axon/main/beta-nu");
+        let standing = asked_by("magi/main/beta-nu");
         let about = standing.inbox[0].id.clone();
         let who = answering(&json!({"verb": "reply", "about": about}), &standing);
-        assert_eq!(who.as_deref().ok(), Some("axon/main/beta-nu"));
+        assert_eq!(who.as_deref().ok(), Some("magi/main/beta-nu"));
     }
 
     #[test]
     fn an_id_that_names_nothing_is_refused_with_what_the_inbox_holds() {
         // The likely mistake is an invented id or one already acted on, and "no such message"
         // on its own leaves a model with nowhere to go.
-        let standing = asked_by("axon/main/beta-nu");
+        let standing = asked_by("magi/main/beta-nu");
         let Err(refused) = answering(&json!({"verb": "reply", "about": "made-up"}), &standing)
         else {
             panic!("an id that names nothing must not resolve to somebody");
@@ -732,7 +732,7 @@ mod replying {
 
     #[test]
     fn an_empty_inbox_says_so_rather_than_listing_nothing() {
-        let mut standing = asked_by("axon/main/beta-nu");
+        let mut standing = asked_by("magi/main/beta-nu");
         standing.inbox.clear();
         let Err(refused) = answering(&json!({"verb": "reply", "about": "m1"}), &standing) else {
             panic!("refused");
@@ -744,7 +744,7 @@ mod replying {
     fn a_named_recipient_still_wins_when_the_id_is_not_ours() {
         // A session may be answering something it was told about out of band. The wall is still
         // between it and the far end, so letting this through refuses nothing that matters.
-        let standing = asked_by("axon/main/beta-nu");
+        let standing = asked_by("magi/main/beta-nu");
         let who = answering(
             &json!({"verb": "reply", "about": "elsewhere", "who": "gamma-xi"}),
             &standing,

@@ -1,12 +1,12 @@
-//! What one axon calls itself.
+//! What one magi calls itself.
 //!
 //! `project/role/id` — the folder you are in, what this session is for, and which session it is.
-//! Three parts because sessions talk to each other, and a name that says only "axon" answers
+//! Three parts because sessions talk to each other, and a name that says only "magi" answers
 //! none of the questions a message arriving from one would raise: *whose* work, doing *what*,
 //! and *which* of the several you have open.
 //!
 //! - **project** is the working directory's name, so it needs no configuration to be right. A
-//!   `.axon.lua` may override it, and that is one of the few things a project file may say about
+//!   `.magi.lua` may override it, and that is one of the few things a project file may say about
 //!   itself: naming yourself carries no authority.
 //! - **role** is what this session is for. `main` today; multi-agent will fill it.
 //! - **id** tells two sessions in one directory apart. Two Greek words, because they are short,
@@ -63,7 +63,7 @@ impl Identity {
 
     /// Read one back, from a name that came off the wire.
     ///
-    /// Three parts, or two with the role left out — `axon/alpha-rho` is what an older session
+    /// Three parts, or two with the role left out — `magi/alpha-rho` is what an older session
     /// or a hand-written client sends, and refusing it would break the one thing a name is for.
     /// Anything else is not a short form of something, it is a session that will not be found,
     /// and `None` says so where a guess would have resolved to somebody else.
@@ -88,7 +88,7 @@ impl Identity {
 
 /// The working directory's own name.
 ///
-/// The last component, not the path: `/home/you/work/axon` is `axon`, because that is what a
+/// The last component, not the path: `/home/you/work/magi` is `magi`, because that is what a
 /// person calls it. A directory with no name -- the root -- falls back to something rather than
 /// to an empty half of a name.
 fn folder() -> String {
@@ -99,7 +99,7 @@ fn folder() -> String {
                 .map(|name| name.to_string_lossy().into_owned())
         })
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "axon".to_owned())
+        .unwrap_or_else(|| "magi".to_owned())
 }
 
 /// The Greek alphabet, which is what an id is drawn from.
@@ -111,7 +111,7 @@ const GREEK: [&str; 24] = [
 
 /// A name for this session.
 ///
-/// Drawn from the clock, which is enough: this distinguishes the handful of axons somebody has
+/// Drawn from the clock, which is enough: this distinguishes the handful of magi sessions somebody has
 /// open, not the rows of a database.
 fn name() -> String {
     let seed = std::time::SystemTime::now()
@@ -125,7 +125,7 @@ fn name() -> String {
 /// **Naming belongs here, not to a harness.** A harness that named itself would be choosing out
 /// of a namespace it cannot see: two started in the same second draw the same clock, and the
 /// collision surfaces only as one of them failing to bind — by which point it has already told
-/// somebody what it is called. Atom is what holds the directory, so it is what can look first.
+/// somebody what it is called. Melchior is what holds the directory, so it is what can look first.
 ///
 /// Still a guess, deliberately. The look and the bind are not one act, so two callers a
 /// microsecond apart can still agree on a name; what this removes is the *likely* collision,
@@ -185,15 +185,15 @@ mod tests {
     fn a_name_with_the_role_left_out_still_reads() {
         // What an older session, or somebody writing a frame by hand, sends. Refusing it would
         // break the one thing a name is for.
-        let short = Identity::read("axon/delta-rho").expect("a name");
-        assert_eq!(short.project, "axon");
+        let short = Identity::read("magi/delta-rho").expect("a name");
+        assert_eq!(short.project, "magi");
         assert_eq!(short.id, "delta-rho");
         assert_eq!(short.role, "main");
     }
 
     #[test]
     fn what_is_not_a_name_is_not_read_as_one() {
-        for written in ["", "axon", "a/b/c/d", "/"] {
+        for written in ["", "magi", "a/b/c/d", "/"] {
             assert_eq!(Identity::read(written), None, "{written:?}");
         }
     }
@@ -201,14 +201,14 @@ mod tests {
     #[test]
     fn a_config_may_name_the_project_and_an_empty_name_is_not_a_name() {
         assert_eq!(Identity::here(Some("chosen")).project, "chosen");
-        // Otherwise `axon.project = ""` produces `/main/delta-rho`, which reads as a bug.
+        // Otherwise `magi.project = ""` produces `/main/delta-rho`, which reads as a bug.
         assert_eq!(Identity::here(Some("   ")).project, folder());
         assert_eq!(Identity::here(None).project, folder());
     }
 
     #[test]
     fn the_project_is_the_folder_rather_than_the_path() {
-        // `/home/you/work/axon` is `axon`, because that is what a person calls it.
+        // `/home/you/work/magi` is `magi`, because that is what a person calls it.
         assert!(!folder().contains('/'), "{}", folder());
         assert!(!folder().is_empty());
     }

@@ -301,7 +301,7 @@ mod tests {
     fn about() -> About {
         About {
             me: Identity {
-                project: "axon".to_owned(),
+                project: "magi".to_owned(),
                 role: "main".to_owned(),
                 id: "alpha-rho".to_owned(),
             },
@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn a_main_answers_another_main_in_the_same_project() {
-        let them = whom("axon", "beta-nu", None);
+        let them = whom("magi", "beta-nu", None);
         let (reply, _) = answer(&call("status"), &about(), Some(&them));
         assert!(reply.ok, "{reply:?}");
     }
@@ -369,7 +369,7 @@ mod tests {
     fn a_cousin_is_refused_at_the_default_and_told_what_would_help() {
         let mut about = about();
         about.parent = Some("beta-nu".to_owned());
-        let them = whom("axon", "tau-chi", Some("gamma-xi"));
+        let them = whom("magi", "tau-chi", Some("gamma-xi"));
         let (reply, _) = answer(&call("status"), &about, Some(&them));
         assert!(!reply.ok);
         let why = reply.error.unwrap_or_default();
@@ -380,11 +380,11 @@ mod tests {
     fn a_message_is_stamped_with_who_actually_sent_it() {
         // Never with an argument. A message that could name its own sender is one anybody can
         // forge into anybody's inbox.
-        let them = whom("axon", "beta-nu", None);
+        let them = whom("magi", "beta-nu", None);
         let call = Call {
             call: "tell".to_owned(),
             args: vec![serde_json::json!("the parser is done")],
-            from: Some("axon/main/somebody-else".to_owned()),
+            from: Some("magi/main/somebody-else".to_owned()),
             token: None,
         };
         let (reply, then) = answer(&call, &about(), Some(&them));
@@ -392,12 +392,12 @@ mod tests {
         let Then::Keep(message) = then else {
             panic!("it was not kept: {then:?}");
         };
-        assert_eq!(message.from, "axon/main/beta-nu");
+        assert_eq!(message.from, "magi/main/beta-nu");
     }
 
     #[test]
     fn a_message_carries_the_sort_it_was_sent_as() {
-        let them = whom("axon", "beta-nu", None);
+        let them = whom("magi", "beta-nu", None);
         let call = Call {
             call: "tell".to_owned(),
             args: vec![
@@ -416,7 +416,7 @@ mod tests {
     #[test]
     fn a_main_nobody_started_cannot_be_stopped_by_anything() {
         // It holds no secret, so there is nothing to quote back.
-        let them = whom("axon", "beta-nu", None);
+        let them = whom("magi", "beta-nu", None);
         let (reply, then) = answer(&call("stop"), &about(), Some(&them));
         assert!(!reply.ok);
         assert_eq!(then, Then::Nothing);
@@ -427,7 +427,7 @@ mod tests {
         let mut about = about();
         about.parent = Some("beta-nu".to_owned());
         about.token = Some("s3cret".to_owned());
-        let parent = whom("axon", "beta-nu", None);
+        let parent = whom("magi", "beta-nu", None);
         let call = Call {
             call: "stop".to_owned(),
             token: Some("s3cret".to_owned()),
@@ -445,7 +445,7 @@ mod tests {
         let mut about = about();
         about.parent = Some("beta-nu".to_owned());
         about.token = Some("s3cret".to_owned());
-        let pretending = whom("axon", "beta-nu", None);
+        let pretending = whom("magi", "beta-nu", None);
         for token in [None, Some("guessed".to_owned())] {
             let call = Call {
                 call: "stop".to_owned(),
@@ -464,7 +464,7 @@ mod tests {
         let mut about = about();
         about.parent = Some("beta-nu".to_owned());
         about.token = Some("s3cret".to_owned());
-        let sibling = whom("axon", "zeta-pi", Some("beta-nu"));
+        let sibling = whom("magi", "zeta-pi", Some("beta-nu"));
         let call = Call {
             call: "stop".to_owned(),
             token: Some("s3cret".to_owned()),
@@ -479,7 +479,7 @@ mod tests {
     fn kin_says_how_the_caller_stands_and_whether_it_may_stop() {
         let mut about = about();
         about.parent = Some("beta-nu".to_owned());
-        let parent = whom("axon", "beta-nu", None);
+        let parent = whom("magi", "beta-nu", None);
         let (reply, _) = answer(&call("kin"), &about, Some(&parent));
         assert!(reply.ok, "{reply:?}");
         assert_eq!(reply.result[0]["relation"], "parent");
@@ -488,7 +488,7 @@ mod tests {
 
     #[test]
     fn a_verb_nothing_answers_says_so_rather_than_dropping_the_connection() {
-        let them = whom("axon", "beta-nu", None);
+        let them = whom("magi", "beta-nu", None);
         let (reply, _) = answer(&call("nope"), &about(), Some(&them));
         assert!(!reply.ok);
         assert!(
@@ -503,7 +503,7 @@ mod tests {
         let mut about = about();
         about.parent = Some("beta-nu".to_owned());
         about.token = Some("s3cret".to_owned());
-        let parent = whom("axon", "beta-nu", None);
+        let parent = whom("magi", "beta-nu", None);
         for (name, _) in VERBS {
             let call = Call {
                 call: (*name).to_owned(),

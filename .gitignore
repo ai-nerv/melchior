@@ -1,7 +1,7 @@
 *.exe
 *.test
 *.out
-/atom
+/melchior
 /coverage.out
 /bin
 /build

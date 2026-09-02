@@ -1,12 +1,12 @@
-# atom
+# melchior
 
 One agent talking to another: naming, finding, reaching and refusing.
 
-atom is the layer a coding agent uses to know about the other agents on the machine — who is
+melchior is the layer a coding agent uses to know about the other agents on the machine — who is
 running, how each stands to it, what it may say to them, and what it may not. It knows nothing
 about turns, transcripts, models or screens. Those belong to whatever harness is using it.
 
-It was lifted whole out of [axon](https://github.com/termworks/axon), which is why the one rule
+It was lifted whole out of [magi](https://github.com/termworks/magi), which is why the one rule
 worth stating is that **nothing here knows what a harness is**. No dependency on one, and no type
 from one: the vocabulary a model can call goes out as *data*, and the harness turns that into
 whatever a tool looks like on its side.
@@ -14,7 +14,7 @@ whatever a tool looks like on its side.
 ## Where sessions live
 
 ```
-$XDG_RUNTIME_DIR/atom/
+$XDG_RUNTIME_DIR/melchior/
   myproject/                 one directory per project
     alpha-rho                a socket, named by the id and nothing else
     iota-mu
@@ -30,16 +30,16 @@ Two walls, and no setting opens either past what it says:
 - **the project wall** — a session sees only its own project's directory. Not "should not":
   another project's sessions are not refused, they are somewhere this one never lists.
 - **the instance wall** — a main is its instance's front door; the subagents behind it are
-  private. `atom.talk` widens this to siblings, or to everything in the project, and nothing
+  private. `melchior.talk` widens this to siblings, or to everything in the project, and nothing
   widens it further.
 
 ## Commands
 
 ```sh
-atom serve      # bind this session's socket and answer for it
-atom tool       # the vocabulary a model calls, one exec per request
-atom lua-api    # the Lua client library, for redirecting into a config directory
-atom verbs      # what a session answers over its socket
+melchior serve      # bind this session's socket and answer for it
+melchior tool       # the vocabulary a model calls, one exec per request
+melchior lua-api    # the Lua client library, for redirecting into a config directory
+melchior verbs      # what a session answers over its socket
 ```
 
 `serve` is a **child, not a daemon**: it reads its parent's pipe and exits when that closes, so a
@@ -51,7 +51,7 @@ Two things cross the pipe, one JSON object per line:
 
 ```
 ->  {"say":"doing","busy":true,"working_for":7,"waiting":0}
-<-  {"heard":"listening","at":"…/atom/demo/alpha-rho"}
+<-  {"heard":"listening","at":"…/melchior/demo/alpha-rho"}
 <-  {"heard":"message","who":"demo/main/beta-nu","sort":"attention","text":"…"}
 ```
 
@@ -71,7 +71,7 @@ server as having returned nothing at all, and an empty answer looks like an empt
 A refusal is a reply, not a dropped connection. A connection serves more than one call. Hanging
 up is not a mistake. `verbs` is answered from the first version and before any permission check,
 and `client` beside it hands over the library that speaks all this — enough for a sandboxed VM
-that cannot shell out to run `atom lua-api`.
+that cannot shell out to run `melchior lua-api`.
 
 Every call says who is making it. That claim is taken at face value, because everything here is
 one user in one directory and a check that cannot be enforced reads like security to whoever
@@ -81,12 +81,12 @@ whoever started it ever held.
 
 ## Talking to it from Lua
 
-`atom lua-api` prints a plain-Lua client — framing, encoding, discovery and the verbs — with no
+`melchior lua-api` prints a plain-Lua client — framing, encoding, discovery and the verbs — with no
 dependencies of its own. Siblings copy it rather than port it.
 
 ```lua
-local atom = load(src)(host.stream)
-local them = atom.connect("beta-nu")
+local melchior = load(src)(host.stream)
+local them = melchior.connect("beta-nu")
 print(them.status())
 them.tell("the parser is done", "attention")
 them:close()
