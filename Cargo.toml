@@ -1,8 +1,8 @@
 [package]
-name = "atom"
+name = "melchior"
 version = "0.1.0"
 edition = "2024"
-description = "atom"
+description = "One agent talking to another: naming, finding, reaching and refusing"
 license = "MIT"
 readme = "README.md"
 publish = false
@@ -10,7 +10,29 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "melchior"
+path = "src/main.rs"
+
+# Four, and no harness among them. melchior was lifted out of one and is meant to be usable by
+# another, so anything that knew what a turn or a transcript was would put it back where it
+# started. What a harness needs from here crosses as data and as bytes on a pipe.
 [dependencies]
+rustix = { version = "0.38", features = ["process"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+tokio = { version = "1", features = ["rt", "net", "io-util", "fs", "time", "sync", "macros"] }
 
 [dev-dependencies]
 
+# The same gate this code was written under, not a stricter one. Tightening it on the way out
+# would mean rewriting working code to satisfy a rule nobody had chosen, in the same change that
+# is meant to prove it moved unaltered.
+[lints.rust]
+unsafe_code = "deny"
+unused = { level = "deny", priority = -1 }
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
