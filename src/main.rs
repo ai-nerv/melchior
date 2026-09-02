@@ -113,6 +113,19 @@ enum Heard {
         /// The message it answers, when it answers one.
         about: Option<String>,
     },
+    /// Who else is in this project, whenever that changes.
+    ///
+    /// Pushed rather than asked for, because the thing that wants it is a completion popup: a
+    /// harness offering `$` on a keystroke cannot spawn a process or open a socket to answer it,
+    /// and one that cached the answer at startup would offer a session that has since gone and
+    /// miss the one that just arrived.
+    ///
+    /// It also keeps the layout here. A harness listing the directory for itself would be a
+    /// second place that knows where sockets live and what a `.parent` file is called.
+    Around {
+        /// Every session listening, by id, this one included.
+        names: Vec<String>,
+    },
     /// Somebody with the right to stop this session did.
     Stopped,
 }
@@ -189,6 +202,15 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
             .await;
         });
 
+        // Who else is in the project, watched on a slow tick. There is no event to hook: the
+        // directory is the registry, and a session appears in it by binding a socket that this
+        // process has no reason to be told about. Two seconds is well under how long it takes
+        // somebody to notice a name is missing from a completion popup, and the check is a
+        // directory listing.
+        let mut around: Vec<String> = Vec::new();
+        let mut sweep = tokio::time::interval(std::time::Duration::from_secs(2));
+        sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
         // The parent's side of the pipe, read on a thread because it is a blocking stdin and
         // everything else here is not.
         let (told_tx, mut told) = tokio::sync::mpsc::channel::<Told>(16);
@@ -247,6 +269,15 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                 Some(()) = stopped.recv() => {
                     say(&Heard::Stopped);
                     break;
+                }
+                _ = sweep.tick() => {
+                    let now = atom::directory::listening(&me.project);
+                    // Only on a change. A line every two seconds for the life of a session is a
+                    // pipe nobody can read a log out of, and a parent that has to diff it.
+                    if now != around {
+                        around = now;
+                        say(&Heard::Around { names: around.clone() });
+                    }
                 }
                 // Both remaining arms can close on their own — the serving task dropping its
                 // senders — and either way there is nobody left to answer for.

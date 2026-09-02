@@ -63,11 +63,21 @@ impl Serving {
         stdin.flush().expect("flushed");
     }
 
-    /// Read the next thing it says.
-    fn heard(&mut self) -> serde_json::Value {
-        let mut line = String::new();
-        self.out.read_line(&mut line).expect("it says something");
-        serde_json::from_str(&line).expect("one JSON object")
+    /// Read until it says something of `kind`.
+    ///
+    /// Skipping the rest, because a parent does: `around` arrives on its own schedule and a
+    /// reader that took "the next line" as the answer to its own question would read a roster
+    /// as a message the moment the two happened to cross.
+    fn heard(&mut self, kind: &str) -> serde_json::Value {
+        for _ in 0..64 {
+            let mut line = String::new();
+            self.out.read_line(&mut line).expect("it says something");
+            let said: serde_json::Value = serde_json::from_str(&line).expect("one JSON object");
+            if said["heard"] == kind {
+                return said;
+            }
+        }
+        panic!("nothing of kind {kind} came back");
     }
 
     /// One call over the socket, framed by hand, the way a sibling would.
@@ -123,7 +133,7 @@ fn a_message_from_a_sibling_comes_up_the_pipe() {
     );
     assert_eq!(reply["ok"], true, "{reply}");
 
-    let heard = serving.heard();
+    let heard = serving.heard("message");
     assert_eq!(heard["heard"], "message");
     assert_eq!(heard["who"], "demo/main/socat");
     assert_eq!(heard["sort"], "attention");
