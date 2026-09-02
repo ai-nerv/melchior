@@ -185,7 +185,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
     runtime.block_on(async move {
         let (about_tx, about_rx) = tokio::sync::watch::channel(atom::answering::About {
             me: me.clone(),
-            parent: atom::directory::parent(),
+            parent: atom::directory::parent_of(&me),
             token: atom::directory::token(),
             busy: false,
             working_for: 0,
@@ -317,7 +317,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                         let request = pending.remove(at);
                         if accept && let Some(them) = atom::identity::Identity::read(&request.from)
                         {
-                            atom::directory::adopted(&them, &me.full());
+                            atom::directory::adopted(&them, &me.id);
                         }
                         // Told either way, and told by us: the asker has been waiting since its
                         // call was answered with "the question has been put", and a silence it
@@ -330,6 +330,15 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                     break;
                 }
                 _ = sweep.tick() => {
+                    // Re-read on the tick, because being adopted happens to this session from
+                    // outside it: whoever accepted wrote the note, and no variable can be set on
+                    // a process already running. Left as it stood at startup, a session that had
+                    // been taken on would go on telling callers it was a main, and its own `kin`
+                    // would disagree with every other reading of the same directory.
+                    let mine = atom::directory::parent_of(&me);
+                    if mine != about_tx.borrow().parent {
+                        about_tx.send_modify(|about| about.parent.clone_from(&mine));
+                    }
                     let now = atom::directory::listening(&me.project);
                     // Only on a change. A line every two seconds for the life of a session is a
                     // pipe nobody can read a log out of, and a parent that has to diff it.
@@ -419,7 +428,7 @@ fn brief(project: Option<&str>, asked: &std::collections::BTreeMap<String, Strin
     let standing = me.map(|me| atom::verbs::Standing {
         inbox: atom::directory::inbox_of(&me),
         forked: atom::directory::children(&me),
-        parent: atom::directory::parent(),
+        parent: atom::directory::parent_of(&me),
         minted: std::collections::BTreeMap::new(),
         me: me.full(),
     });

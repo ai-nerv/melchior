@@ -96,7 +96,7 @@ fn standing() -> Option<Standing> {
         // Read off the directory, never from what a child says about itself. A child that
         // declined to leave its note would otherwise have made itself unstoppable.
         forked: atom::directory::children(&me),
-        parent: atom::directory::parent(),
+        parent: atom::directory::parent_of(&me),
         // Empty, so `stop` is refused with "this session did not start it". The secrets are
         // minted by whatever spawns a child, and nothing spawns one yet; when something does,
         // it hands them down the same way a name is handed down.

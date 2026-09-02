@@ -96,6 +96,26 @@ pub fn parent() -> Option<String> {
     said(PARENT)
 }
 
+/// Who `me` answers to, as everybody else can see it.
+///
+/// **The note first, the environment second**, and the order is the whole point. A session
+/// spawned as a child learns its parent from the environment and writes the note from it; a
+/// session *adopted* while it runs is given a note by whoever accepted it, and there is no
+/// environment to change — a variable cannot be set on a process that is already running.
+///
+/// Reading only the environment left a session that had been adopted still calling itself a
+/// main. Every other session read the note and saw a child, so the tree disagreed with itself
+/// depending on who was asked — and the rule that stops a session having two parents, which
+/// tests exactly this, could be walked straight through.
+#[must_use]
+pub fn parent_of(me: &Identity) -> Option<String> {
+    std::fs::read_to_string(kin_at(me))
+        .ok()
+        .map(|said| said.trim().to_owned())
+        .filter(|said| !said.is_empty())
+        .or_else(parent)
+}
+
 /// The secret this session was started with, if it was started by another.
 #[must_use]
 pub fn token() -> Option<String> {
@@ -344,6 +364,12 @@ pub fn forget(me: &Identity) {
 ///
 /// It says nothing about what the child may then do. That is handed over separately, by the
 /// parent's harness to the child's, so a forged note buys the forger a word and no authority.
+///
+/// `parent` is an **id**, not a full name: it is what every reader of this note compares against
+/// — [`children`] and [`policy::between`] both test it against a bare id — and a full name here
+/// matches nothing. Written that way once, the adopted session read as a *cousin* to the very
+/// session that had just accepted it, which was then refused for reaching another instance's
+/// subagent.
 pub fn adopted(them: &Identity, parent: &str) {
     let path = kin_at(them);
     if let Some(dir) = path.parent() {
@@ -628,5 +654,83 @@ mod tests {
     fn listening_answers_nothing_rather_than_failing_with_no_directory() {
         // Nothing has started here yet, which is every project until something does.
         assert!(listening("no-such-project-here").is_empty());
+    }
+}
+
+/// A note written by a consenting parent is one every reader agrees with.
+#[cfg(test)]
+mod adopting {
+    use super::*;
+
+    /// A project of its own, so these do not read each other's directory.
+    fn alone(name: &str) -> String {
+        let project = format!("atom-adopt-{}-{name}", std::process::id());
+        let _ = std::fs::remove_dir_all(home(&project));
+        project
+    }
+
+    fn id(project: &str, id: &str) -> Identity {
+        Identity {
+            project: project.to_owned(),
+            role: "main".to_owned(),
+            id: id.to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_adopted_session_reads_as_the_adopters_child() {
+        // The bug this is here for: the note was written as a full name and every reader
+        // compares it against a bare id, so the child read as a *cousin* — and the session that
+        // had just accepted it was refused for reaching another instance's subagent.
+        let project = alone("child");
+        let parent = id(&project, "beta-omicron");
+        let child = id(&project, "psi-eta");
+        std::fs::create_dir_all(home(&project)).expect("mkdir");
+
+        adopted(&child, &parent.id);
+
+        let theirs = whom(&project, &child.id);
+        let mine = whom(&project, &parent.id);
+        assert_eq!(
+            policy::between(&mine, &theirs),
+            policy::Relation::Child,
+            "the adopter does not see a child"
+        );
+        assert_eq!(
+            policy::between(&theirs, &mine),
+            policy::Relation::Parent,
+            "the adopted does not see a parent"
+        );
+        let _ = std::fs::remove_dir_all(home(&project));
+    }
+
+    #[test]
+    fn and_shows_up_as_one_of_the_adopters_children() {
+        // The other reader of the same note, and it compares the same way.
+        let project = alone("listed");
+        let parent = id(&project, "beta-omicron");
+        std::fs::create_dir_all(home(&project)).expect("mkdir");
+        adopted(&id(&project, "psi-eta"), &parent.id);
+        // `children` only counts sessions that are listening, so this asserts the note is read
+        // rather than that the pair is live.
+        assert_eq!(
+            whom(&project, "psi-eta").parent.as_deref(),
+            Some("beta-omicron")
+        );
+        let _ = std::fs::remove_dir_all(home(&project));
+    }
+
+    #[test]
+    fn a_session_reads_its_own_parent_off_the_note_rather_than_its_environment() {
+        // Being adopted happens from outside: no variable can be set on a running process. Read
+        // from the environment alone, an adopted session went on calling itself a main while
+        // everybody else saw a child — and the rule against a second parent tests exactly that.
+        let project = alone("mine");
+        let child = id(&project, "psi-eta");
+        std::fs::create_dir_all(home(&project)).expect("mkdir");
+        assert_eq!(parent_of(&child), None, "it starts with nobody");
+        adopted(&child, "beta-omicron");
+        assert_eq!(parent_of(&child).as_deref(), Some("beta-omicron"));
+        let _ = std::fs::remove_dir_all(home(&project));
     }
 }
