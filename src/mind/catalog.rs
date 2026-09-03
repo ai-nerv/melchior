@@ -81,7 +81,10 @@ impl Catalog {
         // No relative fallback. `config` resolved against the working directory, so melchior
         // run from a sibling's checkout read that sibling's files. Nothing there means the copy
         // in the binary.
-        base.map_or_else(|| PathBuf::from("/nonexistent"), |base| base.join("melchior"))
+        base.map_or_else(
+            || PathBuf::from("/nonexistent"),
+            |base| base.join("melchior"),
+        )
     }
 
     /// Every model, as a card.
