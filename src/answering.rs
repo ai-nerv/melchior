@@ -123,7 +123,7 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
     let relation = policy::between(&me, caller);
     let theirs = policy::between(caller, &me);
     let wanted = match call.call.as_str() {
-        "identity" | "kin" | "status" | "inbox" => Reach::Ask,
+        "identity" | "kin" | "status" | "inbox" | "needs" => Reach::Ask,
         // Reaching as far as a message does, and no further. Asking costs the far end a prompt
         // and nothing else — the weight is all in the answer, which is not this layer's to give.
         "tell" | "adopt" | "adopted" => Reach::Tell,
@@ -142,6 +142,14 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
         );
     }
     match call.call.as_str() {
+        // Read-only, so it answers anyone the walls allow. `configure` deliberately does not
+        // live here: it runs Lua, and the family's own rule is that a socket which runs things
+        // is remote code execution. What may configure this is what started it, over argv and
+        // stdin, where the trust already is.
+        "needs" => (
+            Reply::of(serde_json::json!(crate::mind::setup::needs())),
+            Then::Nothing,
+        ),
         "identity" => (
             Reply::of(serde_json::json!({
                 "project": about.me.project,
