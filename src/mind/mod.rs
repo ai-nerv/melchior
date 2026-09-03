@@ -10,5 +10,6 @@ pub mod lua;
 pub mod model;
 pub mod provider;
 pub mod running;
+pub mod signing;
 pub mod speaking;
 pub mod wire;

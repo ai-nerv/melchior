@@ -230,3 +230,126 @@ mod tests {
         assert!(catalog.find("nobody/nothing").is_none());
     }
 }
+
+/// What the shipped catalog must be true of, whoever edits it.
+///
+/// These came across with the catalog itself. They were magi's while magi held the providers,
+/// and they assert about the same file — a description that says nothing useful is a model
+/// nobody can reach, and the failure shows up as "no such model" a long way from the cause.
+#[cfg(test)]
+mod shape {
+    use super::*;
+
+    fn shipped() -> Catalog {
+        Catalog::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("config")).expect("load")
+    }
+
+    #[test]
+    fn provider_ids_are_unique() {
+        let catalog = shipped();
+        let mut seen = std::collections::BTreeSet::new();
+        for provider in &catalog.providers {
+            assert!(seen.insert(provider.id.clone()), "twice: {}", provider.id);
+        }
+    }
+
+    #[test]
+    fn a_provider_either_lists_its_models_or_asks_for_them() {
+        // Neither is a provider that offers nothing, which reads from the outside as the
+        // provider being broken rather than the declaration being empty.
+        for provider in &shipped().providers {
+            assert!(
+                !provider.models.is_empty() || provider.discover,
+                "{} lists no models and does not discover",
+                provider.id
+            );
+        }
+    }
+
+    #[test]
+    fn every_model_is_stamped_with_its_provider_and_an_interface() {
+        // A config says these once at the top; a `Model` carries them. Assembling them wrongly
+        // is how a model ends up spoken to over the wrong protocol.
+        let catalog = shipped();
+        for provider in &catalog.providers {
+            for model in &provider.models {
+                assert_eq!(model.provider, provider.id, "{} is misstamped", model.id);
+            }
+        }
+        for card in catalog.cards() {
+            assert!(!card.api.is_empty(), "{} names no interface", card.id);
+        }
+    }
+
+    #[test]
+    fn context_windows_are_plausible() {
+        // A window of zero cannot be over, so it never compacts; one of a hundred million
+        // compacts never. Both fail silently, which is why this is asserted rather than trusted.
+        for provider in &shipped().providers {
+            for model in &provider.models {
+                assert!(
+                    (1000..=10_000_000).contains(&model.context_window),
+                    "{}: {} is not a plausible window",
+                    model.id,
+                    model.context_window
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_registration_name_becomes_the_id() {
+        // The id comes from the registration rather than the table, so a config cannot declare
+        // one name and register another — and a loop over a directory names each by its key.
+        for provider in &shipped().providers {
+            assert!(!provider.id.is_empty());
+        }
+        let declared = assemble(
+            "named-here",
+            &serde_json::json!({
+                "name": "Something Else",
+                "api": "openai-completions",
+                "auth": { "kind": "none" },
+            }),
+        )
+        .expect("assembles");
+        assert_eq!(
+            declared.id, "named-here",
+            "the key registered it, not the table"
+        );
+        assert_eq!(declared.name, "Something Else", "the table still names it");
+    }
+
+    #[test]
+    fn a_config_may_declare_providers_in_a_loop() {
+        // The point of the config being Lua. A provider declared in a loop is the same table as
+        // one written out by hand.
+        let dir = std::env::temp_dir().join(format!("melchior-loop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            dir.join("providers.lua"),
+            r#"
+            for _, host in ipairs({ "one", "two", "three" }) do
+              melchior.provider(host, {
+                name = host,
+                api = "openai-completions",
+                base_url = "http://" .. host .. "/v1",
+                auth = { kind = "none" },
+                models = { { id = "m", name = "M", context_window = 8000, max_tokens = 900 } },
+              })
+            end
+            "#,
+        )
+        .expect("write");
+
+        let catalog = Catalog::load(&dir).expect("load");
+        for host in ["one", "two", "three"] {
+            assert!(
+                catalog.providers.iter().any(|p| p.id == host),
+                "{host} was not declared"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

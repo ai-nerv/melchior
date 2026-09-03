@@ -44,6 +44,10 @@ fn main() -> std::io::Result<()> {
         }
         Some("models") => melchior::mind::speaking::models(&flags(args)),
         Some("ask") => melchior::mind::speaking::ask(&flags(args)),
+        // Credentials live where the model does. A subscription is not something a person can
+        // export, so "how do I enable this" needs a command for an answer, and it belongs to
+        // whoever holds the token.
+        Some("auth") => signing(args),
         Some("lua-api") => {
             print!("{}", melchior::CLIENT);
             Ok(())
@@ -488,6 +492,33 @@ fn brief(project: Option<&str>, asked: &std::collections::BTreeMap<String, Strin
         "{}",
         melchior::briefing::about(&named, &standing.unwrap_or_default())
     );
+}
+
+/// `melchior auth login|logout|status`.
+///
+/// Its own runtime, because signing in opens a browser and waits on a loopback redirect, and a
+/// one-shot command has none to borrow.
+fn signing(mut args: impl Iterator<Item = String>) -> std::io::Result<()> {
+    let what = args.next().unwrap_or_else(|| "status".to_owned());
+    let who = args.next().unwrap_or_default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let done = match what.as_str() {
+        "login" => runtime.block_on(melchior::mind::signing::login(&who)),
+        "logout" => melchior::mind::signing::logout(&who),
+        "status" => melchior::mind::signing::status(),
+        other => {
+            eprintln!("melchior auth: no such command: {other}");
+            eprintln!("usage: melchior auth login <provider> | logout <provider> | status");
+            std::process::exit(2);
+        }
+    };
+    if let Err(why) = done {
+        eprintln!("melchior auth: {why}");
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
