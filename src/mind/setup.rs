@@ -79,13 +79,24 @@ const SETTINGS: &[&str] = &["model", "thinking", "max_tokens", "discover"];
 /// When the chunk will not compile or raises. Fatal rather than partial: a description that did
 /// not run has expressed no intention, and applying half of one is worse than applying none.
 pub fn configure(source: &str) -> Result<Applied, String> {
+    configure_into(&given(), source)
+}
+
+/// The same, kept somewhere named.
+///
+/// The path is a parameter so a test can own one. It was process-wide, and tests running
+/// together deleted each other's file — the same shape as two coordinators sharing a melchior,
+/// which is a thing neither should do.
+///
+/// # Errors
+/// As [`configure`].
+pub fn configure_into(path: &std::path::Path, source: &str) -> Result<Applied, String> {
     let mut engine = crate::mind::lua::engine::Engine::new();
     // What the VM holds before the chunk runs. The module carries entries of its own — `ui`,
     // `self` — and a hardcoded list of those would be a list to keep in step with the VM. The
     // *difference* is what the coordinator said, whatever the VM happens to install.
     engine.harvest();
-    let before: std::collections::BTreeSet<String> =
-        engine.config().settings.keys().cloned().collect();
+    let before = engine.config().settings.clone();
 
     engine
         .run(source, "configure")
@@ -95,7 +106,9 @@ pub fn configure(source: &str) -> Result<Applied, String> {
     let config = engine.config();
     let mut applied = Applied::default();
     for name in SETTINGS {
-        if config.get(name).is_some() {
+        // Changed, not merely present. A VM that installs a setting of its own would otherwise
+        // report it as something the coordinator said.
+        if config.get(name).is_some() && config.get(name) != before.get(*name) {
             applied.set.push((*name).to_owned());
         }
     }
@@ -109,7 +122,7 @@ pub fn configure(source: &str) -> Result<Applied, String> {
     // becomes an afternoon: the setting reads as accepted and does nothing for the rest of the
     // session.
     for name in config.settings.keys() {
-        if !before.contains(name) && !SETTINGS.contains(&name.as_str()) {
+        if !before.contains_key(name) && !SETTINGS.contains(&name.as_str()) {
             applied.refused.push(Refused {
                 name: name.to_owned(),
                 why: "melchior takes no setting by that name; `needs` lists what it takes"
@@ -122,7 +135,7 @@ pub fn configure(source: &str) -> Result<Applied, String> {
     // Written where the next VM will read it, so it outlives this call. A setting held only in
     // memory would be lost the moment a turn built its own VM, which is every turn.
     if applied.whole() {
-        remember(source)?;
+        remember(path, source)?;
     }
     Ok(applied)
 }
@@ -140,12 +153,11 @@ pub fn given() -> std::path::PathBuf {
     base.join("melchior").join("given.lua")
 }
 
-fn remember(source: &str) -> Result<(), String> {
-    let path = given();
+fn remember(path: &std::path::Path, source: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|why| why.to_string())?;
     }
-    std::fs::write(&path, source).map_err(|why| why.to_string())
+    std::fs::write(path, source).map_err(|why| why.to_string())
 }
 
 /// Forget what a coordinator said.
@@ -159,6 +171,14 @@ pub fn forget() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A place of this test's own, so tests running together do not delete each other's.
+    fn mine(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("melchior-setup-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir.join("given.lua")
+    }
 
     #[test]
     fn everything_it_needs_has_a_default_or_is_optional() {
@@ -180,8 +200,8 @@ mod tests {
 
     #[test]
     fn a_setting_it_takes_is_applied_and_named() {
-        forget();
-        let applied = configure(r#"melchior.thinking = "high""#).expect("runs");
+        let path = mine("takes");
+        let applied = configure_into(&path, r#"melchior.thinking = "high""#).expect("runs");
         assert_eq!(applied.set, vec!["thinking".to_owned()], "{applied:?}");
         assert!(applied.whole());
         forget();
@@ -189,8 +209,8 @@ mod tests {
 
     #[test]
     fn a_setting_it_does_not_take_is_refused_by_name() {
-        forget();
-        let applied = configure(r#"melchior.colour = "green""#).expect("runs");
+        let path = mine("refused");
+        let applied = configure_into(&path, r#"melchior.colour = "green""#).expect("runs");
         assert!(!applied.whole(), "{applied:?}");
         assert_eq!(applied.refused[0].name, "colour");
         forget();
@@ -198,8 +218,8 @@ mod tests {
 
     #[test]
     fn a_chunk_that_will_not_run_is_an_error_rather_than_a_partial_apply() {
-        forget();
-        let why = configure("this is not lua at all !!").expect_err("must fail");
+        let path = mine("broken");
+        let why = configure_into(&path, "this is not lua at all !!").expect_err("must fail");
         assert!(!why.is_empty());
         assert!(
             !given().exists(),
@@ -209,8 +229,9 @@ mod tests {
 
     #[test]
     fn a_provider_declared_over_the_wire_is_counted() {
-        forget();
-        let applied = configure(
+        let path = mine("provider");
+        let applied = configure_into(
+            &path,
             r#"melchior.provider("wired", {
                  name = "Wired",
                  api = "openai-completions",
@@ -228,9 +249,9 @@ mod tests {
 
     #[test]
     fn what_was_given_outlives_the_call() {
-        forget();
-        configure(r#"melchior.thinking = "low""#).expect("runs");
-        let held = std::fs::read_to_string(given()).expect("kept");
+        let path = mine("outlives");
+        configure_into(&path, r#"melchior.thinking = "low""#).expect("runs");
+        let held = std::fs::read_to_string(&path).expect("kept");
         assert!(held.contains("thinking"), "{held}");
         forget();
         assert!(!given().exists(), "forget must actually forget");
