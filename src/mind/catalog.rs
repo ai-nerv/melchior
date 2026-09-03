@@ -47,6 +47,10 @@ impl Catalog {
             .filter_map(|(name, value)| assemble(name, value))
             .collect();
         drop(config);
+        // Ask the providers that asked to be asked. A hand-written list is stale the day it is
+        // written, and openrouter alone offers four hundred models.
+        let mut providers = providers;
+        crate::mind::discovering::discover(&mut providers);
         Ok(Self { providers, engine })
     }
 

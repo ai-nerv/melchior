@@ -122,18 +122,20 @@ pub fn ask(flags: &std::collections::BTreeMap<String, String>) -> std::io::Resul
         );
     };
 
-    // Not yet carried out: the transport is here and the turn that drives it is the next piece.
-    // Said plainly rather than left to a timeout, because a caller that gets nothing cannot tell
-    // a mind that refused from one that was lost.
-    let said = Said::Failed {
-        message: format!(
-            "melchior can describe {} but cannot yet run it: `ask` is declared and its turn is \
-             not built",
-            asked.model
-        ),
-        retryable: false,
-    };
-    stream(&mut out, how, &said)
+    // Its own runtime, because the mind is the only part of melchior that does I/O of this
+    // shape: a `serve` already has one, and a one-shot `ask` has none to borrow.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let mut wrote: std::io::Result<()> = Ok(());
+    runtime.block_on(crate::mind::running::run(&asked, |said| {
+        // Flushed per delta. A caller reading this to draw a screen wants the answer forming,
+        // and a buffer that filled first would hand it over all at once at the end.
+        if wrote.is_ok() {
+            wrote = stream(&mut out, how, &said);
+        }
+    }));
+    wrote
 }
 
 /// Write one [`Said`] as it happens.

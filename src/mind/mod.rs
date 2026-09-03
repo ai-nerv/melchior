@@ -5,8 +5,10 @@
 //! live here.
 
 pub mod catalog;
+pub mod discovering;
 pub mod lua;
 pub mod model;
 pub mod provider;
+pub mod running;
 pub mod speaking;
 pub mod wire;
