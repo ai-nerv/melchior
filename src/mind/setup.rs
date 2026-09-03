@@ -165,7 +165,16 @@ fn remember(path: &std::path::Path, source: &str) -> Result<(), String> {
 /// So a melchior restarted without one reads its own files again rather than yesterday's
 /// instructions.
 pub fn forget() {
-    let _ = std::fs::remove_file(given());
+    forget_at(&given());
+}
+
+/// The same, for a named file.
+///
+/// The other half of [`configure_into`], and for the same reason: [`given`] is one path shared by
+/// every melchior this user runs, so a test that forgot *it* would delete the settings of
+/// whatever session happens to be running -- and two tests doing it would delete each other's.
+pub fn forget_at(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
 }
 
 #[cfg(test)]
@@ -204,7 +213,7 @@ mod tests {
         let applied = configure_into(&path, r#"melchior.thinking = "high""#).expect("runs");
         assert_eq!(applied.set, vec!["thinking".to_owned()], "{applied:?}");
         assert!(applied.whole());
-        forget();
+        forget_at(&path);
     }
 
     #[test]
@@ -213,16 +222,19 @@ mod tests {
         let applied = configure_into(&path, r#"melchior.colour = "green""#).expect("runs");
         assert!(!applied.whole(), "{applied:?}");
         assert_eq!(applied.refused[0].name, "colour");
-        forget();
+        forget_at(&path);
     }
 
     #[test]
     fn a_chunk_that_will_not_run_is_an_error_rather_than_a_partial_apply() {
+        // The file this call was given, not the shared one. Asking after `given()` here was
+        // asking whether *some other* melchior had been configured: it passed while nothing
+        // else on the machine had run, and failed the moment a real session did.
         let path = mine("broken");
         let why = configure_into(&path, "this is not lua at all !!").expect_err("must fail");
         assert!(!why.is_empty());
         assert!(
-            !given().exists(),
+            !path.exists(),
             "a chunk that did not run must leave nothing behind"
         );
     }
@@ -244,7 +256,7 @@ mod tests {
             applied.set.iter().any(|s| s.starts_with("provider")),
             "{applied:?}"
         );
-        forget();
+        forget_at(&path);
     }
 
     #[test]
@@ -253,7 +265,25 @@ mod tests {
         configure_into(&path, r#"melchior.thinking = "low""#).expect("runs");
         let held = std::fs::read_to_string(&path).expect("kept");
         assert!(held.contains("thinking"), "{held}");
-        forget();
-        assert!(!given().exists(), "forget must actually forget");
+        forget_at(&path);
+        assert!(!path.exists(), "forget must actually forget");
+    }
+
+    #[test]
+    fn forgetting_is_aimed_at_one_file_and_not_at_the_shared_one() {
+        // What the bug was. Every one of these tests called the no-argument `forget`, which
+        // deletes the path a *running* melchior reads -- so the suite quietly took the
+        // settings out from under whatever session the person had open.
+        let path = mine("aimed");
+        configure_into(&path, r#"melchior.thinking = "low""#).expect("runs");
+        let live = given();
+        let stood = live.exists();
+        forget_at(&path);
+        assert!(!path.exists(), "it did not forget what it was pointed at");
+        assert_eq!(
+            live.exists(),
+            stood,
+            "forgetting one file disturbed the shared one"
+        );
     }
 }
