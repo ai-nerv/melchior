@@ -7,6 +7,8 @@
 //! |---|---|
 //! | `melchior serve` | binds this session's socket and answers for it, for as long as its parent lives |
 //! | `melchior tool` | the tool a model calls, spoken over the harness's own pipe protocol |
+//! | `melchior models` | what this machine could talk to, as cards |
+//! | `melchior ask` | run a turn against one, streaming what it says |
 //! | `melchior lua-api` | prints the client library, for redirecting into a config directory |
 //!
 //! # Nothing here is a daemon
@@ -40,6 +42,8 @@ fn main() -> std::io::Result<()> {
             brief(asked.get("project").map(String::as_str), &asked);
             Ok(())
         }
+        Some("models") => melchior::mind::speaking::models(&flags(args)),
+        Some("ask") => melchior::mind::speaking::ask(&flags(args)),
         Some("lua-api") => {
             print!("{}", melchior::CLIENT);
             Ok(())
@@ -52,15 +56,17 @@ fn main() -> std::io::Result<()> {
         }
         Some(other) => {
             eprintln!("melchior: no such command: {other}");
-            eprintln!("usage: melchior serve | tool | brief | lua-api | verbs");
+            eprintln!("usage: melchior serve | tool | brief | models | ask | lua-api | verbs");
             std::process::exit(2);
         }
         None => {
-            eprintln!("usage: melchior serve | tool | brief | lua-api | verbs");
+            eprintln!("usage: melchior serve | tool | brief | models | ask | lua-api | verbs");
             eprintln!();
             eprintln!("  serve     bind this session's socket and answer for it");
             eprintln!("  tool      the vocabulary a model calls, one exec per request");
             eprintln!("  brief     what to tell a model about the sessions a prompt named");
+            eprintln!("  models    what this machine could talk to  [--json|--cbor]");
+            eprintln!("  ask       run a turn, an Ask on stdin      [--json|--cbor]");
             eprintln!("  lua-api   print the Lua client library");
             eprintln!("  verbs     what a session answers");
             std::process::exit(2);
@@ -429,7 +435,19 @@ fn flags(args: impl Iterator<Item = String>) -> std::collections::BTreeMap<Strin
         };
         let (key, value) = match key.split_once('=') {
             Some((key, value)) => (key.to_owned(), value.to_owned()),
-            None => (key.to_owned(), args.next().unwrap_or_default()),
+            None => {
+                // A flag with another flag after it, or with nothing after it, is a bare yes.
+                // Taking the next argument regardless made `--cbor` mean nothing — the empty
+                // value was dropped below — and made `--name --json` set the name to "--json"
+                // and lose the encoding.
+                let takes = args.peek().is_some_and(|next| !next.starts_with("--"));
+                let value = if takes {
+                    args.next().unwrap_or_default()
+                } else {
+                    "yes".to_owned()
+                };
+                (key.to_owned(), value)
+            }
         };
         if value.is_empty() {
             continue;
@@ -470,4 +488,47 @@ fn brief(project: Option<&str>, asked: &std::collections::BTreeMap<String, Strin
         "{}",
         melchior::briefing::about(&named, &standing.unwrap_or_default())
     );
+}
+
+#[cfg(test)]
+mod flag_tests {
+    use super::flags;
+
+    fn parse(args: &[&str]) -> std::collections::BTreeMap<String, String> {
+        flags(args.iter().map(|a| (*a).to_owned()))
+    }
+
+    #[test]
+    fn a_flag_with_a_value_takes_it() {
+        assert_eq!(
+            parse(&["--project", "magi"]).get("project"),
+            Some(&"magi".to_owned())
+        );
+        assert_eq!(
+            parse(&["--project=magi"]).get("project"),
+            Some(&"magi".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_bare_flag_is_a_yes_rather_than_nothing() {
+        // `--cbor` meant nothing at all: it took the next argument, found none, and the empty
+        // value was dropped. Every answer came out as JSON however it was asked for.
+        assert_eq!(parse(&["--cbor"]).get("cbor"), Some(&"yes".to_owned()));
+    }
+
+    #[test]
+    fn a_bare_flag_does_not_swallow_the_one_after_it() {
+        let asked = parse(&["--ready", "--cbor"]);
+        assert_eq!(asked.get("ready"), Some(&"yes".to_owned()));
+        assert_eq!(asked.get("cbor"), Some(&"yes".to_owned()), "{asked:?}");
+    }
+
+    #[test]
+    fn repeats_still_accumulate() {
+        assert_eq!(
+            parse(&["--name", "a", "--name", "b"]).get("name"),
+            Some(&"a\nb".to_owned())
+        );
+    }
 }
