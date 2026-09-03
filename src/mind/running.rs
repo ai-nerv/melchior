@@ -13,7 +13,7 @@ use crate::mind::catalog::Catalog;
 use crate::mind::lua::adapter::LuaAdapter;
 use crate::mind::provider::api::{Delta, Options};
 use crate::mind::provider::client::{Call, Client};
-use crate::mind::wire::{Ask, Said};
+use crate::mind::wire::{Ask, Refusal, Said};
 
 /// Run one ask, handing over each [`Said`] as it happens.
 ///
@@ -26,7 +26,7 @@ pub async fn run(asked: &Ask, mut say: impl FnMut(Said)) {
         Err(why) => {
             say(Said::Failed {
                 message: format!("the configuration will not load: {why}"),
-                retryable: false,
+                why: Refusal::Invalid,
             });
             return;
         }
@@ -38,7 +38,7 @@ pub async fn run(asked: &Ask, mut say: impl FnMut(Said)) {
                 "no model called {:?}. `melchior models` lists what there is",
                 asked.model
             ),
-            retryable: false,
+            why: Refusal::Invalid,
         });
         return;
     };
@@ -53,7 +53,7 @@ pub async fn run(asked: &Ask, mut say: impl FnMut(Said)) {
         None => {
             say(Said::Failed {
                 message: "that model names no interface".to_owned(),
-                retryable: false,
+                why: Refusal::Invalid,
             });
             return;
         }
@@ -63,7 +63,7 @@ pub async fn run(asked: &Ask, mut say: impl FnMut(Said)) {
         Err(why) => {
             say(Said::Failed {
                 message: why,
-                retryable: false,
+                why: Refusal::Invalid,
             });
             return;
         }
@@ -93,23 +93,42 @@ pub async fn run(asked: &Ask, mut say: impl FnMut(Said)) {
     // and may report it twice — the adapter says so, and the client says so again at the end of
     // the body — and a reader that stops at the first terminal would drop the usage that came
     // after it. Exactly one ends the stream, and it is last.
-    let mut ended = None;
+    // Shared, because both callbacks say things and a closure cannot borrow the same `FnMut`
+    // twice. A cell rather than a channel: this is one thread and the cost is a borrow check.
+    let ended = std::cell::Cell::new(None);
+    let say = std::cell::RefCell::new(say);
     let outcome = Client::new()
-        .stream(&call, |delta| match carried(delta) {
-            Said::Stop { reason } => ended = Some(reason),
-            said => say(said),
-        })
+        .stream_reporting(
+            &call,
+            |delta| match carried(delta) {
+                Said::Stop { reason } => ended.set(Some(reason)),
+                said => (say.borrow_mut())(said),
+            },
+            // Said during the wait, not after it. A broker showing a spinner has no other way to
+            // tell somebody that forty seconds of nothing is a backoff rather than a hang.
+            |retry| {
+                (say.borrow_mut())(Said::Retrying {
+                    attempt: retry.attempt,
+                    of: retry.max_attempts,
+                    seconds: retry.delay.as_secs_f64(),
+                    why: retry.why.clone(),
+                });
+            },
+        )
         .await;
 
+    let mut say = say.into_inner();
     match outcome {
         Err(why) => say(Said::Failed {
             message: why.to_string(),
-            retryable: why.class.is_retryable(),
+            why: refused(why.class),
         }),
         // A stream that ended without the protocol saying why still ended. `EndTurn` is the
         // honest reading: the body finished and nothing complained.
         Ok(()) => say(Said::Stop {
-            reason: ended.unwrap_or(crate::mind::model::StopReason::EndTurn),
+            reason: ended
+                .into_inner()
+                .unwrap_or(crate::mind::model::StopReason::EndTurn),
         }),
     }
 }
@@ -284,5 +303,23 @@ mod ending_tests {
     fn a_stream_that_never_said_why_still_ends() {
         let said = folded(vec![Delta::Text("hi".into())]);
         assert!(said.last().is_some_and(Said::is_last), "{said:?}");
+    }
+}
+
+/// A provider's classification, as the wire names it.
+///
+/// The seven line up one for one, and they are written out rather than derived so that adding a
+/// class on either side is a compile error here rather than a silent `Unknown` a broker cannot
+/// act on. `Overflow` in particular is answered by compacting and asking again.
+fn refused(class: crate::mind::provider::retry::RetryClass) -> Refusal {
+    use crate::mind::provider::retry::RetryClass as R;
+    match class {
+        R::Transport => Refusal::Transport,
+        R::Overload => Refusal::Overload,
+        R::Throttle => Refusal::Throttle,
+        R::Auth => Refusal::Auth,
+        R::Invalid => Refusal::Invalid,
+        R::Overflow => Refusal::Overflow,
+        R::Unknown => Refusal::Unknown,
     }
 }
