@@ -44,6 +44,9 @@ fn main() -> std::io::Result<()> {
         }
         Some("models") => melchior::mind::speaking::models(&flags(args)),
         Some("ask") => melchior::mind::speaking::ask(&flags(args)),
+        // magi coordinates: it says what melchior should be, and melchior says what it takes.
+        Some("needs") => melchior::mind::speaking::needs(&flags(args)),
+        Some("configure") => melchior::mind::speaking::configure(&flags(args)),
         // Credentials live where the model does. A subscription is not something a person can
         // export, so "how do I enable this" needs a command for an answer, and it belongs to
         // whoever holds the token.

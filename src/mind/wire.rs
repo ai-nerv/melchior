@@ -397,3 +397,74 @@ mod cbor_tests {
         assert_eq!(serde_json::from_str::<Said>(&text).expect("decode"), said);
     }
 }
+
+/// What kind of value a setting takes.
+///
+/// Deliberately coarse. This says enough for a coordinator to send the right shape and for a
+/// person to read the list; anything finer would be a schema language, and the sibling is going
+/// to validate what it receives regardless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    /// A string.
+    Text,
+    /// A number.
+    Number,
+    /// True or false.
+    Flag,
+    /// A table — a list or a map, and the sibling says which in `about`.
+    Table,
+}
+
+/// One thing a sibling wants to be told.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Need {
+    /// What to set, as the config names it: `thinking`, `retention.days`.
+    pub name: String,
+    /// What sort of value it takes.
+    pub kind: Kind,
+    /// One line, for a person reading the list.
+    pub about: String,
+    /// Whether the sibling cannot work without it.
+    ///
+    /// Most settings are not: a sibling with a sensible default should say so rather than
+    /// demand an answer, and a coordinator that had to fill in twenty fields to start one would
+    /// be a coordinator nobody uses.
+    #[serde(default)]
+    pub required: bool,
+    /// What it does when nothing is said, when that is expressible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+}
+
+/// What a `configure` call did.
+///
+/// Named rather than counted: "3 settings applied" cannot be checked against what was sent, and
+/// the case that matters is the one where a coordinator sent something the sibling does not
+/// take. That is a refusal with a reason, never silence.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Applied {
+    /// Settings that took effect, by name.
+    #[serde(default)]
+    pub set: Vec<String>,
+    /// Settings that were sent and not taken, with why.
+    #[serde(default)]
+    pub refused: Vec<Refused>,
+}
+
+impl Applied {
+    /// Whether everything sent was taken.
+    #[must_use]
+    pub fn whole(&self) -> bool {
+        self.refused.is_empty()
+    }
+}
+
+/// One setting a sibling would not take.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Refused {
+    /// What was sent.
+    pub name: String,
+    /// Why it was not taken.
+    pub why: String,
+}

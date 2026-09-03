@@ -50,6 +50,12 @@ impl Catalog {
                 Err(_) => engine.run(builtin, name)?,
             }
         }
+        // Last, and over the top. What a coordinator said outranks what is on disk: magi is
+        // deciding, and a file that quietly won would be the disagreement this exists to end.
+        // Nothing there is the ordinary case of a melchior nobody is coordinating.
+        if let Ok(given) = std::fs::read_to_string(crate::mind::setup::given()) {
+            engine.run(&given, "given")?;
+        }
         engine.harvest();
         let config = engine.config();
         let providers: Vec<Provider> = config

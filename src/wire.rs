@@ -120,6 +120,7 @@ pub const VERBS: &[(&str, &str)] = &[
         "the Lua client library for this surface, as source",
     ),
     ("identity", "its project, role, id and who started it"),
+    ("needs", "what a coordinator may tell it, as declarations"),
     (
         "kin",
         "how the caller stands to it: parent, child, sibling, main, cousin",

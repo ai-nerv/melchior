@@ -266,7 +266,7 @@ end
 -- and not as a string, and a session that answers something newer will say so.
 local SURFACE = {
   "verbs", "client",
-  "identity", "kin", "status", "inbox",
+  "identity", "kin", "status", "inbox", "needs",
   "tell",
   -- The one act the far end cannot decline, so the one that has to prove itself: it carries the
   -- secret the session was started with, and a session nobody started holds none.

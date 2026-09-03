@@ -227,3 +227,36 @@ mod tests {
         assert!(text.contains("\"said\""), "untagged: {text}");
     }
 }
+
+/// `melchior needs` — what this sibling wants to be told.
+///
+/// # Errors
+/// When the answer will not be written.
+pub fn needs(flags: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
+    let how = As::asked(flags);
+    let mut out = std::io::stdout().lock();
+    reply(&mut out, how, &crate::mind::setup::needs())
+}
+
+/// `melchior configure` — read config Lua on stdin and apply it.
+///
+/// # Errors
+/// When the chunk cannot be read, or the answer cannot be written.
+pub fn configure(flags: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
+    let how = As::asked(flags);
+    let mut out = std::io::stdout().lock();
+
+    if flags.contains_key("forget") {
+        crate::mind::setup::forget();
+        return reply(&mut out, how, &[crate::mind::wire::Applied::default()]);
+    }
+
+    let mut source = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut source)?;
+    match crate::mind::setup::configure(&source) {
+        Ok(applied) => reply(&mut out, how, &[applied]),
+        // A chunk that will not run is a refusal, not a crash: the coordinator sent something,
+        // and what it needs back is which part was wrong.
+        Err(why) => refuse(&mut out, how, &why, "refused"),
+    }
+}
