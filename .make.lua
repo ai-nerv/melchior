@@ -22,6 +22,7 @@ end
 
 local NAME, VERSION = project()
 local PREFIX = os.getenv("PREFIX") or (os.getenv("HOME") .. "/.local")
+local CONFIG = (os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config")) .. "/" .. NAME
 
 ------------------------------------------------------------------ what was built
 
@@ -121,10 +122,14 @@ make.alias("b", "build")
 
 make.recipe{
   name = "install",
-  desc = ("install the binary to %s/bin"):format(PREFIX),
-  -- The binary and nothing else. melchior has no configuration of its own: what it needs in order
-  -- to be somebody arrives in the environment from whatever started it, and the Lua client is
-  -- printed by `melchior lua-api` for a sibling to redirect wherever it keeps such things.
+  desc = ("install the binary to %s/bin, and config/ where it reads it"):format(PREFIX),
+  -- It had no configuration once, and this comment said so. It has since taken over the model:
+  -- `apis.lua` describes the wire protocols and `providers.lua` the catalog, and both are files a
+  -- person edits. The binary carries a copy of each, so a fresh install already speaks; this is
+  -- how you get the real ones.
+  --
+  -- The Lua client is still printed by `melchior lua-api`, for a sibling to redirect wherever it
+  -- keeps such things.
   deps = { "build" },
   run = function()
     local bin = PREFIX .. "/bin"
@@ -132,6 +137,31 @@ make.recipe{
     assert(oslo.run{ "install", "-m", "755", "target/release/" .. NAME, bin .. "/" .. NAME }.ok,
            "could not install to " .. bin)
     print(("installed %s"):format(bin .. "/" .. NAME))
+    -- Last, and part of the install rather than a step to remember: a binary newer than the
+    -- protocols it reads is how a model that shipped with it silently does not exist.
+    make.run("configs")
+  end,
+}
+
+-- `config/*.lua` becomes `~/.config/melchior/*.lua`. A file that is not there is not missing:
+-- melchior falls back to the copy compiled into the binary, which is what lets it work on a
+-- machine that has never been configured.
+make.recipe{
+  name = "configs",
+  desc = ("install config/ to %s"):format(CONFIG),
+  run = function()
+    -- `capture` and `.out`: without it oslo streams the output to the terminal and hands back
+    -- nothing, so a listing like this prints the files and copies none of them.
+    local found = oslo.run{ "find", "config", "-type", "f", "-name", "*.lua", capture = true }
+    assert(found.ok, "could not list config/")
+    local copied = 0
+    for file in (found.out or ""):gmatch("[^\n]+") do
+      local into = CONFIG .. "/" .. file:gsub("^config/", "")
+      assert(oslo.run{ "mkdir", "-p", (into:match("^(.*)/[^/]*$")) }.ok, "could not create " .. into)
+      assert(oslo.run{ "install", "-m", "644", file, into }.ok, "could not install " .. file)
+      copied = copied + 1
+    end
+    print(("%d files -> %s"):format(copied, CONFIG))
   end,
 }
 

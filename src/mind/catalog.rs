@@ -14,6 +14,12 @@ use crate::mind::provider::model::Model;
 use crate::mind::wire::Card;
 use std::path::{Path, PathBuf};
 
+/// The protocols this build ships, for a machine with no configuration of its own.
+const APIS: &str = include_str!("../../config/apis.lua");
+
+/// The catalog this build ships, for the same reason.
+const PROVIDERS: &str = include_str!("../../config/providers.lua");
+
 /// Everything a config declared.
 pub struct Catalog {
     /// The endpoints, in the order they were declared.
@@ -33,10 +39,15 @@ impl Catalog {
         let mut engine = Engine::new();
         // Protocols first: a provider may name one, and a name that resolves to nothing should
         // be a refusal rather than an ordering accident.
-        for name in ["apis.lua", "providers.lua"] {
+        for (name, builtin) in [("apis.lua", APIS), ("providers.lua", PROVIDERS)] {
             let path = dir.join(name);
-            if path.exists() {
-                engine.run_file(&path)?;
+            match std::fs::read_to_string(&path) {
+                Ok(source) => engine.run(&source, &path.display().to_string())?,
+                // The copy in the binary. Without it melchior would only work where a config
+                // happened to be — and the relative fallback made that *whatever* `config/` sat
+                // next to the working directory, so running from magi's checkout loaded magi's
+                // protocols, which name a different global and fail at the first index.
+                Err(_) => engine.run(builtin, name)?,
             }
         }
         engine.harvest();
@@ -57,8 +68,8 @@ impl Catalog {
     /// Where the configuration lives.
     ///
     /// `$MELCHIOR_CONFIG` first, so a test or a second install names its own; then
-    /// `$XDG_CONFIG_HOME/melchior`; then the checkout's own `config/`, which is what makes this
-    /// runnable before it is installed.
+    /// `$XDG_CONFIG_HOME/melchior`. Nothing there is not an error: the binary carries a copy of
+    /// both files, so melchior works on a machine that has never been configured.
     #[must_use]
     pub fn dir() -> PathBuf {
         if let Some(named) = std::env::var_os("MELCHIOR_CONFIG").filter(|v| !v.is_empty()) {
@@ -67,10 +78,10 @@ impl Catalog {
         let base = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
-        match base {
-            Some(base) if base.join("melchior/providers.lua").exists() => base.join("melchior"),
-            _ => PathBuf::from("config"),
-        }
+        // No relative fallback. `config` resolved against the working directory, so melchior
+        // run from a sibling's checkout read that sibling's files. Nothing there means the copy
+        // in the binary.
+        base.map_or_else(|| PathBuf::from("/nonexistent"), |base| base.join("melchior"))
     }
 
     /// Every model, as a card.
