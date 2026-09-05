@@ -50,6 +50,7 @@ pub mod framing;
 pub mod identity;
 pub mod mind;
 pub mod policy;
+pub mod scratch;
 pub mod serving;
 pub mod verbs;
 pub mod wire;
