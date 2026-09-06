@@ -156,9 +156,12 @@ fn requirement_or_nothing(provider: &Provider) -> String {
 /// Best effort on purpose: the URL is printed above regardless, so a machine with no browser —
 /// a server over ssh, which is where this is most likely — loses nothing but a convenience.
 fn open_browser(url: &str) {
-    let _ = std::process::Command::new("xdg-open")
+    if let Err(why) = std::process::Command::new("xdg-open")
         .arg(url)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn();
+        .spawn()
+    {
+        crate::noted!("signing: xdg-open could not be started: {why}");
+    }
 }

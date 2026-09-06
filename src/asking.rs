@@ -129,7 +129,18 @@ impl Read for Reading<'_> {
 /// it is worth asking before a message is reported as delivered.
 #[must_use]
 pub fn answers(where_it_is: &Path, me: &Identity) -> bool {
-    Held::at(where_it_is, me).is_ok()
+    match Held::at(where_it_is, me) {
+        Ok(_) => true,
+        Err(why) => {
+            // The only place the reason survives. The caller wants a yes or a no, and "the
+            // socket is stale" and "the peer accepted and then hung up" are the same no.
+            crate::noted!(
+                "asking: nothing answers at {}: {why}",
+                where_it_is.display()
+            );
+            false
+        }
+    }
 }
 
 /// A refusal is a reply, and a caller always says who it is.

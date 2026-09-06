@@ -49,6 +49,7 @@ pub mod directory;
 pub mod framing;
 pub mod identity;
 pub mod mind;
+pub mod noted;
 pub mod policy;
 pub mod scratch;
 pub mod serving;
