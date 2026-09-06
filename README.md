@@ -1,6 +1,12 @@
-# melchior
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="misc/melchior-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="misc/melchior.svg">
+    <img src="misc/melchior.svg" alt="melchior" width="180">
+  </picture>
+</p>
 
-One agent talking to another: naming, finding, reaching and refusing.
+<p align="center"><em>One agent talking to another: naming, finding, reaching and refusing.</em></p>
 
 melchior is the layer a coding agent uses to know about the other agents on the machine — who is
 running, how each stands to it, what it may say to them, and what it may not. It knows nothing
