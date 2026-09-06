@@ -55,6 +55,7 @@ fn main() -> std::io::Result<()> {
             print!("{}", melchior::CLIENT);
             Ok(())
         }
+        Some("fork") => fork(),
         Some("verbs") => {
             for (verb, does) in melchior::wire::VERBS {
                 println!("{verb:<10} {does}");
@@ -63,11 +64,15 @@ fn main() -> std::io::Result<()> {
         }
         Some(other) => {
             eprintln!("melchior: no such command: {other}");
-            eprintln!("usage: melchior serve | tool | brief | models | ask | lua-api | verbs");
+            eprintln!(
+                "usage: melchior serve | tool | fork | brief | models | ask | lua-api | verbs"
+            );
             std::process::exit(2);
         }
         None => {
-            eprintln!("usage: melchior serve | tool | brief | models | ask | lua-api | verbs");
+            eprintln!(
+                "usage: melchior serve | tool | fork | brief | models | ask | lua-api | verbs"
+            );
             eprintln!();
             eprintln!("  serve     bind this session's socket and answer for it");
             eprintln!("  tool      the vocabulary a model calls, one exec per request");
@@ -193,6 +198,36 @@ enum Heard {
 /// Everything it needs to *be* somebody comes from the environment, the same way it did when
 /// this ran inside a harness: `MAGI_MELCHIOR_PROJECT`, `MAGI_MELCHIOR_ROLE`, `MAGI_MELCHIOR_ID`, and the `MAGI_*` names
 /// they replaced. That is the one thing a separate process cannot work out for itself.
+/// `melchior fork` — a name and a secret for a session this one is about to start.
+///
+/// Prints the environment the child should be started with, as JSON, and nothing else. Over argv
+/// like every other question with an answer, and to *this* session's socket: the secret is the
+/// whole of what makes `stop` refusable, so the party that gets one is the party that already
+/// holds this session's own pipe.
+///
+/// **The harness spawns, melchior names.** A layer that started harnesses would have to know
+/// what one is — which command, which arguments, which working directory — and none of that is
+/// its business. It hands down a name and a secret the same way it hands down a name.
+fn fork() -> std::io::Result<()> {
+    let Some(me) = melchior::directory::mine() else {
+        return Err(std::io::Error::other(
+            "`fork` is asked by a session, of itself: nothing here says which session this is",
+        ));
+    };
+    let mut held = melchior::directory::dial(&me, &me)?;
+    let reply = held.call("mint", Vec::new())?;
+    if !reply.ok {
+        return Err(std::io::Error::other(
+            reply.error.unwrap_or_else(|| "mint refused".to_owned()),
+        ));
+    }
+    let Some(child) = reply.result.first() else {
+        return Err(std::io::Error::other("mint answered nothing"));
+    };
+    println!("{child}");
+    Ok(())
+}
+
 fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
     // Named here when the caller only says which project it is in, and that is the useful way
     // round: a harness choosing its own name is choosing out of a namespace it cannot see, and

@@ -29,6 +29,41 @@ impl Serving {
         Self::beside(&runtime, "alpha-rho")
     }
 
+    /// Start one as a child: with a parent named and a secret handed down.
+    ///
+    /// The environment a harness would use after `melchior fork` — which is the whole point of
+    /// this pair of variables and the whole of what was never produced.
+    fn under(runtime: &std::path::Path, id: &str, parent: &str, token: &str) -> Self {
+        std::fs::create_dir_all(runtime).expect("mkdir");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_melchior"))
+            .arg("serve")
+            .env("MAGI_MELCHIOR_PROJECT", "demo")
+            .env("MAGI_MELCHIOR_ID", id)
+            .env("MAGI_MELCHIOR_PARENT", parent)
+            .env("MAGI_MELCHIOR_TOKEN", token)
+            .env("XDG_RUNTIME_DIR", runtime)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("melchior serve");
+
+        let mut out = BufReader::new(child.stdout.take().expect("stdout"));
+        let mut first = String::new();
+        out.read_line(&mut first).expect("it says something");
+        let said: serde_json::Value = serde_json::from_str(&first).expect("one JSON object");
+        assert_eq!(said["heard"], "listening", "{first}");
+        let at = std::path::PathBuf::from(said["at"].as_str().expect("it says where"));
+        let named = said["as"].as_str().expect("it says who").to_owned();
+        Self {
+            child,
+            out,
+            runtime: runtime.to_path_buf(),
+            at,
+            named,
+        }
+    }
+
     /// Start one in a runtime directory somebody else may already be in.
     ///
     /// What a conversation needs: two sessions that can see each other. `start` gives each its
@@ -350,4 +385,85 @@ fn a_session_that_is_gone_leaves_the_roster_and_the_directory() {
         !project.exists(),
         "the project directory outlived every session in it"
     );
+}
+
+/// The subagent lattice, end to end, against the real binaries.
+///
+/// **Every piece of this existed and none of it was connected.** `parent()` and `token()` read
+/// `MAGI_MELCHIOR_PARENT` and `MAGI_MELCHIOR_TOKEN`; `announce` writes the note that makes the
+/// tree readable off the directory; `children` reads it back; `stop` refuses anything a session
+/// did not start. All of it correct, and all of it inert, because nothing minted a secret or
+/// handed a name down — so a harness that spawned a child got a *main*: no parent, outside every
+/// wall the policy draws, and unstoppable by the thing that started it.
+#[test]
+fn a_forked_session_comes_up_as_a_child_and_its_parent_may_end_it() {
+    let mut parent = Serving::start("fork");
+    let runtime = parent.runtime();
+
+    // What a harness asks for before it spawns. Over argv, to this session's own socket.
+    let out = Command::new(env!("CARGO_BIN_EXE_melchior"))
+        .arg("fork")
+        .env("MAGI_MELCHIOR_PROJECT", "demo")
+        .env("MAGI_MELCHIOR_ID", "alpha-rho")
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .output()
+        .expect("melchior fork runs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let minted: serde_json::Value = serde_json::from_slice(&out.stdout).expect("one JSON object");
+    let id = minted["id"].as_str().expect("a name").to_owned();
+    let token = minted["token"].as_str().expect("a secret").to_owned();
+
+    // The harness spawns, with exactly what it was handed.
+    let mut child = Serving::under(&runtime, &id, "alpha-rho", &token);
+
+    // **A child, not a main.** This is the whole property: it knows whose it is, and it says so
+    // to anybody who asks — read off the note it wrote, never from what it claims about itself.
+    let said = ask(
+        &child.at(),
+        r#"{"call":"identity","from":"demo/main/alpha-rho"}"#,
+    );
+    assert_eq!(said["result"][0]["parent"], "alpha-rho", "{said}");
+    assert_eq!(said["result"][0]["main"], false, "{said}");
+
+    // And its parent may end it, because its parent is the only party that knows the secret.
+    let wrong = ask(
+        &child.at(),
+        r#"{"call":"stop","from":"demo/main/alpha-rho","token":"not-the-secret"}"#,
+    );
+    assert_eq!(
+        wrong["ok"], false,
+        "a guess does not end a session: {wrong}"
+    );
+
+    let right = ask(
+        &child.at(),
+        &format!(r#"{{"call":"stop","from":"demo/main/alpha-rho","token":"{token}"}}"#),
+    );
+    assert_eq!(right["ok"], true, "the secret does: {right}");
+
+    let _ = child.child.kill();
+    let _ = parent.child.kill();
+    let _ = std::fs::remove_dir_all(&runtime);
+}
+
+/// One hand-written call, framed the way the family frames everything.
+fn ask(at: &std::path::Path, body: &str) -> serde_json::Value {
+    let mut sock = std::os::unix::net::UnixStream::connect(at).expect("connected");
+    sock.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .expect("a timeout");
+    let mut frame = u32::try_from(body.len())
+        .expect("fits")
+        .to_be_bytes()
+        .to_vec();
+    frame.extend_from_slice(body.as_bytes());
+    sock.write_all(&frame).expect("wrote");
+    let mut header = [0_u8; 4];
+    sock.read_exact(&mut header).expect("read a header");
+    let mut answer = vec![0_u8; u32::from_be_bytes(header) as usize];
+    sock.read_exact(&mut answer).expect("read a body");
+    serde_json::from_slice(&answer).expect("it is JSON")
 }
