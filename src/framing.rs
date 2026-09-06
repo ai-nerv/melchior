@@ -112,8 +112,13 @@ mod tests {
 
     #[test]
     fn nothing_is_wrapped_around_the_body() {
-        // No envelope, no version, no length repeated inside. A sibling reads the object it was
-        // promised or the contract was never real.
+        // No envelope and no length repeated inside: a sibling reads the object it was promised
+        // or the contract was never real.
+        //
+        // `family` is a field of that object, not a wrapper around it — and it is here because
+        // "no version" turned out to mean four implementations that already disagree about the
+        // same reply, with nothing to say so. See `wire::FAMILY`. A reader that does not know
+        // the field ignores it, which is what makes adding it safe.
         let out = framed(&Reply::done()).expect("frames");
         let body: serde_json::Value = serde_json::from_slice(&out[4..]).expect("decodes");
         let keys: Vec<&str> = body
@@ -122,7 +127,7 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(keys, ["ok", "n", "result"], "{body}");
+        assert_eq!(keys, ["ok", "family", "n", "result"], "{body}");
     }
 
     #[test]

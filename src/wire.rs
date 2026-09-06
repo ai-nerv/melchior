@@ -51,6 +51,24 @@ pub struct Call {
     pub token: Option<String>,
 }
 
+/// Which revision of the family wire this speaks.
+///
+/// **There was no version anywhere, in four implementations that already disagree.** melchior's
+/// reply always carries `n`; balthasar's makes it optional and adds a `fault` field melchior has
+/// never had. Both are "the family wire". A consumer meeting an unexpected shape today learns
+/// about it as a missing field at the point of use, which reads as the peer being broken rather
+/// than as the peer being a different version.
+///
+/// Carried on the reply rather than negotiated, because there is already a handshake: every
+/// client asks `verbs` before it asks anything else, so the first answer of every connection
+/// says what it is talking to and nothing extra crosses the wire.
+///
+/// The number is duplicated in each sibling for the same reason the types are — a shared crate
+/// would be a dependency between repositories, and this family has none. It is bumped when a
+/// consumer that does not know about a change would misread a reply, not when a field is added
+/// that an older reader ignores.
+pub const FAMILY: u16 = 1;
+
 /// One reply, as it goes back.
 ///
 /// Built through [`Reply::of`] and [`Reply::refused`] rather than by hand, so the `n`/`result`
@@ -59,6 +77,13 @@ pub struct Call {
 pub struct Reply {
     /// Whether the call was answered.
     pub ok: bool,
+    /// Which revision of the wire this reply is written in. See [`FAMILY`].
+    ///
+    /// Defaulted on the way in, so a reply from a peer built before this existed reads as `0` —
+    /// "from before versions" — rather than failing to parse. A reader refuses a number it does
+    /// not know and tolerates one it predates.
+    #[serde(default = "family")]
+    pub family: u16,
     /// How many values came back. Always `result.len()`.
     #[serde(default)]
     pub n: usize,
@@ -70,12 +95,20 @@ pub struct Reply {
     pub error: Option<String>,
 }
 
+/// The version a reply is stamped with when it does not say.
+///
+/// Serde needs a function; `FAMILY` is the answer.
+fn family() -> u16 {
+    FAMILY
+}
+
 impl Reply {
     /// An answer of one value.
     #[must_use]
     pub fn of(value: serde_json::Value) -> Self {
         Self {
             ok: true,
+            family: FAMILY,
             n: 1,
             result: vec![value],
             error: None,
@@ -87,6 +120,7 @@ impl Reply {
     pub fn done() -> Self {
         Self {
             ok: true,
+            family: FAMILY,
             n: 0,
             result: Vec::new(),
             error: None,
@@ -98,6 +132,7 @@ impl Reply {
     pub fn refused(why: impl Into<String>) -> Self {
         Self {
             ok: false,
+            family: FAMILY,
             n: 0,
             result: Vec::new(),
             error: Some(why.into()),
