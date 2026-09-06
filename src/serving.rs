@@ -333,7 +333,7 @@ mod tests {
         // a tool peer, which has no runtime and wants none.
         let (they, i) = (them.clone(), me.clone());
         let sent = tokio::task::spawn_blocking(move || {
-            let mut held = Held::to(&they, &i).expect("it is listening");
+            let mut held = crate::directory::dial(&they, &i).expect("it is listening");
             held.call(
                 "tell",
                 vec![
@@ -372,7 +372,7 @@ mod tests {
 
         let (they, i) = (them.clone(), me.clone());
         let answers = tokio::task::spawn_blocking(move || {
-            let mut held = Held::to(&they, &i).expect("it is listening");
+            let mut held = crate::directory::dial(&they, &i).expect("it is listening");
             ["verbs", "identity", "status", "identity"]
                 .into_iter()
                 .map(|verb| held.call(verb, Vec::new()).expect("answered"))
@@ -400,7 +400,7 @@ mod tests {
 
         let (they, i) = (them.clone(), me.clone());
         let reply = tokio::task::spawn_blocking(move || {
-            let mut held = Held::to(&they, &i).expect("it is listening");
+            let mut held = crate::directory::dial(&they, &i).expect("it is listening");
             held.call_with("stop", Vec::new(), "guessed")
                 .expect("answered")
         })
@@ -467,7 +467,7 @@ mod tests {
 
         let (they, i) = (them.clone(), me.clone());
         let (guessed, right) = tokio::task::spawn_blocking(move || {
-            let mut held = Held::to(&they, &i).expect("it is listening");
+            let mut held = crate::directory::dial(&they, &i).expect("it is listening");
             (
                 held.call_with("stop", Vec::new(), "guessed")
                     .expect("answered"),

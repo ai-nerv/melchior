@@ -200,14 +200,14 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
     // called. Whoever holds the directory should be the one that looks first.
     let me = match (melchior::directory::mine(), asked.get("project")) {
         (Some(me), _) => me,
-        (None, Some(project)) => melchior::identity::free_in(project),
+        (None, Some(project)) => melchior::directory::free_in(project),
         (None, None) => {
             eprintln!(
                 "melchior serve: no session to be. Pass --project, or set {} and {} — one of them \
                  has to say which session this is answering for, and nothing on disk can be \
                  asked instead.",
-                melchior::directory::PROJECT,
-                melchior::directory::ID
+                melchior::inherited::PROJECT,
+                melchior::inherited::ID
             );
             std::process::exit(2);
         }
@@ -483,7 +483,7 @@ fn brief(project: Option<&str>, asked: &std::collections::BTreeMap<String, Strin
     if named.is_empty() {
         return;
     }
-    let me = melchior::directory::mine().or_else(|| project.map(melchior::identity::free_in));
+    let me = melchior::directory::mine().or_else(|| project.map(melchior::directory::free_in));
     let standing = me.map(|me| melchior::verbs::Standing {
         inbox: melchior::directory::inbox_of(&me),
         forked: melchior::directory::children(&me),

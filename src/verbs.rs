@@ -17,7 +17,7 @@
 //!
 //! Everything here can be done to anything listening except `stop`. A session is stopped by the
 //! session that started it and by nothing else — and "is" is not something a caller gets to
-//! claim. A child is handed a secret in [`crate::directory::TOKEN`] at spawn, and a `stop` that
+//! claim. A child is handed a secret in [`crate::inherited::TOKEN`] at spawn, and a `stop` that
 //! cannot quote it back is refused however convincing the name on it was.
 //!
 //! # Two walls, and what the model is shown

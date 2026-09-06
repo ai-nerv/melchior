@@ -34,6 +34,7 @@
 //! ever held. A session nobody started holds none, so nothing can stop it.
 
 use crate::identity::Identity;
+use crate::inherited::{ID, PARENT, PROJECT, ROLE, TOKEN, said};
 
 use crate::policy::{self, Whom};
 use std::path::{Path, PathBuf};
@@ -43,49 +44,6 @@ use std::path::{Path, PathBuf};
 /// Named once, because it is said in three places: the tool registers under it, the briefing
 /// tells the model to use it, and its own help repeats it.
 pub const TOOL: &str = "agent";
-
-/// The variable a spawned instance learns its parent from.
-///
-/// Inherited across the spawn rather than passed as an argument, so a child that re-execs or
-/// starts a shell that starts another session still knows where it came from.
-pub const PARENT: &str = "MAGI_MELCHIOR_PARENT";
-
-/// The variable carrying the secret that makes a `stop` honourable.
-///
-/// Minted by the parent, handed to the child, held by both and by nobody else.
-pub const TOKEN: &str = "MAGI_MELCHIOR_TOKEN";
-
-/// The three that tell a spawned process which session it belongs to.
-///
-/// Set by whatever started the session and inherited from there by everything it starts. It is
-/// the one thing a separate process cannot work out for itself: a name is made when a session
-/// starts, and nothing on disk says which of several a given process was spawned under.
-pub const PROJECT: &str = "MAGI_MELCHIOR_PROJECT";
-/// What that session is for, the middle part of its name.
-pub const ROLE: &str = "MAGI_MELCHIOR_ROLE";
-/// The last of the three, and the only one the socket is named after.
-pub const ID: &str = "MAGI_MELCHIOR_ID";
-
-/// How far this session may reach, as [`Talk`](crate::policy::Talk) names it.
-///
-/// A setting rather than a name, and it travels the same way the names do because it has to
-/// reach the same two processes: the one holding the socket and the one a model calls. A harness
-/// that set it on only one of them would have a tool refusing what the socket allows.
-pub const TALK: &str = "MAGI_MELCHIOR_TALK";
-
-/// What one of those says, if it says anything.
-///
-/// `MAGI_MELCHIOR_*` first, then the `MAGI_*` name the same variable grew up under. Both, because this
-/// layer was lifted out of one harness and that harness is still setting the old names — and a
-/// variable written under one name and read under another is a session that cannot find itself,
-/// which presents as "nobody is running" rather than as a rename anybody would guess at.
-pub(crate) fn said(name: &str) -> Option<String> {
-    let older = format!("MAGI_{}", name.trim_start_matches("MAGI_MELCHIOR_"));
-    std::env::var(name)
-        .ok()
-        .or_else(|| std::env::var(&older).ok())
-        .filter(|value| !value.is_empty())
-}
 
 /// Who started this session, if anybody did.
 ///
@@ -162,7 +120,7 @@ pub fn children(me: &Identity) -> Vec<String> {
 /// Empty when nothing answers, which is the ordinary case for a peer started outside a session.
 #[must_use]
 pub fn inbox_of(me: &Identity) -> Vec<crate::wire::Message> {
-    let Ok(mut held) = crate::asking::Held::to(me, me) else {
+    let Ok(mut held) = dial(me, me) else {
         return Vec::new();
     };
     let Ok(reply) = held.call("inbox", Vec::new()) else {
@@ -173,29 +131,6 @@ pub fn inbox_of(me: &Identity) -> Vec<crate::wire::Message> {
         .first()
         .and_then(|value| serde_json::from_value(value.clone()).ok())
         .unwrap_or_default()
-}
-
-/// What a caller is asking to do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Reach {
-    /// Read something: who it is, what it is doing, what it has been told.
-    Ask,
-    /// Put a message in its inbox.
-    Tell,
-    /// End it.
-    Stop,
-}
-
-impl Reach {
-    /// The verb, for saying so in a refusal.
-    #[must_use]
-    pub fn named(self) -> &'static str {
-        match self {
-            Self::Ask => "ask",
-            Self::Tell => "tell",
-            Self::Stop => "stop",
-        }
-    }
 }
 
 /// Another instance, by name.
@@ -392,7 +327,7 @@ pub fn answer_request(who: &str, me: &Identity, accept: bool, handover: Option<&
     let Some(them) = Identity::read(who) else {
         return;
     };
-    let Ok(mut held) = crate::asking::Held::to(&them, me) else {
+    let Ok(mut held) = dial(&them, me) else {
         return;
     };
     let said = if accept {
@@ -420,6 +355,31 @@ pub fn answer_request(who: &str, me: &Identity, accept: bool, handover: Option<&
             ],
         );
     }
+}
+
+/// A name nothing in `project` is already listening under.
+///
+/// The two halves: [`crate::identity::free_of`] knows how to pick a name, and this module knows
+/// which names are in use. They were one function in `identity`, which is what made that module
+/// depend on this one — and this one already depends on it, for the type.
+#[must_use]
+pub fn free_in(project: &str) -> Identity {
+    crate::identity::free_of(project, &listening(project))
+}
+
+/// Open a connection to the session named `them`, as `me`.
+///
+/// Here rather than on [`Held`](crate::asking::Held), which is where it was. A connection knows
+/// how to speak to a socket; *which* socket a name means is this module's whole subject, and
+/// having the constructor resolve it made `asking` depend on `directory` and `directory` depend
+/// on `asking` — one of three cycles among these four modules, and the one that made the other
+/// two hard to see.
+///
+/// # Errors
+/// When nothing is listening under that name, which is the ordinary answer for a session that
+/// has ended: the socket file outlives the process that made it.
+pub fn dial(them: &Identity, me: &Identity) -> std::io::Result<crate::asking::Held> {
+    crate::asking::Held::at(&listening_at(them), me)
 }
 
 /// What is known about a session in `project`, read off the directory.
@@ -518,7 +478,7 @@ pub fn reachable(me: &Whom) -> Vec<(Whom, policy::Relation)> {
             let relation = policy::between(me, &them);
             (them, relation)
         })
-        .filter(|(_, relation)| policy::may(me, *relation, Reach::Ask))
+        .filter(|(_, relation)| policy::may(me, *relation, policy::Reach::Ask))
         .collect()
 }
 
@@ -749,5 +709,17 @@ mod adopting {
         adopted(&child, "beta-omicron");
         assert_eq!(parent_of(&child).as_deref(), Some("beta-omicron"));
         let _ = std::fs::remove_dir_all(home(&project));
+    }
+    #[test]
+    fn dialling_a_name_nobody_is_listening_under_is_an_error() {
+        // The half that used to live on `Held::to`: a name resolves to a path, and a path with
+        // nothing behind it is an error rather than a wait. A socket file outlives the process
+        // that made it, so this is the ordinary answer for a session that ended.
+        let missing = Identity {
+            project: "no-such-project-here".to_owned(),
+            role: "main".to_owned(),
+            id: "nobody-nowhere".to_owned(),
+        };
+        assert!(dial(&missing, &missing).is_err());
     }
 }

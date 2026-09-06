@@ -9,8 +9,8 @@
 //! connection", "`n` did not match the result" are all decidable without a socket, and a test
 //! that has to bind one to check them is a test nobody writes.
 
-use crate::directory::Reach;
 use crate::identity::Identity;
+use crate::policy::Reach;
 use crate::policy::{self, Whom};
 use crate::wire::{Call, Message, Reply, VERBS};
 

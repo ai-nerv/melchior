@@ -36,8 +36,30 @@
 //! It only ever opens things. There is no level below `mains`, because a project where nothing
 //! can talk is a project that did not need any of this.
 
-use crate::directory::Reach;
 use std::sync::OnceLock;
+
+/// What a caller is asking to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    /// Read something: who it is, what it is doing, what it has been told.
+    Ask,
+    /// Put a message in its inbox.
+    Tell,
+    /// End it.
+    Stop,
+}
+
+impl Reach {
+    /// The verb, for saying so in a refusal.
+    #[must_use]
+    pub fn named(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Tell => "tell",
+            Self::Stop => "stop",
+        }
+    }
+}
 
 /// How far a session may reach, as the config set it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -95,7 +117,7 @@ pub fn adopt(talk: Talk) {
 #[must_use]
 pub fn talk() -> Talk {
     *CHOSEN.get_or_init(|| {
-        crate::directory::said(crate::directory::TALK)
+        crate::inherited::said(crate::inherited::TALK)
             .and_then(|name| Talk::read(&name))
             .unwrap_or_default()
     })

@@ -37,8 +37,8 @@ pub fn run() -> std::io::Result<()> {
         return refuse(&format!(
             "this process was not started by a session, so it does not know which instance it \
              would be speaking as. {} and {} say which, and are set by whatever started it.",
-            melchior::directory::PROJECT,
-            melchior::directory::ID
+            melchior::inherited::PROJECT,
+            melchior::inherited::ID
         ));
     };
 

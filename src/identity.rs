@@ -120,19 +120,24 @@ fn name() -> String {
     from_seed(seed)
 }
 
-/// A name nothing in `project` is already listening under.
+/// A name none of `taken` is already listening under.
 ///
 /// **Naming belongs here, not to a harness.** A harness that named itself would be choosing out
 /// of a namespace it cannot see: two started in the same second draw the same clock, and the
 /// collision surfaces only as one of them failing to bind — by which point it has already told
-/// somebody what it is called. Melchior is what holds the directory, so it is what can look first.
+/// somebody what it is called.
+///
+/// The taken names are a parameter rather than read from the directory, which is where they
+/// come from. Picking a name and knowing which names are in use are two different things, and
+/// having this read the directory made a module about *what a session is called* depend on the
+/// module about *where sessions listen* — which depends on this one back.
+/// [`crate::directory::free_in`] is the pair of them.
 ///
 /// Still a guess, deliberately. The look and the bind are not one act, so two callers a
 /// microsecond apart can still agree on a name; what this removes is the *likely* collision,
 /// and the bind settles the rest.
 #[must_use]
-pub fn free_in(project: &str) -> Identity {
-    let taken = crate::directory::listening(project);
+pub fn free_of(project: &str, taken: &[String]) -> Identity {
     let from = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.subsec_nanos() as usize);

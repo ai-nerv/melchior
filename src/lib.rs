@@ -48,6 +48,7 @@ pub mod briefing;
 pub mod directory;
 pub mod framing;
 pub mod identity;
+pub mod inherited;
 pub mod mind;
 pub mod noted;
 pub mod policy;
@@ -56,9 +57,9 @@ pub mod serving;
 pub mod verbs;
 pub mod wire;
 
-pub use directory::{Address, Reach};
+pub use directory::Address;
 pub use identity::Identity;
-pub use policy::{Relation, Talk, Whom};
+pub use policy::{Reach, Relation, Talk, Whom};
 
 /// What this crate is called, wherever a name is printed.
 pub const NAME: &str = "melchior";
