@@ -133,6 +133,31 @@ pub fn inbox_of(me: &Identity) -> Vec<crate::wire::Message> {
         .unwrap_or_default()
 }
 
+/// The secrets this session minted for the children it started, by id.
+///
+/// Asked of its own socket, for the same reason [`inbox_of`] is: the session holds them and this
+/// process does not exist between calls. Read only by the session's own tool, and never written
+/// to the directory — a sibling that could read one off disk would have authority over a session
+/// it did not start.
+///
+/// Empty when nothing answers, which means `stop` is refused with "this session did not start
+/// it". That is the right answer when the session cannot be reached: refusing to end something
+/// on a guess.
+#[must_use]
+pub fn minted_by(me: &Identity) -> std::collections::BTreeMap<String, String> {
+    let Ok(mut held) = dial(me, me) else {
+        return std::collections::BTreeMap::new();
+    };
+    let Ok(reply) = held.call("minted", Vec::new()) else {
+        return std::collections::BTreeMap::new();
+    };
+    reply
+        .result
+        .first()
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default()
+}
+
 /// Another instance, by name.
 ///
 /// The same three parts a session wears on its status line, and the short forms fill in from

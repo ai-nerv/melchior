@@ -224,11 +224,15 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
             busy: false,
             working_for: 0,
             inbox: Vec::new(),
+            minted: std::collections::BTreeMap::new(),
         });
         let (arrived_tx, mut arrived) = tokio::sync::mpsc::channel(64);
         let (asked_tx, mut asked) = tokio::sync::mpsc::channel(16);
         let (adopted_tx, mut adopted) = tokio::sync::mpsc::channel(4);
         let (stopped_tx, mut stopped) = tokio::sync::mpsc::channel(1);
+        // Children this session named, on their way into its own record of them. The secret is
+        // what a `stop` has to quote back, so it is held here and nowhere a sibling can read.
+        let (minted_tx, mut minted) = tokio::sync::mpsc::channel::<(String, String)>(4);
 
         // The note beside the socket, so the tree can be read off the directory: a session that
         // finds this one there can tell whose subagent it is without asking it, and without
@@ -259,6 +263,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                     asked: asked_tx,
                     adopted: adopted_tx,
                     stopped: stopped_tx,
+                    minted: minted_tx.clone(),
                 },
             )
             .await;
@@ -327,6 +332,16 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                 // transcript could reason about acquiring more.
                 Some((by, handover)) = adopted.recv() => {
                     say(&Heard::Adopted { by, handover });
+                }
+                // A child this session named. Held here and nowhere else: `stop` is refused
+                // unless the caller quotes the secret the child was started with, and a secret a
+                // sibling could read off the directory would be authority over a session it did
+                // not start. Never said up the pipe either — the harness that asked for it
+                // already has it, and nothing else has any business with it.
+                Some((id, token)) = minted.recv() => {
+                    about_tx.send_modify(|about| {
+                        about.minted.insert(id, token);
+                    });
                 }
                 // **`None` here is the parent letting go, and it is the whole lifetime rule.**
                 // Matched rather than left to `else`, because a `select!` arm whose pattern

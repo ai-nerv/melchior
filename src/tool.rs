@@ -97,10 +97,10 @@ fn standing() -> Option<Standing> {
         // declined to leave its note would otherwise have made itself unstoppable.
         forked: melchior::directory::children(&me),
         parent: melchior::directory::parent_of(&me),
-        // Empty, so `stop` is refused with "this session did not start it". The secrets are
-        // minted by whatever spawns a child, and nothing spawns one yet; when something does,
-        // it hands them down the same way a name is handed down.
-        minted: std::collections::BTreeMap::new(),
+        // Asked of its own socket, like the inbox. These are what `stop` quotes back, and a
+        // session that cannot be reached answers with none — which refuses a `stop` rather than
+        // guessing at one.
+        minted: melchior::directory::minted_by(&me),
         me: me.full(),
     })
 }

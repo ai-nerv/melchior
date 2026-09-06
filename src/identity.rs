@@ -154,6 +154,34 @@ pub fn free_of(project: &str, taken: &[String]) -> Identity {
     }
 }
 
+/// A secret to hand a session being started, which a `stop` has to quote back.
+///
+/// **Not a name.** A name is public — it is on the directory, every sibling can read it, and it
+/// is meant to be. This is the opposite: the one thing that distinguishes the harness that
+/// started a session from every other party that can see it exists, and the whole of what makes
+/// `stop` refusable. It never goes to disk and never into a transcript.
+///
+/// Read from the kernel, because a secret derived from a clock is one anybody who knows roughly
+/// when the session started can produce. Sixteen bytes as hex: long enough that guessing is not
+/// a strategy, short enough to sit in an environment variable.
+///
+/// Straight from `/dev/urandom` rather than through a crate. This is Linux-only software and
+/// that file is the kernel's answer; a dependency here would be one more edge on the graph for
+/// four lines that cannot be got wrong.
+///
+/// # Panics
+/// If the kernel will not produce randomness, which is not a condition to carry on under —
+/// continuing would mean minting a predictable secret and calling it one.
+#[must_use]
+pub fn secret() -> String {
+    use std::io::Read;
+    let mut bytes = [0_u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut bytes))
+        .expect("the kernel's randomness");
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// The name a seed picks, so the shape can be tested without waiting for a clock.
 ///
 /// Always a pair — `delta-rho`, never `delta`. One word looks like a placeholder and reads as

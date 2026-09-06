@@ -33,6 +33,17 @@ pub struct About {
     pub working_for: u64,
     /// What has arrived and not been read.
     pub inbox: Vec<Message>,
+    /// The secret handed to each session this one started, by id.
+    ///
+    /// **Written by `mint`, and nothing else could write it.** A `stop` is refused unless the
+    /// caller quotes the secret the child was started with, and the only party that can know one
+    /// is whoever minted it — which is this session, on behalf of the harness that is about to
+    /// spawn. Kept here rather than on disk for the same reason: a secret a sibling could read
+    /// off the directory would buy the reader authority over a session it did not start.
+    ///
+    /// Empty for a session that has started nothing, which is most of them, and which is what
+    /// makes `stop` answer "this session did not start it".
+    pub minted: std::collections::BTreeMap<String, String>,
 }
 
 impl About {
@@ -70,6 +81,18 @@ pub enum Then {
         by: String,
         /// What they handed over, unread by anything here.
         handover: Option<String>,
+    },
+    /// A child has been named and its secret minted; hold on to it.
+    ///
+    /// Carried up rather than written here, for the same reason [`Then::Adopted`] is: this
+    /// function decides and the loop that owns the state records. The secret never goes near
+    /// the directory — a sibling that could read one off disk would have authority over a
+    /// session it did not start.
+    Minted {
+        /// The child's id, which is what `stop` names.
+        id: String,
+        /// What it will be started with, and what a `stop` has to quote back.
+        token: String,
     },
     /// End this instance.
     Stop,
@@ -122,12 +145,33 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
     // child stop its parent — the check reads the same from both ends and the answer does not.
     let relation = policy::between(&me, caller);
     let theirs = policy::between(caller, &me);
+    // **Nobody but this session, and no `Reach` says that.** Minting a name and reading back what
+    // was minted are asked by one party — the harness that started this session, over the socket
+    // it started — and the ladder has no rung for it. Rating them `Stop` was the first attempt
+    // and it refuses the only legitimate caller: a session may not stop *itself*, so it could not
+    // ask itself for a name either. `Tell` would have let a parent mint children in its child's
+    // name and hold the secrets.
+    if matches!(call.call.as_str(), "mint" | "minted") && relation != policy::Relation::Myself {
+        return (
+            Reply::refused(format!(
+                "`{}` is this session's own: a name and the secret that ends the session wearing \
+                 it are not something another instance may ask for",
+                call.call
+            )),
+            Then::Nothing,
+        );
+    }
+
     let wanted = match call.call.as_str() {
         "identity" | "kin" | "status" | "inbox" | "needs" => Reach::Ask,
+        // Already settled above: only this session asks these, and it has.
+        "mint" | "minted" => Reach::Ask,
+
         // Reaching as far as a message does, and no further. Asking costs the far end a prompt
         // and nothing else — the weight is all in the answer, which is not this layer's to give.
         "tell" | "adopt" | "adopted" => Reach::Tell,
         "stop" => Reach::Stop,
+
         other => {
             return (
                 Reply::refused(format!("no such call: {other}")),
@@ -180,6 +224,44 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
             Then::Nothing,
         ),
         "inbox" => (Reply::of(serde_json::json!(about.inbox)), Then::Nothing),
+        "minted" => (Reply::of(serde_json::json!(about.minted)), Then::Nothing),
+        // **The half of the subagent lattice that was never produced.** `parent()` and `token()`
+        // read `MAGI_MELCHIOR_PARENT` and `MAGI_MELCHIOR_TOKEN`, `announce` writes the note that
+        // makes the tree readable, and `stop` refuses anything this session did not start — all
+        // of it correct, and all of it inert, because nothing anywhere minted a secret or handed
+        // a name down. A harness could spawn a child but the child came up a *main*: no parent,
+        // unstoppable by the thing that started it, and outside every wall the policy draws.
+        //
+        // Named rather than spawned. melchior owns naming and the secret; starting a process is
+        // the harness's, and a layer that spawned harnesses would have to know what one is.
+        "mint" => {
+            let child = crate::directory::free_in(&about.me.project);
+            let secret = crate::identity::secret();
+            let minted = Then::Minted {
+                id: child.id.clone(),
+                token: secret.clone(),
+            };
+            (
+                Reply::of(serde_json::json!({
+                    "project": child.project,
+                    "role": child.role,
+                    "id": child.id,
+                    "full": child.full(),
+                    "parent": about.me.id,
+                    "token": secret.clone(),
+                    // The three the child inherits, named so a harness does not have to know
+                    // them — and so adding a fourth is a change in one place.
+                    "environment": {
+                        crate::inherited::PROJECT: child.project,
+                        crate::inherited::ROLE: child.role,
+                        crate::inherited::ID: child.id,
+                        crate::inherited::PARENT: about.me.id,
+                        crate::inherited::TOKEN: secret,
+                    },
+                })),
+                minted,
+            )
+        }
         "tell" => {
             let Some(text) = text_at(call, 0) else {
                 return (Reply::refused("tell takes what to say"), Then::Nothing);
@@ -318,6 +400,7 @@ mod tests {
             busy: false,
             working_for: 0,
             inbox: Vec::new(),
+            minted: std::collections::BTreeMap::new(),
         }
     }
 
@@ -556,6 +639,7 @@ mod adopting {
             busy: false,
             working_for: 0,
             inbox: Vec::new(),
+            minted: std::collections::BTreeMap::new(),
         }
     }
 
@@ -655,6 +739,7 @@ mod handover {
             busy: false,
             working_for: 0,
             inbox: Vec::new(),
+            minted: std::collections::BTreeMap::new(),
         }
     }
 
