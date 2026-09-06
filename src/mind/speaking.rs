@@ -257,6 +257,6 @@ mod tests {
         stream(&mut out, As::Json, &Said::Text { text: "hi".into() }).expect("write");
         let text = String::from_utf8(out).expect("utf8");
         assert_eq!(text.lines().count(), 1, "one said, one line: {text:?}");
-        assert!(text.contains("\"said\""), "untagged: {text}");
+        assert!(text.contains("\"event\""), "untagged: {text}");
     }
 }

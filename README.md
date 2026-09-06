@@ -57,43 +57,42 @@ would be told the message landed.
 Two things cross the pipe, one JSON object per line:
 
 ```
-->  {"say":"doing","busy":true,"working_for":7,"waiting":0}
-<-  {"heard":"listening","at":"…/melchior/demo/alpha-rho"}
-<-  {"heard":"message","who":"demo/main/beta-nu","sort":"attention","text":"…"}
+->  {"event":"doing","busy":true,"working_for":7,"waiting":0}
+<-  {"event":"listening","at":"…/melchior/demo/alpha-rho"}
+<-  {"event":"message","who":"demo/main/beta-nu","sort":"attention","text":"…"}
 ```
 
 ## The wire
 
-Four-byte big-endian length, then a JSON body — the same shape oslo, hexe and aeon speak.
+Three transports, two shapes, one encoding — written out because it was written out nowhere, and
+five wires had grown five ways to say the same thing.
+
+| Transport | When | Framing |
+|---|---|---|
+| **argv** | a question with an answer and nothing to hold open | one JSON object on stdout |
+| **pipe** | a parent and the child it started | newline-delimited JSON, both directions |
+| **socket** | anything may knock | four bytes of big-endian length, then JSON |
+
+JSON is on all three. It is the *encoding*, not a transport.
+
+A **call** is answered; an **event** is not:
 
 ```
-->  {"call":"status","from":"demo/main/beta-nu"}
-<-  {"ok":true,"family":1,"n":1,"result":[{"busy":false,"working_for":0,"waiting":0}]}
+->  {"call":"status","args":[]}
+<-  {"ok":true,"family":1,"n":1,"result":[{"busy":false}]}
+
+    {"event":"listening","at":"…"}
 ```
 
-`family` says which revision of this wire the reply is written in. A reader refuses a number it
-does not know and tolerates a reply that predates the field — four implementations of this shape
-existed with no version in any of them, already disagreeing about whether `n` is optional and
-whether `fault` exists, so a skew arrived as a missing field at the point of use.
+`result` is a **list** and `n` says how long it is: a sibling that unpacked a bare value would
+read an answer as nothing at all. `family` says which revision the reply is written in — a reader
+refuses a number it does not know and tolerates one it predates. A refused call is a *reply*, not
+a dropped connection.
 
-This is a **private protocol**, deliberately, and A2A is the standard it is not. The reasoning is
-in [`DECISION-A2A.md`](DECISION-A2A.md), along with what would change it.
-
-`result` is a **list** and `n` is its length. Settled before anything shipped, because two tools
-in one family disagreeing here fail *silently*: a client that unpacks a list reads a bare-value
-server as having returned nothing at all, and an empty answer looks like an empty session.
-
-A refusal is a reply, not a dropped connection. A connection serves more than one call. Hanging
-up is not a mistake. `verbs` is answered from the first version and before any permission check,
-and `client` beside it hands over the library that speaks all this — enough for a sandboxed VM
-that cannot shell out to run `melchior lua-api`.
-
-Every call says who is making it. That claim is taken at face value, because everything here is
-one user in one directory and a check that cannot be enforced reads like security to whoever
-comes along next. What it buys is a *relation*, read off the directory rather than from the
-frame. `stop` is the exception: it carries the secret the session was started with, which only
-whoever started it ever held — minted by `mint`, handed to the child in
-`MAGI_MELCHIOR_TOKEN`, and never written to the directory where a sibling could read it.
+**The tag key is `event`, everywhere, in both directions**, and `gate-wire` refuses any other.
+The failure it prevents is silent: two of these wires exist as byte-identical copies in two
+repositories, so when two spellings drift nothing fails and no test goes red — the surface simply
+stops being answered.
 
 ## Starting a session under another
 

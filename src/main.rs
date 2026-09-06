@@ -90,7 +90,7 @@ mod tool;
 
 /// What the parent tells us, one JSON object per line on stdin.
 #[derive(serde::Deserialize)]
-#[serde(tag = "say", rename_all = "lowercase")]
+#[serde(tag = "event", rename_all = "snake_case")]
 enum Told {
     /// What this session is doing now, so `status` answers truthfully rather than plausibly.
     Doing {
@@ -126,7 +126,7 @@ enum Told {
 
 /// What we tell the parent, one JSON object per line on stdout.
 #[derive(serde::Serialize)]
-#[serde(tag = "heard", rename_all = "lowercase")]
+#[serde(tag = "event", rename_all = "snake_case")]
 enum Heard {
     /// Ready: the socket is bound and this session can be reached.
     Listening {

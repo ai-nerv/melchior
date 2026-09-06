@@ -52,7 +52,7 @@ impl Serving {
         let mut first = String::new();
         out.read_line(&mut first).expect("it says something");
         let said: serde_json::Value = serde_json::from_str(&first).expect("one JSON object");
-        assert_eq!(said["heard"], "listening", "{first}");
+        assert_eq!(said["event"], "listening", "{first}");
         let at = std::path::PathBuf::from(said["at"].as_str().expect("it says where"));
         let named = said["as"].as_str().expect("it says who").to_owned();
         Self {
@@ -86,7 +86,7 @@ impl Serving {
         let mut first = String::new();
         out.read_line(&mut first).expect("it says something");
         let said: serde_json::Value = serde_json::from_str(&first).expect("one JSON object");
-        assert_eq!(said["heard"], "listening", "{first}");
+        assert_eq!(said["event"], "listening", "{first}");
         let at = std::path::PathBuf::from(said["at"].as_str().expect("it says where"));
         let named = said["as"].as_str().expect("it says who").to_owned();
         Self {
@@ -130,7 +130,7 @@ impl Serving {
             let mut line = String::new();
             self.out.read_line(&mut line).expect("it says something");
             let said: serde_json::Value = serde_json::from_str(&line).expect("one JSON object");
-            if said["heard"] == kind {
+            if said["event"] == kind {
                 return said;
             }
         }
@@ -191,7 +191,7 @@ fn a_message_from_a_sibling_comes_up_the_pipe() {
     assert_eq!(reply["ok"], true, "{reply}");
 
     let heard = serving.heard("message");
-    assert_eq!(heard["heard"], "message");
+    assert_eq!(heard["event"], "message");
     assert_eq!(heard["who"], "demo/main/socat");
     assert_eq!(heard["sort"], "attention");
     assert_eq!(heard["text"], "build is green");
@@ -208,7 +208,7 @@ fn what_the_parent_says_it_is_doing_is_what_a_sibling_is_told() {
         false
     );
 
-    serving.told(r#"{"say":"doing","busy":true,"working_for":7,"waiting":0}"#);
+    serving.told(r#"{"event":"doing","busy":true,"working_for":7,"waiting":0}"#);
     // Given to the reader thread and through the channel; a moment, not a race worth a retry
     // loop, because the next call is a fresh connection either way.
     std::thread::sleep(std::time::Duration::from_millis(300));
@@ -238,7 +238,7 @@ fn a_line_it_cannot_read_does_not_stop_it_answering() {
     // The parent's bug is not a reason to stop answering a socket other sessions are using.
     let mut serving = Serving::start("garbage");
     serving.told("this is not json");
-    serving.told(r#"{"say":"doing","busy":true}"#);
+    serving.told(r#"{"event":"doing","busy":true}"#);
     std::thread::sleep(std::time::Duration::from_millis(300));
 
     let status = serving.asked(r#"{"call":"status","from":"demo/main/socat"}"#);
