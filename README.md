@@ -61,8 +61,16 @@ Four-byte big-endian length, then a JSON body — the same shape oslo, hexe and 
 
 ```
 ->  {"call":"status","from":"demo/main/beta-nu"}
-<-  {"ok":true,"n":1,"result":[{"busy":false,"working_for":0,"waiting":0}]}
+<-  {"ok":true,"family":1,"n":1,"result":[{"busy":false,"working_for":0,"waiting":0}]}
 ```
+
+`family` says which revision of this wire the reply is written in. A reader refuses a number it
+does not know and tolerates a reply that predates the field — four implementations of this shape
+existed with no version in any of them, already disagreeing about whether `n` is optional and
+whether `fault` exists, so a skew arrived as a missing field at the point of use.
+
+This is a **private protocol**, deliberately, and A2A is the standard it is not. The reasoning is
+in [`DECISION-A2A.md`](DECISION-A2A.md), along with what would change it.
 
 `result` is a **list** and `n` is its length. Settled before anything shipped, because two tools
 in one family disagreeing here fail *silently*: a client that unpacks a list reads a bare-value
@@ -77,7 +85,23 @@ Every call says who is making it. That claim is taken at face value, because eve
 one user in one directory and a check that cannot be enforced reads like security to whoever
 comes along next. What it buys is a *relation*, read off the directory rather than from the
 frame. `stop` is the exception: it carries the secret the session was started with, which only
-whoever started it ever held.
+whoever started it ever held — minted by `mint`, handed to the child in
+`MAGI_MELCHIOR_TOKEN`, and never written to the directory where a sibling could read it.
+
+## Starting a session under another
+
+```
+$ melchior fork
+{"project":"demo","role":"main","id":"iota-mu","parent":"alpha-rho","token":"…",
+ "environment":{"MAGI_MELCHIOR_PROJECT":"demo","MAGI_MELCHIOR_ID":"iota-mu",
+                "MAGI_MELCHIOR_PARENT":"alpha-rho","MAGI_MELCHIOR_TOKEN":"…"}}
+```
+
+**melchior names, the harness spawns.** A layer that started harnesses would have to know what
+one is; this hands down a name and a secret, and whoever asked starts the process with the
+environment it was given. A session started that way comes up a *child*: it writes the note that
+makes the tree readable, it is inside the walls `policy::between` draws, and the session that
+minted its secret is the only one that can end it.
 
 ## Talking to it from Lua
 
