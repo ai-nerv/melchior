@@ -45,6 +45,7 @@ pub fn reply<T: serde::Serialize>(
 ) -> std::io::Result<()> {
     let body = serde_json::json!({
         "ok": true,
+        "family": crate::wire::FAMILY,
         "n": values.len(),
         "result": values.iter().map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null)).collect::<Vec<_>>(),
     });
@@ -56,7 +57,12 @@ pub fn reply<T: serde::Serialize>(
 /// # Errors
 /// When stdout will not take it.
 pub fn refuse(out: &mut impl Write, how: As, why: &str, fault: &str) -> std::io::Result<()> {
-    let body = serde_json::json!({ "ok": false, "error": why, "fault": fault });
+    let body = serde_json::json!({
+        "ok": false,
+        "family": crate::wire::FAMILY,
+        "error": why,
+        "fault": fault,
+    });
     emit(out, how, &body)
 }
 
@@ -258,5 +264,42 @@ mod tests {
         let text = String::from_utf8(out).expect("utf8");
         assert_eq!(text.lines().count(), 1, "one said, one line: {text:?}");
         assert!(text.contains("\"event\""), "untagged: {text}");
+    }
+}
+
+#[cfg(test)]
+mod family_tests {
+    use super::*;
+
+    #[test]
+    fn a_one_shot_reply_says_which_wire_it_is() {
+        // The socket has carried this since the version check landed; these did not, so the only
+        // replies in the family with no version on them were the ones a coordinator reads first.
+        // A missing `family` is taken for a peer older than the check — exactly the wrong thing
+        // to say about the current build.
+        let mut out = Vec::new();
+        reply(&mut out, As::Json, &["a"]).expect("write");
+        let value: serde_json::Value = serde_json::from_slice(&out).expect("decode");
+        assert_eq!(value["family"], serde_json::json!(crate::wire::FAMILY));
+
+        let mut refused = Vec::new();
+        refuse(&mut refused, As::Json, "no", "refused").expect("write");
+        let value: serde_json::Value = serde_json::from_slice(&refused).expect("decode");
+        assert_eq!(
+            value["family"],
+            serde_json::json!(crate::wire::FAMILY),
+            "a refusal too"
+        );
+    }
+
+    #[test]
+    fn the_version_rides_on_both_encodings() {
+        let (mut json, mut cbor) = (Vec::new(), Vec::new());
+        reply(&mut json, As::Json, &["a"]).expect("json");
+        reply(&mut cbor, As::Cbor, &["a"]).expect("cbor");
+        let from_json: serde_json::Value = serde_json::from_slice(&json).expect("json");
+        let from_cbor: serde_json::Value = ciborium::from_reader(cbor.as_slice()).expect("cbor");
+        assert_eq!(from_json, from_cbor, "one shape, two encodings");
+        assert_eq!(from_cbor["family"], serde_json::json!(crate::wire::FAMILY));
     }
 }
