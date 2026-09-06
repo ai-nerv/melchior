@@ -44,6 +44,7 @@ Two walls, and no setting opens either past what it says:
 ```sh
 melchior serve      # bind this session's socket and answer for it
 melchior tool       # the vocabulary a model calls, one exec per request
+melchior fork       # a name and a secret for a session this one is about to start
 melchior lua-api    # the Lua client library, for redirecting into a config directory
 melchior verbs      # what a session answers over its socket
 ```
