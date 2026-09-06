@@ -8,6 +8,11 @@
 
 <p align="center"><em>One agent talking to another: naming, finding, reaching and refusing.</em></p>
 
+<p align="center">
+  <a href="https://claude.ai/code/artifact/cf3ff7f0-1c1d-472a-b01e-d08a854178b1"><strong>How the four fit together</strong></a> —
+  a turn end to end, writing a tool, memory both directions, what may run
+</p>
+
 melchior is the layer a coding agent uses to know about the other agents on the machine — who is
 running, how each stands to it, what it may say to them, and what it may not. It knows nothing
 about turns, transcripts, models or screens. Those belong to whatever harness is using it.
