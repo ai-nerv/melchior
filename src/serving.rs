@@ -123,28 +123,31 @@ async fn talk(stream: tokio::net::UnixStream, serving: Serving) -> std::io::Resu
     let (mut reader, mut writer) = stream.into_split();
 
     loop {
-        let call: Call = match tokio::time::timeout(IDLE, framing::read(&mut reader)).await {
-            Ok(Ok(call)) => call,
-            // Hanging up is not a mistake, and this is the one place that has to know the
-            // difference. A caller that has said everything it wanted to closes its side, and
-            // the read that was waiting for the next frame ends in `UnexpectedEof`.
-            //
-            // **It used to answer that with a refusal**, and the refusal went out: the client
-            // had closed the *write* half and was still reading, so a one-shot
-            // `printf … | socat - UNIX-CONNECT:…` got the answer it asked for and then
-            // `{"ok":false,"error":"early eof"}` — a second frame, saying something untrue,
-            // that anything parsing until EOF chokes on. Invisible from inside, because magi's
-            // own client holds its connection and reads exactly one reply per call.
-            Ok(Err(why)) if why.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
-            // A frame that is genuinely malformed still gets an answer, so the caller sees this
-            // crate's error rather than a transport one. Then the connection ends: a stream
-            // that has lost its framing cannot be resynchronised.
-            Ok(Err(why)) => {
-                let _ = framing::write(&mut writer, &Reply::refused(why.to_string())).await;
-                return Ok(());
-            }
-            Err(_) => return Ok(()),
-        };
+        // Read with the encoding it arrived in, so the reply goes back the same way. Nothing is
+        // negotiated: a body says which it is in its first byte.
+        let (call, wire): (Call, framing::Wire) =
+            match tokio::time::timeout(IDLE, framing::read_wire(&mut reader)).await {
+                Ok(Ok(pair)) => pair,
+                // Hanging up is not a mistake, and this is the one place that has to know the
+                // difference. A caller that has said everything it wanted to closes its side, and
+                // the read that was waiting for the next frame ends in `UnexpectedEof`.
+                //
+                // **It used to answer that with a refusal**, and the refusal went out: the client
+                // had closed the *write* half and was still reading, so a one-shot
+                // `printf … | socat - UNIX-CONNECT:…` got the answer it asked for and then
+                // `{"ok":false,"error":"early eof"}` — a second frame, saying something untrue,
+                // that anything parsing until EOF chokes on. Invisible from inside, because magi's
+                // own client holds its connection and reads exactly one reply per call.
+                Ok(Err(why)) if why.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+                // A frame that is genuinely malformed still gets an answer, so the caller sees this
+                // crate's error rather than a transport one. Then the connection ends: a stream
+                // that has lost its framing cannot be resynchronised.
+                Ok(Err(why)) => {
+                    let _ = framing::write(&mut writer, &Reply::refused(why.to_string())).await;
+                    return Ok(());
+                }
+                Err(_) => return Ok(()),
+            };
         let mut about = serving.about.borrow().clone();
         // Both ends of the relation, read here rather than trusted from startup, and for the same
         // reason: the directory is the shared truth and this process holds a snapshot of it.
@@ -160,7 +163,7 @@ async fn talk(stream: tokio::net::UnixStream, serving: Serving) -> std::io::Resu
         // with the tree as it stood when it was opened.
         let caller = placed(call.from.as_deref(), &about);
         let (reply, then) = answer(&call, &about, caller.as_ref());
-        framing::write(&mut writer, &reply).await?;
+        framing::write_as(&mut writer, wire, &reply).await?;
         match then {
             Then::Nothing => {}
             Then::Keep(message) => {

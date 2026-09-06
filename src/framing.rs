@@ -1,4 +1,4 @@
-//! The family's framing: four bytes of length, then JSON.
+//! The family's framing: four bytes of length, then the body — in JSON or in CBOR.
 //!
 //! Not `magi_ipc`, which is what the UI and the daemon speak to each other. That is CBOR
 //! inside an `Envelope` carrying a protocol version, and it is right for two halves of one
@@ -7,8 +7,12 @@
 //!
 //! This socket is the opposite case. Anything may knock on it: another magi, a sibling tool,
 //! somebody with `socat` working out why a message never arrived. So it speaks what the family
-//! agreed and what [`crate::wire`] documents — a big-endian `u32`, then a JSON body, and
-//! nothing wrapped around it.
+//! agreed and what [`crate::wire`] documents — a big-endian `u32`, then the body, and nothing
+//! wrapped around it.
+//!
+//! **JSON by default, CBOR when that is what turned up.** One shape in two encodings: a reply
+//! goes back in whichever the call arrived in, decided from the body's first byte rather than
+//! negotiated. The person with `socat` still gets text, because that is what they sent.
 //!
 //! **This was the bug this file exists to fix.** The socket was framed with `magi_ipc` and
 //! documented as JSON, which is the failure the family's own guidance names first: it works
@@ -32,9 +36,68 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// allocate until it dies.
 pub const MOST: usize = 1 << 20;
 
-/// Encode one value, framed.
-fn framed<T: Serialize>(value: &T) -> std::io::Result<Vec<u8>> {
-    let body = serde_json::to_vec(value).map_err(std::io::Error::other)?;
+/// Which encoding a body is in.
+///
+/// One shape, two encodings. JSON is what the family agreed and what somebody with `socat` can
+/// read; CBOR is the same message for a caller that is only going to parse it.
+///
+/// **Copied rather than shared**, like the framing around it — a crate held in common would be a
+/// dependency between repositories, and this family has none. Each copy is small enough to read
+/// in one sitting and is tested where it lives.
+///
+/// **Nothing is negotiated.** A body says which it is in its first byte: JSON's top level here is
+/// an object or an array, so it begins `{` or `[`; CBOR's is a map or an array, whose first byte
+/// is `0x80`–`0xBF`. The ranges do not overlap. So a reply goes back in whatever the call arrived
+/// in, and a peer that has never heard of CBOR is unaffected.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Wire {
+    /// Text. The default, and what every peer understands.
+    #[default]
+    Json,
+    /// Bytes, for a caller that is not going to read it.
+    Cbor,
+}
+
+impl Wire {
+    /// Which encoding `body` is in.
+    #[must_use]
+    pub fn of(body: &[u8]) -> Self {
+        match body.iter().find(|b| !b.is_ascii_whitespace()) {
+            Some(0x80..=0xBF) => Self::Cbor,
+            _ => Self::Json,
+        }
+    }
+
+    /// Read `body` as `T`, in whichever encoding it is.
+    ///
+    /// # Errors
+    /// When the body is not that shape.
+    pub fn read_any<T: DeserializeOwned>(body: &[u8]) -> std::io::Result<T> {
+        match Self::of(body) {
+            Self::Json => serde_json::from_slice(body).map_err(std::io::Error::other),
+            Self::Cbor => ciborium::from_reader(body).map_err(std::io::Error::other),
+        }
+    }
+
+    /// Encode `value` in this encoding.
+    ///
+    /// # Errors
+    /// When the value will not encode.
+    pub fn encode<T: Serialize>(self, value: &T) -> std::io::Result<Vec<u8>> {
+        match self {
+            Self::Json => serde_json::to_vec(value).map_err(std::io::Error::other),
+            Self::Cbor => {
+                let mut bytes = Vec::new();
+                ciborium::into_writer(value, &mut bytes).map_err(std::io::Error::other)?;
+                Ok(bytes)
+            }
+        }
+    }
+}
+
+/// Encode one value in `how`, framed.
+fn framed<T: Serialize>(how: Wire, value: &T) -> std::io::Result<Vec<u8>> {
+    let body = how.encode(value)?;
     if body.len() > MOST {
         return Err(std::io::Error::other("that is too much to say at once"));
     }
@@ -57,11 +120,21 @@ fn expecting(header: [u8; 4]) -> std::io::Result<usize> {
 
 /// Read one message from an async stream.
 pub async fn read<T: DeserializeOwned, R: AsyncRead + Unpin>(from: &mut R) -> std::io::Result<T> {
+    read_wire(from).await.map(|(value, _)| value)
+}
+
+/// The same, saying which encoding it arrived in.
+///
+/// What a server needs in order to answer in kind: the encoding is a property of the bytes that
+/// turned up, not of anything either end was told beforehand.
+pub async fn read_wire<T: DeserializeOwned, R: AsyncRead + Unpin>(
+    from: &mut R,
+) -> std::io::Result<(T, Wire)> {
     let mut header = [0_u8; 4];
     from.read_exact(&mut header).await?;
     let mut body = vec![0_u8; expecting(header)?];
     from.read_exact(&mut body).await?;
-    serde_json::from_slice(&body).map_err(std::io::Error::other)
+    Ok((Wire::read_any(&body)?, Wire::of(&body)))
 }
 
 /// Write one message to an async stream.
@@ -69,7 +142,19 @@ pub async fn write<T: Serialize, W: AsyncWrite + Unpin>(
     to: &mut W,
     value: &T,
 ) -> std::io::Result<()> {
-    to.write_all(&framed(value)?).await?;
+    write_as(to, Wire::Json, value).await
+}
+
+/// Write one message in `how`.
+///
+/// # Errors
+/// When the value will not encode, or the stream will not take it.
+pub async fn write_as<T: Serialize, W: AsyncWrite + Unpin>(
+    to: &mut W,
+    how: Wire,
+    value: &T,
+) -> std::io::Result<()> {
+    to.write_all(&framed(how, value)?).await?;
     to.flush().await
 }
 
@@ -79,12 +164,24 @@ pub fn read_from<T: DeserializeOwned, R: Read>(from: &mut R) -> std::io::Result<
     from.read_exact(&mut header)?;
     let mut body = vec![0_u8; expecting(header)?];
     from.read_exact(&mut body)?;
-    serde_json::from_slice(&body).map_err(std::io::Error::other)
+    Wire::read_any(&body)
 }
 
 /// Write one message to a blocking stream.
 pub fn write_to<T: Serialize, W: Write>(to: &mut W, value: &T) -> std::io::Result<()> {
-    to.write_all(&framed(value)?)?;
+    write_to_as(to, Wire::Json, value)
+}
+
+/// Write one message in `how`, to a blocking stream.
+///
+/// # Errors
+/// When the value will not encode, or the stream will not take it.
+pub fn write_to_as<T: Serialize, W: Write>(
+    to: &mut W,
+    how: Wire,
+    value: &T,
+) -> std::io::Result<()> {
+    to.write_all(&framed(how, value)?)?;
     to.flush()
 }
 
@@ -98,10 +195,13 @@ mod tests {
     fn a_frame_is_four_bytes_of_length_and_then_json() {
         // The whole point of the file. Somebody with `socat` and this documentation has to be
         // able to read what comes out, or the family contract is a comment.
-        let out = framed(&Call {
-            call: "status".to_owned(),
-            ..Call::default()
-        })
+        let out = framed(
+            Wire::Json,
+            &Call {
+                call: "status".to_owned(),
+                ..Call::default()
+            },
+        )
         .expect("frames");
         let len = u32::from_be_bytes([out[0], out[1], out[2], out[3]]) as usize;
         assert_eq!(len, out.len() - 4, "the length does not describe the body");
@@ -119,7 +219,7 @@ mod tests {
         // "no version" turned out to mean four implementations that already disagree about the
         // same reply, with nothing to say so. See `wire::FAMILY`. A reader that does not know
         // the field ignores it, which is what makes adding it safe.
-        let out = framed(&Reply::done()).expect("frames");
+        let out = framed(Wire::Json, &Reply::done()).expect("frames");
         let body: serde_json::Value = serde_json::from_slice(&out[4..]).expect("decodes");
         let keys: Vec<&str> = body
             .as_object()
@@ -168,5 +268,51 @@ mod tests {
         wire.extend_from_slice(b"not");
         let read: std::io::Result<Call> = read_from(&mut wire.as_slice());
         assert!(read.is_err());
+    }
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::*;
+    use crate::wire::{Call, Reply};
+
+    #[test]
+    fn a_body_says_which_encoding_it_is() {
+        assert_eq!(Wire::of(br#"{"call":"listening"}"#), Wire::Json);
+        assert_eq!(Wire::of(b"  [1]"), Wire::Json, "after space");
+        let cbor = Wire::Cbor
+            .encode(&serde_json::json!({"call": "listening"}))
+            .expect("encode");
+        assert_eq!(Wire::of(&cbor), Wire::Cbor);
+    }
+
+    #[test]
+    fn both_encodings_carry_the_same_message() {
+        let call = Call {
+            call: "listening".to_owned(),
+            args: vec![serde_json::json!("hello")],
+            ..Call::default()
+        };
+        let as_json = Wire::Json.encode(&call).expect("json");
+        let as_cbor = Wire::Cbor.encode(&call).expect("cbor");
+        assert_ne!(as_json, as_cbor, "different bytes");
+        let back_json: Call = Wire::read_any(&as_json).expect("json");
+        let back_cbor: Call = Wire::read_any(&as_cbor).expect("cbor");
+        assert_eq!(back_json.call, back_cbor.call, "one shape, two encodings");
+        assert_eq!(back_json.args, back_cbor.args);
+    }
+
+    #[tokio::test]
+    async fn a_frame_is_read_back_in_whichever_it_was_written() {
+        // What the socket does: written one way, read without being told which way.
+        for how in [Wire::Json, Wire::Cbor] {
+            let mut buffer = Vec::new();
+            write_as(&mut buffer, how, &Reply::done())
+                .await
+                .expect("write");
+            let (_reply, seen): (Reply, Wire) =
+                read_wire(&mut buffer.as_slice()).await.expect("read");
+            assert_eq!(seen, how, "the encoding survived the round trip");
+        }
     }
 }
