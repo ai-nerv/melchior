@@ -120,19 +120,24 @@ fn name() -> String {
     from_seed(seed)
 }
 
-/// A name nothing in `project` is already listening under.
+/// A name none of `taken` is already listening under.
 ///
 /// **Naming belongs here, not to a harness.** A harness that named itself would be choosing out
 /// of a namespace it cannot see: two started in the same second draw the same clock, and the
 /// collision surfaces only as one of them failing to bind — by which point it has already told
-/// somebody what it is called. Melchior is what holds the directory, so it is what can look first.
+/// somebody what it is called.
+///
+/// The taken names are a parameter rather than read from the directory, which is where they
+/// come from. Picking a name and knowing which names are in use are two different things, and
+/// having this read the directory made a module about *what a session is called* depend on the
+/// module about *where sessions listen* — which depends on this one back.
+/// [`crate::directory::free_in`] is the pair of them.
 ///
 /// Still a guess, deliberately. The look and the bind are not one act, so two callers a
 /// microsecond apart can still agree on a name; what this removes is the *likely* collision,
 /// and the bind settles the rest.
 #[must_use]
-pub fn free_in(project: &str) -> Identity {
-    let taken = crate::directory::listening(project);
+pub fn free_of(project: &str, taken: &[String]) -> Identity {
     let from = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.subsec_nanos() as usize);
@@ -147,6 +152,34 @@ pub fn free_in(project: &str) -> Identity {
         role: ROLE.to_owned(),
         id: picked,
     }
+}
+
+/// A secret to hand a session being started, which a `stop` has to quote back.
+///
+/// **Not a name.** A name is public — it is on the directory, every sibling can read it, and it
+/// is meant to be. This is the opposite: the one thing that distinguishes the harness that
+/// started a session from every other party that can see it exists, and the whole of what makes
+/// `stop` refusable. It never goes to disk and never into a transcript.
+///
+/// Read from the kernel, because a secret derived from a clock is one anybody who knows roughly
+/// when the session started can produce. Sixteen bytes as hex: long enough that guessing is not
+/// a strategy, short enough to sit in an environment variable.
+///
+/// Straight from `/dev/urandom` rather than through a crate. This is Linux-only software and
+/// that file is the kernel's answer; a dependency here would be one more edge on the graph for
+/// four lines that cannot be got wrong.
+///
+/// # Panics
+/// If the kernel will not produce randomness, which is not a condition to carry on under —
+/// continuing would mean minting a predictable secret and calling it one.
+#[must_use]
+pub fn secret() -> String {
+    use std::io::Read;
+    let mut bytes = [0_u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut bytes))
+        .expect("the kernel's randomness");
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The name a seed picks, so the shape can be tested without waiting for a clock.

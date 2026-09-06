@@ -14,7 +14,8 @@
 //! turns a name into something callable: who they are, how they stand to you, whether they can
 //! be reached at all, what has already been said, and the name of the tool.
 
-use crate::directory::{Address, Reach, TOOL};
+use crate::directory::{Address, TOOL};
+use crate::policy::Reach;
 use crate::policy::{self, Relation};
 use crate::verbs::Standing;
 

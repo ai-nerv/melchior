@@ -13,8 +13,9 @@
 use super::Answer;
 use super::{SPEAKS, Standing, TOOL, VERBS};
 use crate::asking;
-use crate::directory::{Address, Reach};
+use crate::directory::Address;
 use crate::policy;
+use crate::policy::Reach;
 use crate::wire::{Reply, Sort};
 use serde_json::Value;
 
@@ -120,7 +121,7 @@ pub fn decide(
 /// Make the call, and say what came back.
 pub fn perform(wanted: &Wanted, standing: &Standing) -> Answer {
     let me = standing.identity();
-    let mut held = match asking::Held::to(&wanted.who, &me) {
+    let mut held = match crate::directory::dial(&wanted.who, &me) {
         Ok(held) => held,
         // The common failure, and worth its own sentence: a socket file outlives the process
         // that made it, so a name found in the directory is not a promise that anything is

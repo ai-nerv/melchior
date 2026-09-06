@@ -56,11 +56,6 @@ impl Held {
         })
     }
 
-    /// Open a connection to a session by name, in this project.
-    pub fn to(them: &Identity, me: &Identity) -> std::io::Result<Self> {
-        Self::at(&crate::directory::listening_at(them), me)
-    }
-
     /// Make one call and read its answer.
     ///
     /// A refusal comes back as a [`Reply`] with `ok: false`, not as an error: that is the
@@ -129,7 +124,18 @@ impl Read for Reading<'_> {
 /// it is worth asking before a message is reported as delivered.
 #[must_use]
 pub fn answers(where_it_is: &Path, me: &Identity) -> bool {
-    Held::at(where_it_is, me).is_ok()
+    match Held::at(where_it_is, me) {
+        Ok(_) => true,
+        Err(why) => {
+            // The only place the reason survives. The caller wants a yes or a no, and "the
+            // socket is stale" and "the peer accepted and then hung up" are the same no.
+            crate::noted!(
+                "asking: nothing answers at {}: {why}",
+                where_it_is.display()
+            );
+            false
+        }
+    }
 }
 
 /// A refusal is a reply, and a caller always says who it is.
@@ -190,11 +196,8 @@ mod tests {
 
     #[test]
     fn nothing_listening_is_an_error_rather_than_a_wait() {
-        let missing = Identity {
-            project: "no-such-project-here".to_owned(),
-            role: "main".to_owned(),
-            id: "nobody-nowhere".to_owned(),
-        };
-        assert!(!answers(&crate::directory::listening_at(&missing), &me()));
+        // A path, not a name. Turning a name into a path is `directory::dial`'s job now, and
+        // this module no longer knows that sessions have names at all.
+        assert!(!answers(std::path::Path::new("/no/such/socket"), &me()));
     }
 }

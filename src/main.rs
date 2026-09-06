@@ -55,6 +55,7 @@ fn main() -> std::io::Result<()> {
             print!("{}", melchior::CLIENT);
             Ok(())
         }
+        Some("fork") => fork(),
         Some("verbs") => {
             for (verb, does) in melchior::wire::VERBS {
                 println!("{verb:<10} {does}");
@@ -63,11 +64,15 @@ fn main() -> std::io::Result<()> {
         }
         Some(other) => {
             eprintln!("melchior: no such command: {other}");
-            eprintln!("usage: melchior serve | tool | brief | models | ask | lua-api | verbs");
+            eprintln!(
+                "usage: melchior serve | tool | fork | brief | models | ask | lua-api | verbs"
+            );
             std::process::exit(2);
         }
         None => {
-            eprintln!("usage: melchior serve | tool | brief | models | ask | lua-api | verbs");
+            eprintln!(
+                "usage: melchior serve | tool | fork | brief | models | ask | lua-api | verbs"
+            );
             eprintln!();
             eprintln!("  serve     bind this session's socket and answer for it");
             eprintln!("  tool      the vocabulary a model calls, one exec per request");
@@ -85,7 +90,7 @@ mod tool;
 
 /// What the parent tells us, one JSON object per line on stdin.
 #[derive(serde::Deserialize)]
-#[serde(tag = "say", rename_all = "lowercase")]
+#[serde(tag = "event", rename_all = "snake_case")]
 enum Told {
     /// What this session is doing now, so `status` answers truthfully rather than plausibly.
     Doing {
@@ -121,7 +126,7 @@ enum Told {
 
 /// What we tell the parent, one JSON object per line on stdout.
 #[derive(serde::Serialize)]
-#[serde(tag = "heard", rename_all = "lowercase")]
+#[serde(tag = "event", rename_all = "snake_case")]
 enum Heard {
     /// Ready: the socket is bound and this session can be reached.
     Listening {
@@ -193,6 +198,36 @@ enum Heard {
 /// Everything it needs to *be* somebody comes from the environment, the same way it did when
 /// this ran inside a harness: `MAGI_MELCHIOR_PROJECT`, `MAGI_MELCHIOR_ROLE`, `MAGI_MELCHIOR_ID`, and the `MAGI_*` names
 /// they replaced. That is the one thing a separate process cannot work out for itself.
+/// `melchior fork` — a name and a secret for a session this one is about to start.
+///
+/// Prints the environment the child should be started with, as JSON, and nothing else. Over argv
+/// like every other question with an answer, and to *this* session's socket: the secret is the
+/// whole of what makes `stop` refusable, so the party that gets one is the party that already
+/// holds this session's own pipe.
+///
+/// **The harness spawns, melchior names.** A layer that started harnesses would have to know
+/// what one is — which command, which arguments, which working directory — and none of that is
+/// its business. It hands down a name and a secret the same way it hands down a name.
+fn fork() -> std::io::Result<()> {
+    let Some(me) = melchior::directory::mine() else {
+        return Err(std::io::Error::other(
+            "`fork` is asked by a session, of itself: nothing here says which session this is",
+        ));
+    };
+    let mut held = melchior::directory::dial(&me, &me)?;
+    let reply = held.call("mint", Vec::new())?;
+    if !reply.ok {
+        return Err(std::io::Error::other(
+            reply.error.unwrap_or_else(|| "mint refused".to_owned()),
+        ));
+    }
+    let Some(child) = reply.result.first() else {
+        return Err(std::io::Error::other("mint answered nothing"));
+    };
+    println!("{child}");
+    Ok(())
+}
+
 fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
     // Named here when the caller only says which project it is in, and that is the useful way
     // round: a harness choosing its own name is choosing out of a namespace it cannot see, and
@@ -200,14 +235,14 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
     // called. Whoever holds the directory should be the one that looks first.
     let me = match (melchior::directory::mine(), asked.get("project")) {
         (Some(me), _) => me,
-        (None, Some(project)) => melchior::identity::free_in(project),
+        (None, Some(project)) => melchior::directory::free_in(project),
         (None, None) => {
             eprintln!(
                 "melchior serve: no session to be. Pass --project, or set {} and {} — one of them \
                  has to say which session this is answering for, and nothing on disk can be \
                  asked instead.",
-                melchior::directory::PROJECT,
-                melchior::directory::ID
+                melchior::inherited::PROJECT,
+                melchior::inherited::ID
             );
             std::process::exit(2);
         }
@@ -224,11 +259,15 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
             busy: false,
             working_for: 0,
             inbox: Vec::new(),
+            minted: std::collections::BTreeMap::new(),
         });
         let (arrived_tx, mut arrived) = tokio::sync::mpsc::channel(64);
         let (asked_tx, mut asked) = tokio::sync::mpsc::channel(16);
         let (adopted_tx, mut adopted) = tokio::sync::mpsc::channel(4);
         let (stopped_tx, mut stopped) = tokio::sync::mpsc::channel(1);
+        // Children this session named, on their way into its own record of them. The secret is
+        // what a `stop` has to quote back, so it is held here and nowhere a sibling can read.
+        let (minted_tx, mut minted) = tokio::sync::mpsc::channel::<(String, String)>(4);
 
         // The note beside the socket, so the tree can be read off the directory: a session that
         // finds this one there can tell whose subagent it is without asking it, and without
@@ -259,6 +298,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                     asked: asked_tx,
                     adopted: adopted_tx,
                     stopped: stopped_tx,
+                    minted: minted_tx.clone(),
                 },
             )
             .await;
@@ -327,6 +367,16 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                 // transcript could reason about acquiring more.
                 Some((by, handover)) = adopted.recv() => {
                     say(&Heard::Adopted { by, handover });
+                }
+                // A child this session named. Held here and nowhere else: `stop` is refused
+                // unless the caller quotes the secret the child was started with, and a secret a
+                // sibling could read off the directory would be authority over a session it did
+                // not start. Never said up the pipe either — the harness that asked for it
+                // already has it, and nothing else has any business with it.
+                Some((id, token)) = minted.recv() => {
+                    about_tx.send_modify(|about| {
+                        about.minted.insert(id, token);
+                    });
                 }
                 // **`None` here is the parent letting go, and it is the whole lifetime rule.**
                 // Matched rather than left to `else`, because a `select!` arm whose pattern
@@ -483,7 +533,7 @@ fn brief(project: Option<&str>, asked: &std::collections::BTreeMap<String, Strin
     if named.is_empty() {
         return;
     }
-    let me = melchior::directory::mine().or_else(|| project.map(melchior::identity::free_in));
+    let me = melchior::directory::mine().or_else(|| project.map(melchior::directory::free_in));
     let standing = me.map(|me| melchior::verbs::Standing {
         inbox: melchior::directory::inbox_of(&me),
         forked: melchior::directory::children(&me),

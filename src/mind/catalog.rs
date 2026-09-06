@@ -330,9 +330,7 @@ mod shape {
     fn a_config_may_declare_providers_in_a_loop() {
         // The point of the config being Lua. A provider declared in a loop is the same table as
         // one written out by hand.
-        let dir = std::env::temp_dir().join(format!("melchior-loop-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
+        let dir = crate::scratch::Scratch::new("melchior-loop", "one");
         std::fs::write(
             dir.join("providers.lua"),
             r#"
@@ -356,6 +354,5 @@ mod shape {
                 "{host} was not declared"
             );
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

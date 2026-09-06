@@ -43,6 +43,12 @@ pub struct Serving {
     pub adopted: mpsc::Sender<(String, Option<String>)>,
     /// Somebody with the right to stop this instance did.
     pub stopped: mpsc::Sender<()>,
+    /// A child was named and its secret minted, on its way to this session's own record of it.
+    ///
+    /// Carried up rather than written where it is decided: the loop that owns `About` is the one
+    /// that may change it, and a secret is the one thing here that must not be reachable from
+    /// anywhere else.
+    pub minted: mpsc::Sender<(String, String)>,
 }
 
 /// Listen on `path` until the process ends.
@@ -99,6 +105,7 @@ pub async fn accept(listener: tokio::net::UnixListener, serving: Serving) -> std
             asked: serving.asked.clone(),
             adopted: serving.adopted.clone(),
             stopped: serving.stopped.clone(),
+            minted: serving.minted.clone(),
         };
         tokio::spawn(async move {
             let _permit = permit;
@@ -164,6 +171,9 @@ async fn talk(stream: tokio::net::UnixStream, serving: Serving) -> std::io::Resu
             }
             Then::Ask(request) => {
                 let _ = serving.asked.send(request).await;
+            }
+            Then::Minted { id, token } => {
+                let _ = serving.minted.send((id, token)).await;
             }
             Then::Stop => {
                 let _ = serving.stopped.send(()).await;
@@ -291,9 +301,22 @@ mod tests {
             busy: false,
             working_for: 0,
             inbox: Vec::new(),
+            minted: std::collections::BTreeMap::new(),
         });
         let (arrived_tx, arrived) = mpsc::channel(8);
         let (stopped_tx, stopped) = mpsc::channel(1);
+        // Drained into `about`, the way the real loop does it. Dropping the receiver instead
+        // would make `mint` answer and then quietly not record, which is the one way this could
+        // be wrong without any test noticing.
+        let (minted_tx, mut minted) = mpsc::channel::<(String, String)>(4);
+        let recording = about.clone();
+        tokio::spawn(async move {
+            while let Some((id, token)) = minted.recv().await {
+                recording.send_modify(|about| {
+                    about.minted.insert(id, token);
+                });
+            }
+        });
         let at = crate::directory::listening_at(me);
         tokio::spawn(async move {
             let _ = serve(
@@ -304,6 +327,7 @@ mod tests {
                     about: about_rx,
                     arrived: arrived_tx,
                     stopped: stopped_tx,
+                    minted: minted_tx,
                 },
             )
             .await;
@@ -333,7 +357,7 @@ mod tests {
         // a tool peer, which has no runtime and wants none.
         let (they, i) = (them.clone(), me.clone());
         let sent = tokio::task::spawn_blocking(move || {
-            let mut held = Held::to(&they, &i).expect("it is listening");
+            let mut held = crate::directory::dial(&they, &i).expect("it is listening");
             held.call(
                 "tell",
                 vec![
@@ -372,7 +396,7 @@ mod tests {
 
         let (they, i) = (them.clone(), me.clone());
         let answers = tokio::task::spawn_blocking(move || {
-            let mut held = Held::to(&they, &i).expect("it is listening");
+            let mut held = crate::directory::dial(&they, &i).expect("it is listening");
             ["verbs", "identity", "status", "identity"]
                 .into_iter()
                 .map(|verb| held.call(verb, Vec::new()).expect("answered"))
@@ -400,7 +424,7 @@ mod tests {
 
         let (they, i) = (them.clone(), me.clone());
         let reply = tokio::task::spawn_blocking(move || {
-            let mut held = Held::to(&they, &i).expect("it is listening");
+            let mut held = crate::directory::dial(&they, &i).expect("it is listening");
             held.call_with("stop", Vec::new(), "guessed")
                 .expect("answered")
         })
@@ -431,6 +455,7 @@ mod tests {
             busy: false,
             working_for: 0,
             inbox: Vec::new(),
+            minted: std::collections::BTreeMap::new(),
         };
         // The note a child leaves beside its socket, so the far end reads the caller as its
         // parent rather than as a stranger. Written by hand here; a session writes its own.
@@ -452,6 +477,7 @@ mod tests {
                     about: about_rx,
                     arrived: arrived_tx,
                     stopped: stopped_tx,
+                    minted: tokio::sync::mpsc::channel(4).0,
                 },
             )
             .await;
@@ -467,7 +493,7 @@ mod tests {
 
         let (they, i) = (them.clone(), me.clone());
         let (guessed, right) = tokio::task::spawn_blocking(move || {
-            let mut held = Held::to(&they, &i).expect("it is listening");
+            let mut held = crate::directory::dial(&they, &i).expect("it is listening");
             (
                 held.call_with("stop", Vec::new(), "guessed")
                     .expect("answered"),
@@ -639,6 +665,13 @@ mod handing_over {
         tidy("listed");
     }
 }
+
+/// Naming a child, and the secret that makes `stop` refusable.
+///
+/// Split from this file under THE RULE, which caps a file at 800 lines.
+#[cfg(test)]
+#[path = "serving/minting.rs"]
+mod minting;
 
 /// Hanging up is not a mistake; a bad frame is.
 #[cfg(test)]

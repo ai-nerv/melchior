@@ -1,6 +1,12 @@
-# melchior
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="misc/melchior-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="misc/melchior.svg">
+    <img src="misc/melchior.svg" alt="melchior" width="180">
+  </picture>
+</p>
 
-One agent talking to another: naming, finding, reaching and refusing.
+<p align="center"><em>One agent talking to another: naming, finding, reaching and refusing.</em></p>
 
 melchior is the layer a coding agent uses to know about the other agents on the machine — who is
 running, how each stands to it, what it may say to them, and what it may not. It knows nothing
@@ -38,6 +44,7 @@ Two walls, and no setting opens either past what it says:
 ```sh
 melchior serve      # bind this session's socket and answer for it
 melchior tool       # the vocabulary a model calls, one exec per request
+melchior fork       # a name and a secret for a session this one is about to start
 melchior lua-api    # the Lua client library, for redirecting into a config directory
 melchior verbs      # what a session answers over its socket
 ```
@@ -50,34 +57,57 @@ would be told the message landed.
 Two things cross the pipe, one JSON object per line:
 
 ```
-->  {"say":"doing","busy":true,"working_for":7,"waiting":0}
-<-  {"heard":"listening","at":"…/melchior/demo/alpha-rho"}
-<-  {"heard":"message","who":"demo/main/beta-nu","sort":"attention","text":"…"}
+->  {"event":"doing","busy":true,"working_for":7,"waiting":0}
+<-  {"event":"listening","at":"…/melchior/demo/alpha-rho"}
+<-  {"event":"message","who":"demo/main/beta-nu","sort":"attention","text":"…"}
 ```
 
 ## The wire
 
-Four-byte big-endian length, then a JSON body — the same shape oslo, hexe and aeon speak.
+Three transports, two shapes, one encoding — written out because it was written out nowhere, and
+five wires had grown five ways to say the same thing.
+
+| Transport | When | Framing |
+|---|---|---|
+| **argv** | a question with an answer and nothing to hold open | one JSON object on stdout |
+| **pipe** | a parent and the child it started | newline-delimited JSON, both directions |
+| **socket** | anything may knock | four bytes of big-endian length, then JSON |
+
+JSON is on all three. It is the *encoding*, not a transport.
+
+A **call** is answered; an **event** is not:
 
 ```
-->  {"call":"status","from":"demo/main/beta-nu"}
-<-  {"ok":true,"n":1,"result":[{"busy":false,"working_for":0,"waiting":0}]}
+->  {"call":"status","args":[]}
+<-  {"ok":true,"family":1,"n":1,"result":[{"busy":false}]}
+
+    {"event":"listening","at":"…"}
 ```
 
-`result` is a **list** and `n` is its length. Settled before anything shipped, because two tools
-in one family disagreeing here fail *silently*: a client that unpacks a list reads a bare-value
-server as having returned nothing at all, and an empty answer looks like an empty session.
+`result` is a **list** and `n` says how long it is: a sibling that unpacked a bare value would
+read an answer as nothing at all. `family` says which revision the reply is written in — a reader
+refuses a number it does not know and tolerates one it predates. A refused call is a *reply*, not
+a dropped connection.
 
-A refusal is a reply, not a dropped connection. A connection serves more than one call. Hanging
-up is not a mistake. `verbs` is answered from the first version and before any permission check,
-and `client` beside it hands over the library that speaks all this — enough for a sandboxed VM
-that cannot shell out to run `melchior lua-api`.
+**The tag key is `event`, everywhere, in both directions**, and `gate-wire` refuses any other.
+The failure it prevents is silent: two of these wires exist as byte-identical copies in two
+repositories, so when two spellings drift nothing fails and no test goes red — the surface simply
+stops being answered.
 
-Every call says who is making it. That claim is taken at face value, because everything here is
-one user in one directory and a check that cannot be enforced reads like security to whoever
-comes along next. What it buys is a *relation*, read off the directory rather than from the
-frame. `stop` is the exception: it carries the secret the session was started with, which only
-whoever started it ever held.
+## Starting a session under another
+
+```
+$ melchior fork
+{"project":"demo","role":"main","id":"iota-mu","parent":"alpha-rho","token":"…",
+ "environment":{"MAGI_MELCHIOR_PROJECT":"demo","MAGI_MELCHIOR_ID":"iota-mu",
+                "MAGI_MELCHIOR_PARENT":"alpha-rho","MAGI_MELCHIOR_TOKEN":"…"}}
+```
+
+**melchior names, the harness spawns.** A layer that started harnesses would have to know what
+one is; this hands down a name and a secret, and whoever asked starts the process with the
+environment it was given. A session started that way comes up a *child*: it writes the note that
+makes the tree readable, it is inside the walls `policy::between` draws, and the session that
+minted its secret is the only one that can end it.
 
 ## Talking to it from Lua
 
