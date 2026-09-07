@@ -40,14 +40,25 @@ impl Catalog {
         // Protocols first: a provider may name one, and a name that resolves to nothing should
         // be a refusal rather than an ordering accident.
         for (name, builtin) in [("apis.lua", APIS), ("providers.lua", PROVIDERS)] {
+            // **The shipped copy always runs, and a person's file runs over the top of it.**
+            //
+            // This used to be a choice between them: a file on disk meant the built-in did not
+            // run at all. So adding one wire protocol meant copying all eight hundred lines of
+            // `apis.lua` and owning every later fix to any of them forever — the cost of a
+            // ten-line contribution was the whole file, which is the surest way to have no
+            // contributions. magi loads additively and balthasar loads additively; this was the
+            // one program in the family that did not, and it was the program whose whole subject
+            // is protocols.
+            //
+            // Layering is safe because the registrar replaces on `(registrar, id)`: a file
+            // declaring `openai-completions` means it and gets it, and a file declaring something
+            // new adds one. Replacement stayed possible; only *accidental* replacement of the
+            // other eight hundred lines stopped.
+            engine.run(builtin, name)?;
+
             let path = dir.join(name);
-            match std::fs::read_to_string(&path) {
-                Ok(source) => engine.run(&source, &path.display().to_string())?,
-                // The copy in the binary. Without it melchior would only work where a config
-                // happened to be — and the relative fallback made that *whatever* `config/` sat
-                // next to the working directory, so running from magi's checkout loaded magi's
-                // protocols, which name a different global and fail at the first index.
-                Err(_) => engine.run(builtin, name)?,
+            if let Ok(source) = std::fs::read_to_string(&path) {
+                engine.run(&source, &path.display().to_string())?;
             }
         }
         // Last, and over the top. What a coordinator said outranks what is on disk: magi is
@@ -354,5 +365,62 @@ mod shape {
                 "{host} was not declared"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod layering_tests {
+    use super::*;
+    use crate::scratch::Scratch;
+
+    /// A config directory holding one file.
+    fn holding(name: &str, source: &str) -> Scratch {
+        let dir = Scratch::new("melchior-layer", name);
+        std::fs::write(dir.join(name), source).expect("write");
+        dir
+    }
+
+    #[test]
+    fn a_persons_file_adds_to_the_shipped_protocols_rather_than_replacing_them() {
+        // **The cost of a ten-line contribution used to be eight hundred lines.** A file on disk
+        // meant the built-in did not run, so adding one protocol meant forking every other one
+        // and owning their fixes forever. Both are here now, and the shipped ones still work.
+        let dir = holding(
+            "apis.lua",
+            r#"melchior.api("mine-own", { chat = function(ask) return ask end })"#,
+        );
+        let catalog = Catalog::load(&dir).expect("loads");
+
+        let mut catalog = catalog;
+        let known = catalog.engine.apis();
+        assert!(
+            known.iter().any(|a| a == "mine-own"),
+            "the file on disk was read: {known:?}"
+        );
+        assert!(
+            known.iter().any(|a| a == "openai-completions"),
+            "and the shipped protocols are still there, which is the whole point: {known:?}"
+        );
+    }
+
+    #[test]
+    fn a_persons_file_may_still_replace_one_by_name() {
+        // Layering is not weaker than replacing: the registrar replaces on `(registrar, id)`, so
+        // a file naming a shipped protocol still means it. What stopped is replacing the other
+        // eight hundred lines by accident.
+        let dir = holding(
+            "apis.lua",
+            r#"melchior.api("openai-completions", { chat = function() return "mine" end })"#,
+        );
+        let mut catalog = Catalog::load(&dir).expect("loads");
+        let known = catalog.engine.apis();
+        assert!(
+            known.iter().any(|a| a == "openai-completions"),
+            "still there"
+        );
+        assert!(
+            known.iter().any(|a| a == "anthropic-messages"),
+            "and replacing one did not take the rest with it: {known:?}"
+        );
     }
 }
