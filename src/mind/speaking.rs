@@ -173,6 +173,29 @@ pub fn needs(flags: &std::collections::BTreeMap<String, String>) -> std::io::Res
     reply(&mut out, how, &crate::mind::setup::needs())
 }
 
+/// `melchior verbs` — what this instance answers.
+///
+/// In the family reply shape. A self-description another program cannot parse is one only a
+/// person can use, which is exactly the situation the contract exists to end — this printed two
+/// columns of text until the conformance gate asked it for JSON and got prose.
+///
+/// # Errors
+/// When the answer cannot be written.
+pub fn verbs(flags: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
+    let how = As::asked(flags);
+    let mut out = std::io::stdout().lock();
+    // Both doors, each verb saying which it is on. A caller that asks the socket for a command
+    // line verb gets told what it is rather than refused as though it did not exist.
+    let listed: Vec<serde_json::Value> = crate::wire::CLI_VERBS
+        .iter()
+        .map(|(verb, about)| serde_json::json!({ "verb": verb, "about": about, "door": "cli" }))
+        .chain(crate::wire::VERBS.iter().map(
+            |(verb, about)| serde_json::json!({ "verb": verb, "about": about, "door": "socket" }),
+        ))
+        .collect();
+    reply(&mut out, how, &listed)
+}
+
 /// `melchior configure` — read config Lua on stdin and apply it.
 ///
 /// # Errors

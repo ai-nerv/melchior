@@ -51,17 +51,17 @@ fn main() -> std::io::Result<()> {
         // export, so "how do I enable this" needs a command for an answer, and it belongs to
         // whoever holds the token.
         Some("auth") => signing(args),
-        Some("lua-api") => {
+        // `client` is the family's name for it; `lua-api` is what this program called it first.
+        // Both stay, because a name is not worth breaking a caller over — see FAMILY.md.
+        Some("client" | "lua-api") => {
             print!("{}", melchior::CLIENT);
             Ok(())
         }
         Some("fork") => fork(),
-        Some("verbs") => {
-            for (verb, does) in melchior::wire::VERBS {
-                println!("{verb:<10} {does}");
-            }
-            Ok(())
-        }
+        // **In the reply shape, not as prose.** A program's self-description is the one thing
+        // another program has to be able to parse; this printed two columns of text, so the only
+        // way to discover melchior's surface was to read it with your eyes.
+        Some("verbs") => melchior::mind::speaking::verbs(&flags(args)),
         Some(other) => {
             eprintln!("melchior: no such command: {other}");
             eprintln!(

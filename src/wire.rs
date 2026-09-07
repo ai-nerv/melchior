@@ -194,6 +194,10 @@ impl Reply {
 ///
 /// `verbs` is here from the first version because it cannot be added quietly later: a family
 /// where one tool can be asked what it speaks and another cannot has stopped being a family.
+///
+/// **These are the socket verbs.** What the command line answers is [`CLI_VERBS`], and the two
+/// are not the same set — see FAMILY.md. Keeping them apart is what lets `verbs` say which door
+/// a verb is on, so that a caller asking the wrong one is told rather than refused.
 pub const VERBS: &[(&str, &str)] = &[
     ("verbs", "what this instance answers"),
     (
@@ -541,3 +545,26 @@ impl Request {
         }
     }
 }
+
+/// What the command line answers, as against [`VERBS`], which is the socket.
+///
+/// Two doors, two surfaces, and the difference is data rather than something a reader has to
+/// notice. A conformance check that probed the socket list against the command line reported six
+/// verbs as advertised-and-refused; every one of them was a socket verb, correctly absent from
+/// the command line and wrongly described by it.
+pub const CLI_VERBS: &[(&str, &str)] = &[
+    ("verbs", "what this program answers, on each of its doors"),
+    (
+        "client",
+        "the Lua client library for its surface, as source",
+    ),
+    ("needs", "what a coordinator may tell it, as declarations"),
+    ("configure", "take that configuration, as Lua on stdin"),
+    ("models", "what this machine could talk to"),
+    ("ask", "run a turn; an Ask on stdin"),
+    ("serve", "bind this session's socket and answer for it"),
+    ("fork", "start a child session, named and vouched for"),
+    ("auth", "sign in to a provider that takes more than a key"),
+    ("tool", "the agent surface, as a harness calls it"),
+    ("brief", "what this session should know about its siblings"),
+];
