@@ -62,6 +62,8 @@ fn main() -> std::io::Result<()> {
         // another program has to be able to parse; this printed two columns of text, so the only
         // way to discover melchior's surface was to read it with your eyes.
         Some("verbs") => melchior::mind::speaking::verbs(&flags(args)),
+        // The distribution half. Fetching is `git clone`; the idea is the lockfile.
+        Some("acknowledge") => melchior::mind::speaking::acknowledge(&flags(args)),
         Some(other) => {
             eprintln!("melchior: no such command: {other}");
             eprintln!(

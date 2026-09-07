@@ -115,6 +115,21 @@ pub struct Call {
 /// that an older reader ignores.
 pub const FAMILY: u16 = 1;
 
+/// The revision of the *registrar* surface — what a third party writes against.
+///
+/// Separate from [`FAMILY`], because they change for different reasons and a consumer cares about
+/// different halves. `family` is the wire between these programs: the reply shape, the encodings,
+/// which verbs exist. `surface` is what somebody's plugin file is written against: the registrar
+/// names, the fields each declaration owes, and what a callback is handed.
+///
+/// **It goes up when something already published stops working.** Adding a registrar, a field, or
+/// an event does not move it — a file written against 1 keeps running. Renaming one, removing one,
+/// or changing what a field means does, and that is the number a plugin checks if it wants to
+/// refuse rather than fail halfway.
+///
+/// Reported on `verbs`, beside `family`. See EXTENDING.md.
+pub const SURFACE: u16 = 1;
+
 /// One reply, as it goes back.
 ///
 /// Built through [`Reply::of`] and [`Reply::refused`] rather than by hand, so the `n`/`result`
@@ -567,4 +582,8 @@ pub const CLI_VERBS: &[(&str, &str)] = &[
     ("auth", "sign in to a provider that takes more than a key"),
     ("tool", "the agent surface, as a harness calls it"),
     ("brief", "what this session should know about its siblings"),
+    (
+        "acknowledge",
+        "clear the installed packages, so their declarations may run",
+    ),
 ];

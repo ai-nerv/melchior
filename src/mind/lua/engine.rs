@@ -236,6 +236,12 @@ impl Engine {
             // `__melchior_apis` and Rust keeps only their names.
             let apis = Table::new(&ctx);
             ctx.set_global(APIS, apis);
+            // **And lent back, so a protocol can be built out of one that already exists.** The
+            // registry was write-only from Lua: a file wanting `openai-completions` with one
+            // event handled differently had to copy the whole dialect, which is exactly the fork
+            // that layering was added to stop. The same table, so registering through either
+            // reaches the other.
+            melchior.set(ctx, "apis", apis).ok();
             let api = Callback::from_fn(&ctx, move |ctx, _exec, mut stack| {
                 let (name, spec): (Value, Value) = stack.consume(ctx)?;
                 let (Value::String(name), Value::Table(_)) = (name, spec) else {

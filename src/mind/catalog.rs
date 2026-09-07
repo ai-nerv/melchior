@@ -61,6 +61,43 @@ impl Catalog {
                 engine.run(&source, &path.display().to_string())?;
             }
         }
+
+        // **Then whatever is installed, discovered rather than named.** After the shipped files
+        // and the config's own copies of them, so a machine that has never used this behaves
+        // exactly as it did; before the coordinator's, which still wins.
+        //
+        // A file that raises costs itself and nothing else: it is somebody else's package, and
+        // refusing to start over it would make installing one a risk rather than a try. The two
+        // shipped files above are fatal for the opposite reason -- they are melchior's own.
+        let known =
+            crate::mind::acknowledged::recorded(&crate::mind::acknowledged::manifest_in(dir));
+        for (path, trust) in
+            crate::mind::plugins::runtimepath(&crate::mind::plugins::Roots::at(dir))
+        {
+            let Ok(source) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            // **A package runs when you have said it may, and not before.** Your own files run
+            // on sight; this is for what arrived under `site/pack/` by being fetched, and can
+            // change under you between one run and the next.
+            if trust.needs_acknowledging()
+                && !crate::mind::acknowledged::cleared(&known, &path, &source)
+            {
+                eprintln!(
+                    "melchior: {}; run `melchior acknowledge` to clear it",
+                    crate::mind::acknowledged::Held {
+                        path: path.clone(),
+                        known: crate::mind::acknowledged::seen(&known, &path),
+                    }
+                );
+                continue;
+            }
+            let named = path.display().to_string();
+            if let Err(why) = engine.run(&source, &named) {
+                eprintln!("melchior: {named}: {why}");
+            }
+        }
+
         // Last, and over the top. What a coordinator said outranks what is on disk: magi is
         // deciding, and a file that quietly won would be the disagreement this exists to end.
         // Nothing there is the ordinary case of a melchior nobody is coordinating.
@@ -422,5 +459,71 @@ mod layering_tests {
             known.iter().any(|a| a == "anthropic-messages"),
             "and replacing one did not take the rest with it: {known:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+    use crate::scratch::Scratch;
+
+    #[test]
+    fn a_file_dropped_in_plugin_declares_a_protocol_without_touching_anything_shipped() {
+        // P3 made a ten-line contribution ten lines instead of eight hundred. This is where it
+        // goes: a file of its own, in a directory, that nothing else has to name.
+        let dir = Scratch::new("melchior-disc", "dropped");
+        std::fs::create_dir_all(dir.join("plugin")).expect("mkdir");
+        std::fs::write(
+            dir.join("plugin/mine.lua"),
+            r#"melchior.api("mine-own", { chat = function(ask) return ask end })"#,
+        )
+        .expect("write");
+
+        let mut catalog = Catalog::load(&dir).expect("loads");
+        let known = catalog.engine.apis();
+        assert!(known.iter().any(|api| api == "mine-own"), "{known:?}");
+        assert!(
+            known.iter().any(|api| api == "openai-completions"),
+            "and the shipped protocols are untouched: {known:?}"
+        );
+    }
+
+    #[test]
+    fn after_gets_the_last_word_over_a_plugin() {
+        // The registrar replaces on `(registrar, id)`, so `after/` is how a person overrides
+        // something a package they installed declared.
+        let dir = Scratch::new("melchior-disc", "after");
+        std::fs::create_dir_all(dir.join("plugin")).expect("mkdir");
+        std::fs::create_dir_all(dir.join("after/plugin")).expect("mkdir");
+        for (at, body) in [("plugin/it.lua", "theirs"), ("after/plugin/it.lua", "mine")] {
+            std::fs::write(
+                dir.join(at),
+                format!(
+                    r#"melchior.api("contested", {{ chat = function() return "{body}" end }})"#
+                ),
+            )
+            .expect("write");
+        }
+
+        let mut catalog = Catalog::load(&dir).expect("loads");
+        assert!(catalog.engine.apis().iter().any(|api| api == "contested"));
+    }
+
+    #[test]
+    fn a_plugin_that_raises_does_not_stop_the_others() {
+        // Somebody else's package. Refusing to start over it would make installing one a risk
+        // rather than a try — where the two shipped files are fatal, because they are melchior's.
+        let dir = Scratch::new("melchior-disc", "broken");
+        std::fs::create_dir_all(dir.join("plugin")).expect("mkdir");
+        std::fs::write(dir.join("plugin/a-broken.lua"), "error(\"no\")").expect("write");
+        std::fs::write(
+            dir.join("plugin/b-fine.lua"),
+            r#"melchior.api("survivor", { chat = function(ask) return ask end })"#,
+        )
+        .expect("write");
+
+        let mut catalog = Catalog::load(&dir).expect("loads despite the broken one");
+        let known = catalog.engine.apis();
+        assert!(known.iter().any(|api| api == "survivor"), "{known:?}");
     }
 }

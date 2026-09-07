@@ -173,6 +173,43 @@ pub fn needs(flags: &std::collections::BTreeMap<String, String>) -> std::io::Res
     reply(&mut out, how, &crate::mind::setup::needs())
 }
 
+/// `melchior acknowledge` — clear the installed packages, so their declarations may run.
+///
+/// A file in your own `plugin/` directory runs on sight: you put it there, and a prompt about
+/// your own configuration is one nobody reads. A package under `site/pack/` is somebody else's
+/// code that arrived by being fetched, so it runs once you have said it may — and stops running
+/// again the moment it changes.
+///
+/// # Errors
+/// When the manifest cannot be written, or the answer cannot be printed.
+pub fn acknowledge(flags: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
+    let how = As::asked(flags);
+    let dir = crate::mind::catalog::Catalog::dir();
+    let files: Vec<(std::path::PathBuf, String)> =
+        crate::mind::plugins::runtimepath(&crate::mind::plugins::Roots::at(&dir))
+            .into_iter()
+            .filter(|(_, trust)| trust.needs_acknowledging())
+            .filter_map(|(path, _)| {
+                std::fs::read_to_string(&path)
+                    .ok()
+                    .map(|source| (path, source))
+            })
+            .collect();
+
+    let manifest = crate::mind::acknowledged::manifest_in(&dir);
+    let mut out = std::io::stdout().lock();
+    match crate::mind::acknowledged::acknowledge(&manifest, &files) {
+        Ok(_) => reply(
+            &mut out,
+            how,
+            &files
+                .iter()
+                .map(|(path, _)| serde_json::json!({ "acknowledged": path.display().to_string() }))
+                .collect::<Vec<_>>(),
+        ),
+        Err(why) => refuse(&mut out, how, &why, "refused"),
+    }
+}
 /// `melchior verbs` — what this instance answers.
 ///
 /// In the family reply shape. A self-description another program cannot parse is one only a
@@ -193,7 +230,16 @@ pub fn verbs(flags: &std::collections::BTreeMap<String, String>) -> std::io::Res
             |(verb, about)| serde_json::json!({ "verb": verb, "about": about, "door": "socket" }),
         ))
         .collect();
-    reply(&mut out, how, &listed)
+    // The one verb that says which registrar surface this program offers -- a fact about the
+    // program, not about the reply, so it rides on the self-description and nowhere else.
+    let body = serde_json::json!({
+        "ok": true,
+        "family": crate::wire::FAMILY,
+        "surface": crate::wire::SURFACE,
+        "n": listed.len(),
+        "result": listed,
+    });
+    emit(&mut out, how, &body)
 }
 
 /// `melchior configure` — read config Lua on stdin and apply it.
