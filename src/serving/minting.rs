@@ -66,6 +66,11 @@ async fn a_session_names_a_child_and_keeps_the_secret_it_minted() {
     assert_eq!(env[crate::inherited::PARENT], me.id);
     assert_eq!(env[crate::inherited::TOKEN], token);
     assert_eq!(env[crate::inherited::ID], id);
+    assert_eq!(
+        env[crate::inherited::SESSION],
+        me.id,
+        "a root hands down its own id as the run: {env}"
+    );
 
     // Kept, which is what makes `stop` refusable rather than a guess. Read back over the
     // socket because that is where it lives: never on the directory, where a sibling would
@@ -75,6 +80,33 @@ async fn a_session_names_a_child_and_keeps_the_secret_it_minted() {
         .expect("the thread finished");
     assert_eq!(held["result"][0][&id], token, "{held}");
     tidy("minting");
+}
+
+/// A run is handed down, not started afresh at every hop.
+///
+/// The failure without it: a coordinator that spawns a coordinator gives its grandchildren a
+/// run named after their own parent, and one job comes out as a tree of runs that share no
+/// roster and no memory directory. The child inherits what the *note beside this socket* says,
+/// which is what everybody else reads too.
+#[tokio::test]
+async fn a_child_inherits_the_run_rather_than_starting_one() {
+    let me = named("minting-run", "delta-rho");
+    let _bound = listening(&me).await;
+    let at = crate::directory::listening_at(&me);
+    std::fs::write(crate::directory::sessions::session_at(&me), "alpha-rho").expect("the note");
+
+    let full = me.full();
+    let reply = tokio::task::spawn_blocking(move || asked_as(&at, "mint", &full))
+        .await
+        .expect("the thread finished");
+    let child = &reply["result"][0];
+    assert_eq!(child["session"], "alpha-rho", "{reply}");
+    assert_eq!(
+        child["environment"][crate::inherited::SESSION],
+        "alpha-rho",
+        "the child was handed a run of its own: {reply}"
+    );
+    tidy("minting-run");
 }
 
 /// A secret is not something a sibling may read.

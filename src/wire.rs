@@ -223,7 +223,7 @@ pub const VERBS: &[(&str, &str)] = &[
     ("needs", "what a coordinator may tell it, as declarations"),
     (
         "kin",
-        "how the caller stands to it: parent, child, sibling, main, cousin",
+        "how the caller stands to it: parent, child, sibling, kin, main, cousin",
     ),
     (
         "status",

@@ -8,6 +8,7 @@
 //!     alpha-rho            <- a socket, named by the id and nothing else
 //!     iota-mu
 //!     iota-mu.parent       <- "alpha-rho": who started it
+//!     iota-mu.session      <- "alpha-rho": which run it belongs to
 //!   other-project/
 //!     beta-nu
 //! ```
@@ -32,6 +33,8 @@
 //! `stop` is the exception, because it is the one act the far end cannot decline. It carries the
 //! secret handed to the session in [`TOKEN`] when it was started, which only whoever started it
 //! ever held. A session nobody started holds none, so nothing can stop it.
+
+pub mod sessions;
 
 use crate::identity::Identity;
 use crate::inherited::{ID, PARENT, PROJECT, ROLE, TOKEN, said};
@@ -299,10 +302,12 @@ fn safe(name: &str) -> String {
     }
 }
 
-/// Leave the note saying who started this session, so the tree can be read off the directory.
+/// Leave the notes saying who started this session and which run it is part of.
 ///
-/// A main writes none, and that absence is what says it is one.
+/// A main writes no parent, and that absence is what says it is one. It writes a run all the
+/// same — see [`sessions::began`] for why the two are not symmetrical.
 pub fn announce(me: &Identity) {
+    sessions::began(me);
     let Some(parent) = parent() else { return };
     let path = kin_at(me);
     if let Some(dir) = path.parent() {
@@ -311,9 +316,10 @@ pub fn announce(me: &Identity) {
     let _ = std::fs::write(path, parent);
 }
 
-/// Take the note back down.
+/// Take the notes back down.
 pub fn forget(me: &Identity) {
     let _ = std::fs::remove_file(kin_at(me));
+    sessions::ended(me);
 }
 
 /// Record that `them` now answers to `parent`.
@@ -421,6 +427,7 @@ pub fn whom(project: &str, id: &str) -> Whom {
             .ok()
             .map(|name| name.trim().to_owned())
             .filter(|name| !name.is_empty()),
+        session: sessions::session_in(project, id),
     }
 }
 
@@ -478,6 +485,7 @@ pub fn answers(path: &Path) -> bool {
 fn forget_id(project: &str, id: &str) {
     let _ = std::fs::remove_file(socket(project, id));
     let _ = std::fs::remove_file(home(project).join(format!("{}.parent", safe(id))));
+    sessions::forget_in(project, id);
 }
 
 /// Last one out turns off the lights: drop the project's directory if nothing is left in it.

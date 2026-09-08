@@ -54,6 +54,10 @@ impl About {
             project: self.me.project.clone(),
             id: self.me.id.clone(),
             parent: self.parent.clone(),
+            // Read rather than held, so this answers the same as what a caller reads about us
+            // off the directory. Two views of one run that could disagree is a roster that
+            // depends on who was asked.
+            session: crate::directory::sessions::session_of(&self.me),
         }
     }
 }
@@ -237,6 +241,10 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
         "mint" => {
             let child = crate::directory::free_in(&about.me.project);
             let secret = crate::identity::secret();
+            // Ours, not the child's, and it is handed down unchanged however deep the tree
+            // gets: a child that worked out its own run would start a second one every time a
+            // coordinator spawned a coordinator.
+            let run = about.whom().session.unwrap_or_else(|| about.me.id.clone());
             let minted = Then::Minted {
                 id: child.id.clone(),
                 token: secret.clone(),
@@ -249,14 +257,16 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
                     "full": child.full(),
                     "parent": about.me.id,
                     "token": secret.clone(),
-                    // The three the child inherits, named so a harness does not have to know
-                    // them — and so adding a fourth is a change in one place.
+                    "session": run.clone(),
+                    // Everything the child inherits, named so a harness does not have to know
+                    // any of it — and so adding one more is a change in one place.
                     "environment": {
                         crate::inherited::PROJECT: child.project,
                         crate::inherited::ROLE: child.role,
                         crate::inherited::ID: child.id,
                         crate::inherited::PARENT: about.me.id,
                         crate::inherited::TOKEN: secret,
+                        crate::inherited::SESSION: run,
                     },
                 })),
                 minted,
@@ -409,6 +419,7 @@ mod tests {
             project: project.to_owned(),
             id: id.to_owned(),
             parent: parent.map(ToOwned::to_owned),
+            session: None,
         }
     }
 
@@ -687,6 +698,7 @@ mod handover {
             project: "demo".to_owned(),
             id: id.to_owned(),
             parent: None,
+            session: None,
         }
     }
 

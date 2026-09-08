@@ -6,7 +6,7 @@
 
 use super::{Standing, TOOL, VERBS};
 use crate::asking;
-use crate::policy::Relation;
+use crate::policy::{self, Reach, Relation};
 
 /// Every verb, as the model should read it.
 pub fn help(standing: &Standing) -> String {
@@ -72,6 +72,73 @@ pub fn list(standing: &Standing) -> String {
         .collect();
     format!(
         "In `{}`, reachable from here:\n\n{}",
+        me.project,
+        rows.join("\n")
+    )
+}
+
+/// Everyone in this session's run: the root that started it and everything under it.
+///
+/// **The whole run, not what this session may reach**, and that is the one place this parts
+/// company with [`list`]. The roster answers "who is on this job"; whether a given member may be
+/// spoken to is a second question with its own answer, and a roster that hid the members
+/// `agent_talk` refuses would have a coordinator planning around a crew it cannot see. Each row
+/// that is out of reach says so and names the setting, which is the same courtesy a refusal gets.
+///
+/// What each member is *for* is not on disk. The directory records who started whom, and a role
+/// invented here would be a second answer to a question nothing yet asks.
+pub fn crew(standing: &Standing) -> String {
+    let me = standing.whom();
+    let held = crate::directory::sessions::crew(&me);
+    if held.is_empty() {
+        return format!(
+            "Nothing in run `{}` is answering, not even this session — which means its own \
+             socket is not up, and the roster is read through it.",
+            me.session_root()
+        );
+    }
+    let me_named = standing.identity();
+    let setting = policy::talk();
+    let rows: Vec<String> = held
+        .iter()
+        .map(|them| {
+            let relation = policy::between(&me, them);
+            // Only ours, and only because it is the one this process was told at startup. A
+            // role read off a peer would be a role that peer chose for itself, and there is
+            // nowhere on disk to read it from anyway.
+            let role = if them.id == me.id {
+                format!(" [{}]", me_named.role)
+            } else {
+                String::new()
+            };
+            let alive = if asking::answers(
+                &crate::directory::socket(&them.project, &them.id),
+                &me_named,
+            ) {
+                ""
+            } else {
+                " — not answering; its socket is what a crash left behind"
+            };
+            let refused = if relation == Relation::Myself || policy::may(&me, relation, Reach::Ask)
+            {
+                String::new()
+            } else {
+                format!(
+                    " — out of reach while `magi.agent_talk` is \"{}\"",
+                    setting.named()
+                )
+            };
+            format!(
+                "- `{}`{role} — {}{alive}{refused}",
+                them.id,
+                relation.named()
+            )
+        })
+        .collect();
+    format!(
+        "Run `{}` in `{}`:\n\n{}\n\nWhat each of them is for is not recorded: the directory \
+         says who started whom, not what they were started to do.",
+        me.session_root(),
         me.project,
         rows.join("\n")
     )

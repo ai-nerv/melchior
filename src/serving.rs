@@ -241,6 +241,9 @@ fn placed(from: Option<&str>, about: &About) -> Option<Whom> {
             project: them.project,
             id: them.id,
             parent: None,
+            // Nothing to read: another project's directory is not one this session lists, and
+            // `elsewhere` is refused at every setting before a run could matter.
+            session: None,
         });
     }
     Some(whom(&them.project, &them.id))

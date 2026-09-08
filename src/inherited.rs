@@ -1,6 +1,6 @@
 //! What a session inherited from whoever started it.
 //!
-//! Six variables and one reader. They are here rather than in [`crate::directory`], where they
+//! Seven variables and one reader. They are here rather than in [`crate::directory`], where they
 //! grew up, because [`crate::policy`] needs one of them and the directory needs policy — and a
 //! module that reads an environment variable does not need to know that sessions have sockets.
 //! That was the whole of one of the three cycles among these four modules.
@@ -30,6 +30,15 @@ pub const PROJECT: &str = "MAGI_MELCHIOR_PROJECT";
 pub const ROLE: &str = "MAGI_MELCHIOR_ROLE";
 /// The last of the three, and the only one the socket is named after.
 pub const ID: &str = "MAGI_MELCHIOR_ID";
+
+/// Which run this session belongs to: the id of the root that started the whole of it.
+///
+/// Handed down by `mint` beside the other three, so a harness that spawns a child never has to
+/// know the name of this variable or what should go in it. A root sets it to its own id, and
+/// everything under it inherits that one value unchanged however deep the tree gets — which is
+/// what makes "the same run" a question with an answer, rather than a walk up a chain of notes
+/// that adoption is allowed to rewrite.
+pub const SESSION: &str = "MAGI_MELCHIOR_SESSION";
 
 /// How far this session may reach, as [`Talk`](crate::policy::Talk) names it.
 ///

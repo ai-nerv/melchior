@@ -100,8 +100,8 @@ pub fn parameters() -> Value {
             "who": {
                 "type": "string",
                 "description": "which instance, as `iota-mu`, `review/iota-mu` or \
-                                `magi/review/iota-mu`. Not needed by `help`, `list` or \
-                                `inbox`.",
+                                `magi/review/iota-mu`. Not needed by `help`, `list`, `crew` \
+                                or `inbox`.",
             },
             "message": {
                 "type": "string",
@@ -140,6 +140,10 @@ const VERBS: &[(&str, &str)] = &[
     (
         "list",
         "every instance listening, and how each relates to this one",
+    ),
+    (
+        "crew",
+        "everyone in this session: the root that started it and everything under it",
     ),
     (
         "about",
@@ -213,7 +217,7 @@ const VERBS: &[(&str, &str)] = &[
 /// A table rather than a condition per verb, because the third one written by hand disagreed
 /// with the schema and the model was told `whoami` needed a `who`.
 const ALONE: &[&str] = &[
-    "help", "whoami", "list", "inbox", "claims", "announce", "trouble", "reply",
+    "help", "whoami", "list", "crew", "inbox", "claims", "announce", "trouble", "reply",
 ];
 
 /// Which verbs need something said.
@@ -278,10 +282,15 @@ impl Standing {
     #[must_use]
     pub fn whom(&self) -> Whom {
         let me = self.identity();
+        // The run comes off the note rather than out of this struct: a tool process is spawned
+        // per call and the note is the one copy every other agent reads, so reading it here is
+        // what keeps this session's idea of its run and everybody else's the same one.
+        let session = crate::directory::sessions::session_of(&me);
         Whom {
             project: me.project,
             id: me.id,
             parent: self.parent.clone(),
+            session,
         }
     }
 
@@ -346,6 +355,7 @@ pub fn answer(arguments: &Value, standing: &Standing) -> Answer {
         "help" => Answer::said(saying::help(standing)),
         "whoami" => Answer::said(saying::whoami(standing)),
         "list" => Answer::said(saying::list(standing)),
+        "crew" => Answer::said(saying::crew(standing)),
         "inbox" => Answer::said(saying::inbox(standing)),
         // Answered without a `who`, because the message being quoted already says who to answer.
         // Asking for both would have a model look up something it just handed over, and the two
@@ -619,6 +629,16 @@ mod surface_tests {
     }
 
     #[test]
+    fn crew_is_answered_rather_than_falling_into_the_not_yet_wired_arm() {
+        // Everything in `ALONE` that is still a stub answers "understood but not yet carried
+        // out", and a verb added to that table and not to the dispatch joins them silently —
+        // it is a match arm, not a missing function, so nothing fails to compile.
+        let out = call(json!({"verb": "crew"}), standing());
+        assert!(!out.failed, "{}", out.said);
+        assert!(!out.said.contains("not yet carried out"), "{}", out.said);
+    }
+
+    #[test]
     fn a_verb_that_says_something_refuses_to_say_nothing() {
         for verb in SPEAKS {
             let out = call(json!({"verb": verb, "who": "gamma"}), standing());
@@ -727,74 +747,7 @@ mod surface_tests {
 
 /// `reply` finds who to answer from the message it quotes.
 ///
-/// The verb the whole thing turns on: a conversation is an `ask` and a `reply`, and while this
-/// was a stub two agents could open a conversation and never continue one. It read as the model
-/// being unwilling — it said "reply is not wired, sending instead" — rather than as a gap here.
+/// Split from this file under THE RULE, which caps a file at 800 lines.
 #[cfg(test)]
-mod replying {
-    use super::*;
-    use crate::wire::{Message, Sort};
-
-    fn asked_by(from: &str) -> Standing {
-        Standing {
-            me: "magi/main/alpha-rho".to_owned(),
-            parent: None,
-            forked: Vec::new(),
-            minted: std::collections::BTreeMap::new(),
-            inbox: vec![Message::sent(from, "which parser?", Sort::Question, None)],
-        }
-    }
-
-    #[test]
-    fn it_goes_to_whoever_asked() {
-        let standing = asked_by("magi/main/beta-nu");
-        let about = standing.inbox[0].id.clone();
-        let who = answering(&json!({"verb": "reply", "about": about}), &standing);
-        assert_eq!(who.as_deref().ok(), Some("magi/main/beta-nu"));
-    }
-
-    #[test]
-    fn an_id_that_names_nothing_is_refused_with_what_the_inbox_holds() {
-        // The likely mistake is an invented id or one already acted on, and "no such message"
-        // on its own leaves a model with nowhere to go.
-        let standing = asked_by("magi/main/beta-nu");
-        let Err(refused) = answering(&json!({"verb": "reply", "about": "made-up"}), &standing)
-        else {
-            panic!("an id that names nothing must not resolve to somebody");
-        };
-        assert!(refused.failed);
-        assert!(refused.said.contains("beta-nu"), "{}", refused.said);
-    }
-
-    #[test]
-    fn an_empty_inbox_says_so_rather_than_listing_nothing() {
-        let mut standing = asked_by("magi/main/beta-nu");
-        standing.inbox.clear();
-        let Err(refused) = answering(&json!({"verb": "reply", "about": "m1"}), &standing) else {
-            panic!("refused");
-        };
-        assert!(refused.said.contains("send") || refused.said.contains("ask"));
-    }
-
-    #[test]
-    fn a_named_recipient_still_wins_when_the_id_is_not_ours() {
-        // A session may be answering something it was told about out of band. The wall is still
-        // between it and the far end, so letting this through refuses nothing that matters.
-        let standing = asked_by("magi/main/beta-nu");
-        let who = answering(
-            &json!({"verb": "reply", "about": "elsewhere", "who": "gamma-xi"}),
-            &standing,
-        );
-        assert_eq!(who.as_deref().ok(), Some("gamma-xi"));
-    }
-
-    #[test]
-    fn reply_without_an_about_is_still_refused_before_anything_is_looked_up() {
-        let out = answer(
-            &json!({"verb": "reply", "message": "yes"}),
-            &asked_by("x/y/z"),
-        );
-        assert!(out.failed);
-        assert!(out.said.contains("about"), "{}", out.said);
-    }
-}
+#[path = "verbs/replying.rs"]
+mod replying;
