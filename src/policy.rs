@@ -157,8 +157,12 @@ pub enum Relation {
     Child,
     /// We were both started by the same session.
     Sibling,
-    /// Another instance's main: a front door, in this project.
-    Main,
+    /// Another session in this project that nobody started: a front door of its own.
+    ///
+    /// Named for the tree rather than for the word on a status line. `Main` sat beside
+    /// `me.is_main()` and `role: "main"` — three things spelt the same, of which only this one
+    /// meant "has no parent" — and a reader had to work out which was which every time.
+    Root,
     /// Another instance's subagent. Behind somebody else's front door.
     Cousin,
     /// A different project. Beyond the wall, and normally not even visible.
@@ -174,7 +178,10 @@ impl Relation {
             Self::Parent => "parent",
             Self::Child => "child",
             Self::Sibling => "sibling",
-            Self::Main => "main",
+            // The word stays `main`. It is what `kin` has always answered and what a sibling
+            // reads off the wire; the rename above is Rust's, and changing the wire with it
+            // would break a consumer to make a variant read better here.
+            Self::Root => "main",
             Self::Cousin => "cousin",
             Self::Elsewhere => "elsewhere",
         }
@@ -188,7 +195,7 @@ impl Relation {
             Self::Parent => "the session that started this one",
             Self::Child => "a subagent this session started",
             Self::Sibling => "a sibling subagent",
-            Self::Main => "another instance's main",
+            Self::Root => "another instance's main",
             Self::Cousin => "another instance's subagent",
             Self::Elsewhere => "in another project",
         }
@@ -218,7 +225,7 @@ pub fn between(me: &Whom, them: &Whom) -> Relation {
         return Relation::Sibling;
     }
     if them.is_main() {
-        return Relation::Main;
+        return Relation::Root;
     }
     Relation::Cousin
 }
@@ -248,7 +255,7 @@ pub fn may_at(me: &Whom, relation: Relation, reach: Reach, talk: Talk) -> bool {
         Relation::Sibling => matches!(talk, Talk::Instance | Talk::Project),
         // A main is a front door to the other mains at every setting. A subagent knocking on
         // somebody else's front door is crossing the instance wall, so it waits for `project`.
-        Relation::Main => me.is_main() || talk == Talk::Project,
+        Relation::Root => me.is_main() || talk == Talk::Project,
         Relation::Cousin => talk == Talk::Project,
     }
 }
@@ -281,7 +288,7 @@ pub fn refusal_at(me: &Whom, relation: Relation, reach: Reach, talk: Talk) -> St
     let needed = match relation {
         Relation::Sibling => Talk::Instance,
         Relation::Cousin => Talk::Project,
-        Relation::Main if !me.is_main() => Talk::Project,
+        Relation::Root if !me.is_main() => Talk::Project,
         _ => Talk::Project,
     };
     format!(
@@ -309,7 +316,7 @@ mod tests {
     fn two_mains_in_one_project_are_each_other_s_front_door() {
         let me = main_of("magi", "alpha-rho");
         let them = main_of("magi", "beta-nu");
-        assert_eq!(between(&me, &them), Relation::Main);
+        assert_eq!(between(&me, &them), Relation::Root);
     }
 
     #[test]
@@ -377,8 +384,8 @@ mod tests {
     #[test]
     fn mains_reach_each_other_at_the_default() {
         let me = main_of("magi", "alpha-rho");
-        assert!(may(&me, Relation::Main, Reach::Ask));
-        assert!(may(&me, Relation::Main, Reach::Tell));
+        assert!(may(&me, Relation::Root, Reach::Ask));
+        assert!(may(&me, Relation::Root, Reach::Tell));
     }
 
     #[test]
@@ -387,7 +394,7 @@ mod tests {
         assert!(!may(&child, Relation::Sibling, Reach::Tell));
         assert!(!may(&child, Relation::Cousin, Reach::Tell));
         assert!(
-            !may(&child, Relation::Main, Reach::Tell),
+            !may(&child, Relation::Root, Reach::Tell),
             "a subagent knocking on another instance's door crosses the wall"
         );
     }
@@ -399,7 +406,7 @@ mod tests {
             Relation::Myself,
             Relation::Parent,
             Relation::Sibling,
-            Relation::Main,
+            Relation::Root,
             Relation::Cousin,
             Relation::Elsewhere,
         ] {
@@ -454,13 +461,13 @@ mod levels {
             !may_at(&child, Relation::Cousin, Reach::Tell, Talk::Instance),
             "a cousin is behind another front door"
         );
-        assert!(!may_at(&child, Relation::Main, Reach::Tell, Talk::Instance));
+        assert!(!may_at(&child, Relation::Root, Reach::Tell, Talk::Instance));
     }
 
     #[test]
     fn project_opens_everything_inside_the_project() {
         let child = under("magi", "iota-mu", "alpha-rho");
-        for relation in [Relation::Sibling, Relation::Cousin, Relation::Main] {
+        for relation in [Relation::Sibling, Relation::Cousin, Relation::Root] {
             assert!(
                 may_at(&child, relation, Reach::Tell, Talk::Project),
                 "{relation:?} was still refused"
@@ -474,7 +481,7 @@ mod levels {
         let me = main_of("magi", "alpha-rho");
         for talk in [Talk::Mains, Talk::Instance, Talk::Project] {
             assert!(!may_at(&me, Relation::Elsewhere, Reach::Ask, talk));
-            assert!(!may_at(&me, Relation::Main, Reach::Stop, talk));
+            assert!(!may_at(&me, Relation::Root, Reach::Stop, talk));
             assert!(!may_at(&me, Relation::Sibling, Reach::Stop, talk));
         }
     }
@@ -491,7 +498,7 @@ mod levels {
             Relation::Parent,
             Relation::Child,
             Relation::Sibling,
-            Relation::Main,
+            Relation::Root,
             Relation::Cousin,
         ];
         for me in &who {

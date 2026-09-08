@@ -231,6 +231,28 @@ pub const VERBS: &[(&str, &str)] = &[
     ),
     ("inbox", "messages it has been sent and not yet acted on"),
     ("tell", "put a message of any sort in its inbox"),
+    // The adoption handshake, both halves. One session cannot make itself another's master: it
+    // asks, a person answers, and `adopted` is that answer arriving back.
+    (
+        "adopt",
+        "ask it to become this session's parent — a person there has to accept",
+    ),
+    (
+        "adopted",
+        "tell it a parent has taken it on, and hand over what that parent lends",
+    ),
+    // A session's own, and listed anyway. Both are refused to every caller but the session
+    // itself, which is a *refusal* and not an absence: a verb that is answered and unlisted
+    // breaks "advertised equals dispatched" from the side nobody checks, and a harness reading
+    // this list is exactly the caller that may ask.
+    (
+        "mint",
+        "name a child and mint the secret that will stop it — this session's own",
+    ),
+    (
+        "minted",
+        "the secrets this session minted for what it started, by id — this session's own",
+    ),
     (
         "stop",
         "end it — only from the session that started it, with the secret it was given",

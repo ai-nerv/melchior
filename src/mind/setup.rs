@@ -59,13 +59,26 @@ pub fn needs() -> Vec<Need> {
             required: false,
             default: None,
         },
+        Need {
+            name: "agent_talk".to_owned(),
+            kind: Kind::Text,
+            about: "how far a session may reach: mains, instance, project. Set in the \
+                    environment a session is spawned with, as `MAGI_MELCHIOR_TALK` — the \
+                    socket and the tool are two processes, and a setting only one of them \
+                    could see would leave a tool refusing what the socket allows"
+                .to_owned(),
+            required: false,
+            default: Some(serde_json::json!("mains")),
+        },
     ]
 }
 
-/// The settings a coordinator may set, beside the registrars.
+/// The settings a coordinator may set in a config chunk, beside the registrars.
 ///
-/// A registrar is named in [`needs`] too, but reaches the VM by being called rather than
-/// assigned, so it is not in this list.
+/// Narrower than [`needs`], and on purpose: two things it declares do not arrive by assignment.
+/// A registrar reaches the VM by being called, and `agent_talk` reaches [`crate::policy`] in the
+/// environment a session is spawned with — a chunk could only set it for the process running the
+/// chunk, which is not the process holding the socket.
 const SETTINGS: &[&str] = &["model", "thinking", "max_tokens", "discover"];
 
 /// Run a chunk of config Lua and say what it did.
@@ -203,6 +216,26 @@ mod tests {
         for name in SETTINGS {
             assert!(declared.contains(&(*name).to_owned()), "{name} undeclared");
         }
+    }
+
+    #[test]
+    fn the_setting_every_refusal_names_is_one_a_coordinator_can_find() {
+        // `agent_talk` decides who may reach whom and is named by name in every refusal it
+        // causes, and it was declared nowhere — so a coordinator reading `needs` could see the
+        // refusal, read the setting out of it, and still have no way to know it was melchior's
+        // to set or what the levels were called.
+        let declared = needs();
+        let talk = declared
+            .iter()
+            .find(|need| need.name == "agent_talk")
+            .expect("the setting every refusal names");
+        for level in [crate::policy::Talk::Mains.named(), "instance", "project"] {
+            assert!(talk.about.contains(level), "{level} is not named: {talk:?}");
+        }
+        assert!(
+            talk.about.contains(crate::inherited::TALK),
+            "and how to set it: {talk:?}"
+        );
     }
 
     #[test]

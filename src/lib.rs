@@ -18,7 +18,7 @@
 //! # Where sessions live
 //!
 //! ```text
-//! $XDG_RUNTIME_DIR/magi/
+//! $XDG_RUNTIME_DIR/melchior/
 //!   myproject/                 <- one directory per project
 //!     alpha-rho                <- a socket, named by the id and nothing else
 //!     iota-mu

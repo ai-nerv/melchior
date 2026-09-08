@@ -276,6 +276,22 @@ mod tests {
     }
 
     #[test]
+    fn a_release_carries_the_id_of_what_it_lets_go() {
+        // It carried nothing at all: `release` needed neither a `message` nor an `about`, so
+        // the frame it sent was a `release` sort with an empty body, and the far end could not
+        // tell which of a session's claims had been dropped.
+        let wanted = decide(
+            "release",
+            "beta-nu",
+            &serde_json::json!({"about": "magi-main-alpha-rho-18f2c"}),
+            &standing(),
+        )
+        .expect("decided");
+        assert_eq!(wanted.sort, Sort::Release);
+        assert_eq!(wanted.about.as_deref(), Some("magi-main-alpha-rho-18f2c"));
+    }
+
+    #[test]
     fn send_takes_the_sort_it_was_given_and_defaults_to_a_note() {
         let given = decide(
             "send",

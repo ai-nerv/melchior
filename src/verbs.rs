@@ -110,8 +110,9 @@ pub fn parameters() -> Value {
             },
             "about": {
                 "type": "string",
-                "description": "the id of the message being answered or released. \
-                                Required by `reply`; `inbox` lists the ids.",
+                "description": "the id of the message being answered, or of the work \
+                                being let go. Required by `reply` and `release`; `inbox` \
+                                lists the ids.",
             },
             "sort": {
                 "type": "string",
@@ -152,9 +153,14 @@ const VERBS: &[(&str, &str)] = &[
         "verbs",
         "what an instance says it can answer, asked of it rather than assumed",
     ),
-    // Saying things. `send` returns at once; `ask` waits for the answer.
+    // Saying things. Both return at once: nothing here holds the turn open, and `ask` differs
+    // from `send` only in the sort it stamps on the message and in what the far end owes back.
     ("send", "put a note in an instance's inbox and carry on"),
-    ("ask", "ask an instance a question and wait for its answer"),
+    (
+        "ask",
+        "put a question in an instance's inbox; its answer arrives in this session's inbox \
+         later, not in this turn",
+    ),
     (
         "reply",
         "answer a question that was asked of this session, quoting its id",
@@ -183,16 +189,17 @@ const VERBS: &[(&str, &str)] = &[
         "claim",
         "say this session is taking a piece of work, so others leave it alone",
     ),
-    ("release", "say it is finished with, or was never started"),
+    (
+        "release",
+        "let a claimed piece of work go, naming it by the id that claimed it",
+    ),
     ("claims", "what every instance has said it is working on"),
-    // Reading what came back.
+    // Reading what came back. The inbox and nothing else: a `history` verb sat here, fell
+    // through to `tell` and sent an empty message, and the store it wanted is balthasar's.
+    // Growing a second one here is the dependency this family exists to prevent.
     (
         "inbox",
         "what has been sent to this session and not yet acted on",
-    ),
-    (
-        "history",
-        "everything that has passed between this session and one instance",
     ),
     // Lifetime.
     (
@@ -219,6 +226,16 @@ const SPEAKS: &[&str] = &[
     "trouble",
     "handoff",
     "claim",
+];
+
+/// Which verbs quote something by id, and what that id is.
+///
+/// A table for the same reason [`ALONE`] and [`SPEAKS`] are. `release` was in none of them, so
+/// it named nothing and said nothing: it reached the far end as a `release` with an empty body,
+/// which tells whoever reads it that something was let go but not what.
+const QUOTES: &[(&str, &str)] = &[
+    ("reply", "the id of the message being answered"),
+    ("release", "the id of the work being let go"),
 ];
 
 /// What the tool needs from the session in order to answer.
@@ -315,11 +332,15 @@ pub fn answer(arguments: &Value, standing: &Standing) -> Answer {
     if SPEAKS.contains(&verb) && said.is_none_or(str::is_empty) {
         return Answer::refused(format!("`{verb}` needs `message` — what to say."));
     }
-    if verb == "reply" && arguments.get("about").is_none() {
-        return Answer::refused(
-            "`reply` needs `about` — the id of the message being answered. `inbox` lists them."
-                .to_owned(),
-        );
+    if let Some((_, what)) = QUOTES.iter().find(|(name, _)| *name == verb)
+        && arguments
+            .get("about")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return Answer::refused(format!(
+            "`{verb}` needs `about` — {what}. `inbox` lists them."
+        ));
     }
     match verb {
         "help" => Answer::said(saying::help(standing)),
@@ -603,6 +624,21 @@ mod surface_tests {
             let out = call(json!({"verb": verb, "who": "gamma"}), standing());
             assert!(out.failed, "{verb} sent an empty message");
             assert!(out.said.contains("message"), "{verb}: {}", out.said);
+        }
+    }
+
+    #[test]
+    fn a_verb_that_quotes_an_id_refuses_to_quote_nothing() {
+        // `release` was in none of the three tables, so nothing asked it for anything: it went
+        // out as a `release` with an empty body, telling the far end that something had been
+        // let go and not what.
+        for (verb, _) in QUOTES {
+            let out = call(
+                json!({"verb": verb, "who": "gamma", "message": "x"}),
+                standing(),
+            );
+            assert!(out.failed, "{verb} quoted nothing");
+            assert!(out.said.contains("about"), "{verb}: {}", out.said);
         }
     }
 

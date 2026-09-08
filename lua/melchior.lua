@@ -268,6 +268,13 @@ local SURFACE = {
   "verbs", "client",
   "identity", "kin", "status", "inbox", "needs",
   "tell",
+  -- The adoption handshake, both halves. `adopt` puts the question and a person answers it;
+  -- `adopted` is that answer coming back, and is believed only from the session the directory
+  -- already calls this one's parent.
+  "adopt", "adopted",
+  -- A session's own: every other caller is refused. Attached anyway, because the caller that
+  -- may ask is the harness holding this very session, and it reaches it through this library.
+  "mint", "minted",
   -- The one act the far end cannot decline, so the one that has to prove itself: it carries the
   -- secret the session was started with, and a session nobody started holds none.
   "stop",
