@@ -11,7 +11,6 @@ pub mod json;
 pub mod sandbox;
 pub mod stream;
 
-/// Anything that can go wrong loading a config.
 #[derive(Debug, thiserror::Error)]
 pub enum LuaError {
     #[error("{file}: {message}")]
@@ -20,7 +19,6 @@ pub enum LuaError {
     #[error("{file}: {message}")]
     Runtime { file: String, message: String },
 
-    /// A declaration was the wrong shape.
     #[error("{what}: {message}")]
     Shape { what: String, message: String },
 
