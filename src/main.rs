@@ -140,6 +140,13 @@ enum Heard {
         /// the name goes on its own screen and into what it signs.
         #[serde(rename = "as")]
         named: String,
+        /// Which run this session belongs to, which is the name written in its `.session` note.
+        ///
+        /// Told rather than left to be worked out. A root's run is its id plus the moment it
+        /// began, so a parent deriving one from the name alone would get a different answer to
+        /// the one every other agent reads off the directory — and a harness files its memory
+        /// under this, so the two disagreeing is a run whose agents cannot find each other.
+        run: String,
     },
     /// A message arrived for this session.
     Message {
@@ -343,6 +350,9 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         say(&Heard::Listening {
             at: at.display().to_string(),
             named: me.full(),
+            // Read back from the note `announce` has just written rather than computed again
+            // here, so there is one answer and the directory holds it.
+            run: melchior::directory::sessions::session_of(&me).unwrap_or_else(|| me.id.clone()),
         });
         tokio::spawn(async move {
             let _ = melchior::serving::accept(

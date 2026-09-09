@@ -73,17 +73,39 @@ fn read(path: &std::path::Path) -> Option<String> {
 
 /// Leave the note saying which run this agent belongs to.
 ///
-/// **A root writes its own id**, where it writes no `.parent` at all. The asymmetry is the
-/// design: having no parent is what makes a root, so absence says it; being its own run is
-/// something a root *is*, and a missing note would leave every reader to guess it — see
+/// **A root mints the name**, where it writes no `.parent` at all. The asymmetry is the design:
+/// having no parent is what makes a root, so absence says it; being its own run is something a
+/// root *is*, and a missing note would leave every reader to guess it — see
 /// [`Whom::session_root`](crate::policy::Whom::session_root) for what that guess costs.
 pub fn began(me: &Identity) {
-    let run = inherited().unwrap_or_else(|| me.id.clone());
+    let run = inherited().unwrap_or_else(|| minted(&me.id, since_epoch()));
     let path = session_at(me);
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     let _ = std::fs::write(path, run);
+}
+
+/// A run name that no later run can be handed.
+///
+/// **The id alone recycles.** [`free_of`](crate::identity::free_of) picks a name none of the
+/// *currently listening* sessions holds, so `alpha-rho` comes round again as soon as the first
+/// one ends — twenty-four Greek words pair into 552 names, which on a busy machine is weeks
+/// rather than years. A run name is what balthasar files a session's history under, and a
+/// returning name is not a collision it can see: it reopens the months-old record of the same
+/// name and appends this run's transcript to it.
+///
+/// Stamped rather than made random so the name still reads as the run it is. The id is the part
+/// a person and a roster both use; the seconds are only there to stop it coming round.
+fn minted(id: &str, at: u64) -> String {
+    format!("{id}-{at}")
+}
+
+/// Seconds since the epoch.
+fn since_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
 }
 
 /// Take the note back down.
@@ -141,12 +163,25 @@ mod tests {
         // where the socket is announced, and a session that bound without writing it would be
         // on nobody's roster including its own.
         super::super::announce(&root, &crate::directory::roles::Role::default());
-        assert_eq!(session_of(&root).as_deref(), Some("alpha-rho"));
-        assert_eq!(
-            session_in(&project, "alpha-rho").as_deref(),
-            Some("alpha-rho")
-        );
+        let run = session_of(&root).expect("the note");
+        assert!(run.starts_with("alpha-rho-"), "{run}");
+        assert_eq!(session_in(&project, "alpha-rho"), Some(run));
         let _ = std::fs::remove_dir_all(home(&project));
+    }
+
+    #[test]
+    fn a_run_name_does_not_come_round_again_when_its_id_does() {
+        // `free_of` only avoids the names currently listening, so `alpha-rho` is handed out
+        // again as soon as the first one ends. balthasar files a session's history under the
+        // run, and it cannot see a returning name as a collision — it reopens the record of the
+        // same name and appends a new run's transcript to a months-old one.
+        let earlier = minted("alpha-rho", 1_700_000_000);
+        let later = minted("alpha-rho", 1_800_000_000);
+        assert_ne!(earlier, later, "the same id twice named one run");
+        assert!(
+            earlier.starts_with("alpha-rho") && later.starts_with("alpha-rho"),
+            "and it still reads as the run a roster names"
+        );
     }
 
     #[test]
