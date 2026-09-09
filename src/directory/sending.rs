@@ -1,31 +1,10 @@
 //! How much one session may say, and how often.
 //!
-//! Split from [`super`] under THE RULE, which caps a file at 800 lines.
-//!
-//! # Why there are caps at all
-//!
-//! MAST's two commonest multi-agent failures are step repetition, at 15.7%, and being unaware of
-//! termination, at 12.4%. Both look identical from inside one session: an agent doing the right
-//! thing, again. Nothing here can tell a deliberate second attempt from the ten-thousandth pass
-//! of a loop by *reading* it, so what these numbers do is bound the damage rather than diagnose
-//! the cause — a loop that cannot send more than [`IN_A_WINDOW`] messages a minute, and cannot
-//! send the same one twice, runs out of ways to be a loop.
-//!
-//! # The record is a note beside the socket
-//!
-//! `melchior tool` is one process per call. Nothing it counts survives the exit, so the count is
-//! on disk, in `<id>.sent`, beside `<id>.parent` and for the same reason — it is written by the
-//! session it belongs to and swept when that session goes.
-//!
-//! Two tool processes writing it at once lose an update, and the cap then counts one send short.
-//! That is the right way for this to be wrong: a rate limit that occasionally forgives is a rate
-//! limit, and one that occasionally refuses a message somebody meant is a bug report.
-//!
-//! # And only for a session that is really there
-//!
-//! Nothing is recorded unless the session's own socket answers. A note written for a session that
-//! never bound would never be swept — nothing would ever dial it, so nothing would ever notice it
-//! was a corpse — and the tool process of a session that is not listening has no peers to flood.
+//! The record is a note beside the socket, `<id>.sent`, because `melchior tool` is one process per
+//! call and nothing it counts survives the exit. Two tool processes writing it at once lose an
+//! update and the cap then counts one send short, which is the forgiving direction. Nothing is
+//! recorded unless the session's own socket answers: a note written for a session that never
+//! bound would never be swept, because nothing would ever dial it and find a corpse.
 
 use super::{answers, home, safe, socket};
 use crate::identity::Identity;
@@ -33,54 +12,24 @@ use crate::wire::{Message, Sort};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
-/// How much one message may say, in characters.
-///
-/// Two thousand is a long paragraph — about three hundred words. The number comes from the far
-/// end rather than from this one: an inbox holds fifty messages and a model reads the whole of it
-/// in one turn, so an uncapped message is one peer deciding how much of somebody else's context
-/// it gets. Fifty at this size is already a hundred thousand characters, which is the pathological
-/// case and survivable; fifty uncapped is not a number at all.
-///
-/// It is also the honest bound on what this is *for*. melchior moves a message, not a file: work
-/// that needs more than a paragraph to hand over needs a path in the paragraph.
+/// How much one message may say, in characters. An inbox holds fifty of them and a model reads
+/// the whole of it in one turn.
 pub const AT_MOST: usize = 2_000;
 
 /// How many messages one session may send in a window.
-///
-/// The same number as [`AT_ONCE`], because they bound the same thing — how many peers one
-/// decision may touch. A session that addressed a whole crew one at a time gets through with
-/// nothing to spare and a session in a loop is thousands past it before the first window closes.
 pub const IN_A_WINDOW: usize = 24;
 
 /// How long that window is, in milliseconds.
-///
-/// A minute, because that is roughly one model turn on a loaded machine: the cap should be felt
-/// by a session sending on every pass of a loop and not by one that sent a burst, thought, and
-/// sent another.
 pub const WINDOW: u64 = 60_000;
 
 /// How many peers one fan-out may reach.
-///
-/// A run bigger than this is one where `announce` is the wrong verb: twenty-four agents each
-/// being told the same thing is twenty-four turns spent reading it, and a coordinator that wants
-/// more than that wants a roster it addresses in parts.
 pub const AT_ONCE: usize = 24;
 
-/// How many times one piece of work may be handed on.
-///
-/// **This is the cycle guard, and it is the number that has to ride the message.** No single
-/// session can see a cycle: A hands to B, B to C, C to A, and each of the three sees one handoff
-/// arrive and one leave. A counter held locally is a counter that resets at every hop.
-///
-/// Eight because a genuine pipeline is three or four stages — plan, do, review, and back once —
-/// so eight lets an honest chain run round twice before it is stopped, while the cycles MAST
-/// measures are two and three agents long and hit this in seconds.
+/// How many times one piece of work may be handed on. The count rides the message because no
+/// single session can see a cycle, and a counter held locally resets at every hop.
 pub const HOPS: u32 = 8;
 
 /// What is wrong with the length of a message, if anything.
-///
-/// # Errors
-/// When it says more than [`AT_MOST`] characters.
 pub fn sized(said: &str) -> Result<(), String> {
     let held = said.chars().count();
     if held > AT_MOST {
@@ -93,13 +42,8 @@ pub fn sized(said: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// How many hops an outgoing handoff carries, given what this session was handed.
-///
-/// **The deepest handoff in the inbox, plus one.** Not the one being passed on, because nothing
-/// says which that is: a model handing work on has read several messages and the tool call names
-/// a recipient, not a provenance. Taking the deepest can only over-count, and over-counting stops
-/// a chain sooner — which is the safe direction for a guard whose failure mode is a loop that
-/// never stops.
+/// How many hops an outgoing handoff carries: the deepest handoff in the inbox plus one, because
+/// nothing says which arrival is being passed on and over-counting stops a chain sooner.
 #[must_use]
 pub fn hopped(inbox: &[Message]) -> u32 {
     inbox
@@ -131,18 +75,11 @@ pub fn sent_at(project: &str, id: &str) -> PathBuf {
     home(project).join(format!("{}.sent", safe(id)))
 }
 
-/// Record one message and say whether it may go.
-///
-/// `what` is everything that makes two sends the same send: the verb, who it is aimed at, and
-/// what it says. Two calls that agree on all three inside one window are a model repeating
-/// itself, and the second is refused rather than dropped — silence would leave it believing the
-/// message landed, and believing that is how the third one gets sent.
-///
-/// # Errors
-/// When the window is full, or when this exact message has already gone in it.
+/// Record one message and say whether it may go. `what` is the verb, who it is aimed at and what
+/// it says, so two calls agreeing on all three inside one window are the same send, and the
+/// second is refused rather than dropped.
 pub fn allow(me: &Identity, what: &str) -> Result<(), String> {
-    // Nothing to record for a session that is not listening: the note would outlive every sweep
-    // that could take it down. See the module header.
+    // Nothing to record for a session that is not listening: the note would outlive every sweep.
     if !answers(&socket(&me.project, &me.id)) {
         return Ok(());
     }
@@ -204,27 +141,19 @@ fn read(path: &std::path::Path) -> Vec<(u64, u64)> {
         .collect()
 }
 
-/// One message, as a number two calls can be compared by.
-///
-/// Hashed rather than kept whole so the note stays a note: fifty sends of a two-thousand-character
-/// message would otherwise put a hundred kilobytes in the runtime directory, per session, to
-/// answer a question that only needs "was this the same".
+/// One message, as a number two calls can be compared by, hashed so the note stays a note.
 fn marked(what: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     what.hash(&mut hasher);
     hasher.finish()
 }
 
-/// The caps hold, and the count that matters travels with the message.
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::scratch::Project;
 
-    /// A project of its own, with a socket, so the record is actually kept.
-    ///
-    /// A guard rather than a name: the line that removed it came after the assertions, so a
-    /// failing test left the directory and its socket behind for good — see [`crate::scratch`].
+    /// A project of its own with a socket, so the record is actually kept.
     fn listening(name: &str) -> (Project, std::os::unix::net::UnixListener) {
         let project = Project::new("melchior-sent", name);
         let bound =
@@ -242,15 +171,11 @@ mod tests {
 
     #[test]
     fn the_same_message_twice_in_a_window_is_refused_and_says_so() {
-        // Step repetition, MAST's commonest failure at 15.7%. Refused rather than silently
-        // dropped: a session told nothing goes on believing the message landed, and believing
-        // that is how the third one gets sent.
         let (project, _bound) = listening("repeat");
         let me = me(&project);
         allow(&me, "send beta-nu the parser is done").expect("the first one goes");
         let why = allow(&me, "send beta-nu the parser is done").expect_err("the second one");
         assert!(why.contains("same message"), "{why}");
-        // And a different one still goes, so the guard is about repetition and not about volume.
         allow(&me, "send beta-nu the lexer is done").expect("something new");
     }
 
@@ -279,8 +204,7 @@ mod tests {
 
     #[test]
     fn the_hop_count_comes_off_the_message_rather_than_out_of_this_session() {
-        // The whole point of putting it in the frame. A counter this session held would start at
-        // zero every time work came back round, and a cycle is exactly the case where it does.
+        // A counter this session held would start at zero every time work came back round.
         assert_eq!(hopped(&[]), 1, "a fresh handoff is the first hop");
         let handed = |hops: u32| {
             let mut message = Message::sent("magi/main/beta-nu", "yours now", Sort::Handoff, None);
@@ -288,10 +212,8 @@ mod tests {
             message
         };
         assert_eq!(hopped(&[handed(3)]), 4);
-        // The deepest, not the newest: nothing says which arrival is being passed on, and
-        // over-counting stops a chain sooner, which is the safe direction.
+        // The deepest, not the newest.
         assert_eq!(hopped(&[handed(5), handed(2)]), 6);
-        // A note that is not a handoff carries nothing.
         assert_eq!(hopped(&[Message::new("magi/main/beta-nu", "fyi")]), 1);
     }
 

@@ -1,61 +1,28 @@
 //! What a session has said it is working on, so two of them do not do it twice.
 //!
-//! Split from [`super`] under THE RULE, which caps a file at 800 lines.
-//!
-//! # A file, and the kernel decides who won
-//!
-//! One file per claim, given its name by a single exclusive syscall. That is the whole mechanism:
-//! two agents that ask for the same piece of work in the same microsecond both try, the kernel
-//! lets exactly one of them name the file, and the other reads back who beat it. No lock manager,
-//! no protocol, no round trip — and no window between deciding and recording.
-//!
-//! This is the one thing being on one machine *buys* rather than merely permits. A distributed
-//! version of this needs consensus; here it needs [`std::fs::hard_link`].
-//!
-//! # A dead claimant holds nothing
-//!
-//! A claim is refused only if the file is there **and** its holder still answers its socket —
-//! the same liveness test [`super::listening`] applies to a socket, for the same reason. A
-//! process that died did not get to let go of its work, and a claim nobody can be asked about is
-//! a piece of work nobody will ever do again.
-//!
-//! # The directory's name starts with a dot, and that is load-bearing
-//!
-//! [`super::listening`] lists a project's directory, keeps every entry whose name holds no dot,
-//! and then *dials it as a socket*. A directory called `claims` would be listed as an agent,
-//! offered to a model as one, dial-tested on every sweep, and — failing that dial — handed to the
-//! sweep that deletes a corpse's socket and notes. The dot is what keeps this out of the roster,
-//! and there is a test that says so.
+//! One file per claim, given its name by a single exclusive syscall, so two agents asking for the
+//! same piece of work at once are settled by the kernel and the loser reads back who beat it. A
+//! claim is refused only if the file is there and its holder still answers its socket, which is
+//! the liveness test [`super::listening`] applies to a socket.
 
 use super::{answers, home, safe, socket};
 use std::path::{Path, PathBuf};
 
-/// What the directory of claims is called.
-///
-/// Read by the tests that check it never reaches a roster, so the dot is one character in one
-/// place rather than a convention somebody has to keep.
+/// What the directory of claims is called. The leading dot is what keeps it out of the roster:
+/// [`super::listening`] dials every dotless entry in a project directory as a socket.
 pub const HELD: &str = ".claims";
 
-/// How long the name of a piece of work may be, in characters.
-///
-/// It becomes a filename, so an uncapped one is `ENAMETOOLONG` reported to a model as "the claim
-/// could not be written", which says nothing it can act on. A hundred and twenty is a path, a
-/// ticket number or a sentence naming a task — more than that is a description of the work rather
-/// than a name for it, and two agents will never write the same one.
+/// How long the name of a piece of work may be, in characters. It becomes a filename.
 pub const NAMED_AT_MOST: usize = 120;
 
 /// One session's word that it is working on something.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Claim {
-    /// The id of the session holding it.
     pub by: String,
     /// When it was taken, in milliseconds since the epoch.
     pub at: u64,
-    /// What it is about, as whoever took it wrote it.
-    ///
-    /// Kept in the file as well as flattened into its name, because flattening is lossy:
-    /// `src/a.rs` and `src-a.rs` name one file. A reader that had only the filename would be
-    /// shown a claim nobody made.
+    /// What it is about, as whoever took it wrote it. Kept in the file as well as flattened into
+    /// its name, because flattening is lossy: `src/a.rs` and `src-a.rs` name one file.
     pub about: String,
 }
 
@@ -101,9 +68,6 @@ fn at(project: &str, about: &str) -> PathBuf {
 }
 
 /// What is wrong with a name for a piece of work, if anything.
-///
-/// # Errors
-/// When it says nothing, or says more than a name can.
 pub fn named(about: &str) -> Result<(), String> {
     let said = about.trim();
     if said.is_empty() {
@@ -119,10 +83,7 @@ pub fn named(about: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Take a piece of work in `by`'s name.
-///
-/// # Errors
-/// When somebody else holds it and still answers, or when the file cannot be written at all.
+/// Take a piece of work in `by`'s name, or say who holds it.
 pub fn take(project: &str, by: &str, about: &str) -> Result<Claim, String> {
     named(about)?;
     let mine = Claim {
@@ -134,9 +95,7 @@ pub fn take(project: &str, by: &str, about: &str) -> Result<Claim, String> {
     if let Err(why) = std::fs::create_dir_all(held_in(project)) {
         return Err(format!("claims cannot be recorded here: {why}"));
     }
-    // Two passes and no more. The second exists for the one case worth retrying — the file was
-    // there, its holder was gone, and this call swept it — and a third would be a spin against
-    // somebody who keeps winning, which is not a failure a loop fixes.
+    // Two passes: the second is for the file that was there and whose holder had gone.
     for pass in 0..2 {
         match named_at(project, &mine, &path) {
             Ok(true) => return Ok(mine),
@@ -144,8 +103,8 @@ pub fn take(project: &str, by: &str, about: &str) -> Result<Claim, String> {
             Err(why) => return Err(format!("`{about}` could not be claimed: {why}")),
         }
         let Some(held) = read_at(&path) else {
-            // Half a file, or none by the time it was read. Neither is a claim, and leaving it
-            // would refuse this piece of work to everybody for as long as the project lives.
+            // Half a file, or none by now. Neither is a claim, and leaving it refuses this piece
+            // of work to everybody for as long as the project lives.
             let _ = std::fs::remove_file(&path);
             continue;
         };
@@ -161,10 +120,6 @@ pub fn take(project: &str, by: &str, about: &str) -> Result<Claim, String> {
                 held.ago()
             ));
         }
-        // Swept the way a stale socket is, at the point somebody needed the answer. The window
-        // between reading a dead holder and unlinking its file is a few microseconds wide, and
-        // what fits in it is another sweeper taking the same claim first — which the second pass
-        // then reports honestly, as a live holder.
         let _ = std::fs::remove_file(&path);
     }
     Err(format!(
@@ -174,18 +129,10 @@ pub fn take(project: &str, by: &str, about: &str) -> Result<Claim, String> {
 
 /// Put the whole record in place under one name, or say somebody else got there first.
 ///
-/// **Written first, named second.** `O_EXCL` on the final name is exclusive too, and it is what
-/// this did at first — but it makes the file *exist* before it has anything in it. The loser of
-/// the race then reads an empty file, decides it is what a crash left behind, unlinks the winner's
-/// claim and takes the work: two claimants, two holders, and only sometimes. `link` is the same
-/// one-syscall exclusion with the content already there, so the name appears complete or not at
-/// all. Found by running two claimants in two threads, which is the only way this shows.
-///
-/// The scratch file carries a leading dot for the same reason the directory does — [`all`] reads
-/// this directory, and a half-made claim is not one. A process that died between writing it and
-/// linking it leaves one behind holding the corpse's name, and the sweep that clears a corpse's
-/// claims clears that with them; one that died a syscall earlier leaves an empty file that names
-/// nobody, and [`abandoned`] is what clears that.
+/// Written first, named second: `O_EXCL` on the final name makes the file exist before it has
+/// anything in it, and the loser of the race then reads an empty file, takes it for what a crash
+/// left behind, and unlinks the winner's claim. The scratch file carries a leading dot so [`all`]
+/// does not read a half-made claim as a claim.
 fn named_at(project: &str, mine: &Claim, path: &Path) -> std::io::Result<bool> {
     let scratch = held_in(project).join(format!(
         "{MAKING_AT}{}-{}",
@@ -205,16 +152,11 @@ fn named_at(project: &str, mine: &Claim, path: &Path) -> std::io::Result<bool> {
 /// One counter per process, so two threads claiming at once do not share a scratch file.
 static MAKING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// What a half-made claim is called, before the name that counts.
-///
-/// The pid is in it, and that is what makes [`abandoned`] safe.
+/// What a half-made claim is called, before the name that counts. The pid in it is what makes
+/// [`abandoned`] safe.
 const MAKING_AT: &str = ".making-";
 
-/// Let a piece of work go, in `by`'s name.
-///
-/// # Errors
-/// When nothing holds it, or somebody else does. A session releasing another's claim would be a
-/// session deciding somebody else had stopped working, which is not a fact it has.
+/// Let a piece of work go, in `by`'s name. Refused unless `by` is the session holding it.
 pub fn let_go(project: &str, by: &str, about: &str) -> Result<Claim, String> {
     named(about)?;
     let path = at(project, about);
@@ -234,9 +176,6 @@ pub fn let_go(project: &str, by: &str, about: &str) -> Result<Claim, String> {
 }
 
 /// Everything held in `project`, with what a dead holder left swept on the way past.
-///
-/// Swept where the list is read, for the same reason [`super::listening`] sweeps there: the
-/// claims needing it are exactly the ones whose holder never got to run its own exit path.
 #[must_use]
 pub fn all(project: &str) -> Vec<Claim> {
     let Ok(entries) = std::fs::read_dir(held_in(project)) else {
@@ -244,8 +183,7 @@ pub fn all(project: &str) -> Vec<Claim> {
     };
     let mut out: Vec<Claim> = entries
         .flatten()
-        // A leading dot is a claim halfway through being made — see [`named_at`]. `safe` turns
-        // every dot into a dash, so no claim of anybody's ever starts with one.
+        // A leading dot is a claim halfway through being made — see `named_at`.
         .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
         .filter_map(|entry| {
             let path = entry.path();
@@ -262,9 +200,6 @@ pub fn all(project: &str) -> Vec<Claim> {
 }
 
 /// Drop everything `id` was holding, for a corpse being swept by somebody else.
-///
-/// Called beside the socket and the notes, because a claim is one more thing a session leaves
-/// behind and the sweep is one place rather than four.
 pub fn forget_in(project: &str, id: &str) {
     let Ok(entries) = std::fs::read_dir(held_in(project)) else {
         return;
@@ -277,18 +212,9 @@ pub fn forget_in(project: &str, id: &str) {
     }
 }
 
-/// Whether `path` is a half-made claim whose process is gone.
-///
-/// [`named_at`] writes the record and then names it, and a process killed between creating that
-/// scratch file and writing into it leaves an empty one. Nothing removed it: it parses as no
-/// claim, so it is held by no id and the sweep above passed over it — and `remove_dir` then
-/// refuses the claims directory for good, which keeps the project's own directory standing after
-/// every session in it has gone. One process killed in a one-syscall window, and that project
-/// never folds away again.
-///
-/// The pid in the name is what makes this safe to unlink. A claimant that is still between the
-/// two calls is a process that is still running, so its scratch is never taken out from under it;
-/// a pid that has come round again only means the file stays, which is where it was.
+/// Whether `path` is a half-made claim whose process is gone. An empty scratch file parses as no
+/// claim, so it is held by no id, the sweep above passes over it, and `remove_dir` then refuses
+/// the claims directory for good. The pid in the name is what makes this safe to unlink.
 fn abandoned(path: &Path) -> bool {
     let Some(pid) = path
         .file_name()
@@ -300,16 +226,12 @@ fn abandoned(path: &Path) -> bool {
     else {
         return false;
     };
-    // `ESRCH` and nothing else. A process that exists and may not be signalled answers `EPERM`,
-    // and reading every error as death would unlink the scratch of somebody still using it.
+    // `ESRCH` and nothing else: a process that exists but may not be signalled answers `EPERM`.
     rustix::process::test_kill_process(pid) == Err(rustix::io::Errno::SRCH)
 }
 
-/// Take the directory down if nothing is left in it.
-///
-/// `remove_dir` refuses a directory that still holds something, which is the whole test —
-/// no listing, and no race against somebody taking a claim as this one leaves. Without it the
-/// last session out cannot fold the project directory away, because this one is inside it.
+/// Take the directory down if nothing is left in it, so the last session out can fold the
+/// project's own directory away.
 pub fn leave(project: &str) {
     let _ = std::fs::remove_dir(held_in(project));
 }
@@ -319,17 +241,13 @@ fn read_at(path: &Path) -> Option<Claim> {
     Claim::read(&std::fs::read_to_string(path).ok()?)
 }
 
-/// The kernel decides who won, a dead holder holds nothing, and none of this is a session.
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::identity::Identity;
     use crate::scratch::Project;
 
-    /// A project of its own, so these do not read each other's directory.
-    ///
-    /// A guard rather than a name: the line that removed it came after the assertions, so a
-    /// failing test left it behind for good — see [`crate::scratch`].
+    /// A project of its own, removed by a guard so a failing test does not leave it behind.
     fn alone(name: &str) -> Project {
         Project::new("melchior-claim", name)
     }
@@ -350,17 +268,12 @@ mod tests {
 
     #[test]
     fn two_sessions_asking_at_once_produce_one_holder() {
-        // The whole mechanism, and the only part of it that is not this file's code: `O_EXCL` is
-        // one syscall, so there is no window between deciding and recording for a second caller
-        // to slip through. Both threads ask for the same work; the kernel picks.
+        // Both threads ask for the same work; the kernel picks.
         let project = alone("race");
         let _bound = (present(&project, "alpha-rho"), present(&project, "beta-nu"));
 
-        // Many rounds, and both threads let go of a barrier together, because the interleaving
-        // that matters is a handful of instructions wide. One round is a coin toss: the version
-        // of this that gave the file its name before it wrote the record into it passed its first
-        // run and failed its third, and what failed was the loser reading an empty file, calling
-        // it a corpse, and unlinking the winner's claim on its way in.
+        // Many rounds off one barrier, because the interleaving that matters is a handful of
+        // instructions wide.
         for round in 0..256 {
             let work = format!("the parser {round}");
             let together = std::sync::Barrier::new(2);
@@ -382,7 +295,6 @@ mod tests {
                 1,
                 "round {round}: both took it, or neither did: {held:?}"
             );
-            // And the loser was told who beat it, which is the only thing it can act on.
             let lost = held
                 .iter()
                 .find_map(|out| out.as_ref().err())
@@ -394,8 +306,6 @@ mod tests {
 
     #[test]
     fn a_live_holder_keeps_its_claim_and_a_dead_one_does_not() {
-        // The liveness test, which is the same one a socket gets. A process that died did not get
-        // to let go of its work, and a claim nobody can be asked about is work nobody does again.
         let project = alone("dead");
         let live = present(&project, "alpha-rho");
         let _heir = present(&project, "beta-nu");
@@ -418,9 +328,8 @@ mod tests {
 
     #[test]
     fn the_claims_directory_is_never_offered_as_an_agent() {
-        // The trap. `listening` keeps every entry with no dot in its name and then dials it: a
-        // directory called `claims` would be listed as an agent, shown to a model as one, and
-        // handed to `forget_id` when the dial failed. The dot is what keeps it out.
+        // `listening` keeps every entry with no dot in its name and then dials it, so a directory
+        // called `claims` would be listed as an agent and handed to `forget_id` on the failed dial.
         let project = alone("hidden");
         let _bound = present(&project, "alpha-rho");
         std::fs::write(
@@ -430,12 +339,8 @@ mod tests {
         .expect("the run");
         take(&project, "alpha-rho", "the parser").expect("taken");
 
-        // **Asserted on the name, because that is where breaking it shows.** `listening` keeps
-        // every entry with no dot in it and only *then* dials — and a directory fails that dial,
-        // so a claims directory called `claims` drops out of the roster anyway and the end-to-end
-        // assertions below stay green while the trap is wide open. What actually goes wrong is
-        // everything between: it is dial-tested on every sweep, and it is handed to the sweep
-        // that deletes an agent's socket and notes.
+        // Asserted on the name: a directory fails the dial anyway, so the end-to-end assertions
+        // below stay green while the trap is open.
         assert!(
             HELD.contains('.'),
             "`{HELD}` has no dot in it, so `listening` would keep it and hand it to the sweep"
@@ -475,9 +380,6 @@ mod tests {
 
     #[test]
     fn taking_the_same_work_twice_is_not_a_refusal() {
-        // A model that has forgotten it already asked must not be told a stranger holds its own
-        // work: the answer it can act on is "you have it", and the answer it cannot is "`you`
-        // claimed this".
         let project = alone("again");
         let _bound = present(&project, "alpha-rho");
         let first = take(&project, "alpha-rho", "the parser").expect("taken");
@@ -488,10 +390,8 @@ mod tests {
 
     #[test]
     fn the_last_session_out_can_still_fold_the_project_directory_away() {
-        // `leave` is `remove_dir`, which refuses a directory that still holds something — and an
-        // empty claims directory left inside is something. Without folding this one away first,
-        // a machine collects a project directory per run for good, which is how the runtime
-        // directory filled up the first time.
+        // `remove_dir` refuses a directory that still holds something, and an empty claims
+        // directory left inside is something.
         let project = alone("empty");
         let live = present(&project, "alpha-rho");
         take(&project, "alpha-rho", "the parser").expect("taken");
@@ -508,13 +408,10 @@ mod tests {
 
     #[test]
     fn a_half_made_claim_from_a_dead_process_does_not_keep_the_project_standing() {
-        // The one-syscall window in `named_at`: the scratch file exists and nothing has been
-        // written into it yet. It parses as no claim, so it is held by no id, so the sweep
-        // passed over it -- and `remove_dir` then refused this directory for good.
+        // The one-syscall window in `named_at`: the scratch file exists and nothing is in it yet.
         let project = alone("halfmade");
         std::fs::create_dir_all(held_in(&project)).expect("the claims directory");
-        // Above `pid_max`, which is at most 2^22, so this names no process now and cannot come to
-        // name one while the test runs -- which a real corpse's pid could.
+        // Above `pid_max`, which is at most 2^22, so this names no process while the test runs.
         let half = held_in(&project).join(format!("{MAKING_AT}{}-0", i32::MAX));
         std::fs::write(&half, "").expect("the scratch file");
 
@@ -528,8 +425,8 @@ mod tests {
 
     #[test]
     fn a_half_made_claim_from_a_live_process_is_left_where_it_is() {
-        // The other half. A claimant between the write and the link is a process that is still
-        // running, and unlinking its scratch turns a race it would have won into `ENOENT`.
+        // A claimant between the write and the link is still running, and unlinking its scratch
+        // turns a race it would have won into `ENOENT`.
         let project = alone("halfmaking");
         std::fs::create_dir_all(held_in(&project)).expect("the claims directory");
         let live = held_in(&project).join(format!("{MAKING_AT}{}-0", std::process::id()));
@@ -541,8 +438,7 @@ mod tests {
 
     #[test]
     fn a_claim_somebody_still_holds_keeps_the_directory_standing() {
-        // The other half, and the reason this is `remove_dir` rather than a listing: a run
-        // somebody is still working in must not have its record swept by whoever leaves first.
+        // A run somebody is still working in must not be swept by whoever leaves first.
         let project = alone("busy");
         let _live = present(&project, "alpha-rho");
         take(&project, "alpha-rho", "the parser").expect("taken");
@@ -552,8 +448,6 @@ mod tests {
 
     #[test]
     fn a_name_that_would_not_fit_in_a_filename_is_refused_by_name() {
-        // Uncapped this is `ENAMETOOLONG` reaching a model as "could not be written", which says
-        // nothing it can act on.
         assert!(named("").is_err());
         let long = "z".repeat(NAMED_AT_MOST + 1);
         let why = named(&long).expect_err("an uncapped name went through");
@@ -570,8 +464,7 @@ mod tests {
 
     #[test]
     fn a_claim_reads_back_as_what_was_written() {
-        // The name in the file, not the one in the path: `safe` is lossy, and a reader with only
-        // the filename would show a claim nobody made.
+        // The name in the file, not the one in the path: `safe` is lossy.
         let claim = Claim {
             by: "alpha-rho".to_owned(),
             at: 1_700_000_000_000,
