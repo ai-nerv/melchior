@@ -467,3 +467,133 @@ fn ask(at: &std::path::Path, body: &str) -> serde_json::Value {
     sock.read_exact(&mut answer).expect("read a body");
     serde_json::from_slice(&answer).expect("it is JSON")
 }
+
+/// A parent that starts one `melchior serve` and then does nothing at all.
+///
+/// A shell rather than this process: the parent has to be something the test can kill outright,
+/// and killing the test runner is not available. Its stdin is a pipe *this* process holds the
+/// other end of, handed down explicitly — a background job in a non-interactive shell is given
+/// `/dev/null` otherwise, and stdin staying open is the whole point of the exercise.
+struct Killable {
+    shell: Child,
+    /// The write end of the pipe `serve` is reading, kept open on purpose. While this is held,
+    /// end of file cannot be what stops it, so the kernel is the only explanation left.
+    held: Option<std::process::ChildStdin>,
+    served: u32,
+    runtime: std::path::PathBuf,
+}
+
+impl Killable {
+    fn start(name: &str) -> Self {
+        // Short, for the same reason `Serving::start` is: a unix socket path is capped at about
+        // a hundred bytes and a long prefix silently exhausts it.
+        let runtime =
+            std::path::PathBuf::from(format!("/tmp/melchior-k-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&runtime);
+        std::fs::create_dir_all(&runtime).expect("mkdir");
+        let pids = runtime.join("pid");
+        let script = format!(
+            "exec 3<&0; XDG_RUNTIME_DIR={runtime} {binary} serve --project killed <&3 \
+             >/dev/null 2>&1 & echo $! > {pids}; wait",
+            runtime = runtime.display(),
+            binary = env!("CARGO_BIN_EXE_melchior"),
+            pids = pids.display(),
+        );
+        let mut shell = Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start the caller");
+        // Taken out before anything waits on the shell: `Child::wait` drops its own stdin, and
+        // dropping this one would close the pipe and end `serve` for the ordinary reason.
+        let held = shell.stdin.take();
+        let served = read_pid(&pids).expect("the caller said which melchior it started");
+        Self {
+            shell,
+            held,
+            served,
+            runtime,
+        }
+    }
+
+    /// End the caller the way a crash would: with nothing running inside it.
+    fn killed(&mut self) {
+        let _ = self.shell.kill();
+        let _ = self.shell.wait();
+    }
+
+    /// Leave nothing running and nothing on disk, whatever the assertions are about to do.
+    fn cleared(mut self) {
+        let _ = self.shell.kill();
+        let _ = self.shell.wait();
+        drop(self.held.take());
+        let _ = Command::new("kill")
+            .arg("-9")
+            .arg(self.served.to_string())
+            // Already gone is the passing case, and its complaint reads like a failure.
+            .stderr(Stdio::null())
+            .status();
+        let _ = std::fs::remove_dir_all(&self.runtime);
+    }
+}
+
+/// The pid the shell wrote down, once it has written it.
+fn read_pid(at: &std::path::Path) -> Option<u32> {
+    for _ in 0..250 {
+        if let Ok(text) = std::fs::read_to_string(at)
+            && let Ok(pid) = text.trim().parse::<u32>()
+        {
+            return Some(pid);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    None
+}
+
+/// Whether a process exists and is not merely a corpse waiting to be reaped.
+///
+/// The state field rather than the directory's existence: every process here is started by a
+/// shell that is about to be killed, so a zombie is the expected shape of "gone".
+fn alive(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .is_ok_and(|stat| stat.split_whitespace().nth(2) != Some("Z"))
+}
+
+/// Wait for `pid` to go away, and say whether it did.
+fn gone_within(pid: u32, patience: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + patience;
+    while std::time::Instant::now() < deadline {
+        if !alive(pid) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    !alive(pid)
+}
+
+#[test]
+fn nothing_outlives_a_parent_that_was_killed_outright() {
+    // The case `nothing_outlives_the_parent` cannot reach. That one lets go of the pipe, which
+    // is a parent with a way out; this one is the panic, the `kill -9` and the OOM, where
+    // nothing in the parent runs at all and the pipe is never closed by anybody. The write end
+    // is still held here while the assertion runs, so end of file is not available as an
+    // explanation and `PR_SET_PDEATHSIG` is the only thing left that could have done it.
+    let mut caller = Killable::start("killed");
+    let served = caller.served;
+    assert!(
+        alive(served),
+        "it is up while the parent that started it is"
+    );
+
+    caller.killed();
+    let went = gone_within(served, std::time::Duration::from_secs(10));
+
+    caller.cleared();
+    assert!(
+        went,
+        "melchior serve must not outlive the process that started it"
+    );
+}
