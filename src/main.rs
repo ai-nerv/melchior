@@ -169,8 +169,14 @@ enum Heard {
     /// It also keeps the layout here. A harness listing the directory for itself would be a
     /// second place that knows where sockets live and what a `.parent` file is called.
     Around {
-        /// Every session listening, by id, this one included.
-        names: Vec<String>,
+        /// Every session listening, this one included.
+        ///
+        /// Records rather than names. A bare id completes a `$` and does nothing else: a harness
+        /// holding one cannot say what that agent is for without asking, and cannot find the
+        /// screen it draws on at all, because that socket is named after a key the harness keeps
+        /// to itself. Both facts are already in this directory, and reading them here is one
+        /// listing of a directory that was being listed anyway.
+        agents: Vec<Peer>,
     },
     /// Somebody with the right to stop this session did.
     Stopped,
@@ -200,6 +206,40 @@ enum Heard {
         /// What they handed over, exactly as they wrote it.
         handover: Option<String>,
     },
+}
+
+/// One session listening in this project, as a harness needs it.
+///
+/// Not a [`Whom`](melchior::policy::Whom): that answers who may stop whom, and this answers what
+/// is on the screen. The parent chain is deliberately absent — a harness drawing a peer has no
+/// use for it, and putting it here would make a completion popup a second reader of the policy.
+#[derive(serde::Serialize, Clone, PartialEq, Eq)]
+struct Peer {
+    /// Its id, which is what addresses it and what `$` completes to.
+    id: String,
+    /// What it says it is for, one word. `main` for an agent that never said.
+    role: String,
+    /// Where its harness draws it, or `null` for one that published no screen.
+    ///
+    /// Read off the note the harness left at announce time — see
+    /// [`directory::screens`](melchior::directory::screens). melchior neither opens this socket
+    /// nor checks it; a peer that dials a path nobody answers has learnt the same thing it
+    /// learns about a socket in this directory, and by the same call.
+    ui: Option<String>,
+}
+
+/// Everyone listening in `project`, as they go on the pipe.
+fn around(project: &str) -> Vec<Peer> {
+    melchior::directory::listening(project)
+        .into_iter()
+        .map(|id| Peer {
+            role: melchior::directory::roles::role_in(project, &id)
+                .map_or_else(|| melchior::directory::roles::MAIN.to_owned(), |it| it.name),
+            ui: melchior::directory::screens::ui_in(project, &id)
+                .map(|at| at.display().to_string()),
+            id,
+        })
+        .collect()
 }
 
 /// Bind this session's socket and answer for it until the parent goes away.
@@ -257,6 +297,13 @@ fn fork(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<(
 /// `--role-description` when the person starting it knows what it is for. The role outranks
 /// `MAGI_MELCHIOR_ROLE` and the config, and it is taken whole — the two flags are one source,
 /// so naming a role on the command line never picks up a description from anywhere else.
+///
+/// `--ui <path>` is where the harness draws this session, written to a note beside the socket so
+/// a peer can find the screen — see [`directory::screens`](melchior::directory::screens). Only
+/// the harness knows it: magi names its host socket after a key it keeps to itself, so without
+/// this flag a sibling can find every live magi in the project and tell which is which for none
+/// of them. Left off, this session offers no screen, which is what `melchior serve` run by hand
+/// honestly is.
 fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
     // Named here when the caller only says which project it is in, and that is the useful way
     // round: a harness choosing its own name is choosing out of a namespace it cannot see, and
@@ -306,6 +353,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         role: role.name.clone(),
         ..me
     };
+    let ui = asked.get("ui").map(std::path::PathBuf::from);
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -334,7 +382,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         // The note beside the socket, so the tree can be read off the directory: a session that
         // finds this one there can tell whose subagent it is without asking it, and without
         // trusting what it would have said.
-        melchior::directory::announce(&me, &role);
+        melchior::directory::announce(&me, &role, ui.as_deref());
         let at = melchior::directory::listening_at(&me);
 
         // Bound *here*, and only then announced. Spawning the accept loop and saying "listening"
@@ -375,7 +423,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         // process has no reason to be told about. Two seconds is well under how long it takes
         // somebody to notice a name is missing from a completion popup, and the check is a
         // directory listing.
-        let mut around: Vec<String> = Vec::new();
+        let mut listed: Vec<Peer> = Vec::new();
         let mut sweep = tokio::time::interval(std::time::Duration::from_secs(2));
         sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -513,12 +561,15 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                     if mine != about_tx.borrow().parent {
                         about_tx.send_modify(|about| about.parent.clone_from(&mine));
                     }
-                    let now = melchior::directory::listening(&me.project);
+                    // Compared whole, so a peer that changed its role or published a screen is a
+                    // change too. Against the ids alone, an agent that came up as a `main` and
+                    // then took a role kept the name it had on every other screen in the project.
+                    let now = around(&me.project);
                     // Only on a change. A line every two seconds for the life of a session is a
                     // pipe nobody can read a log out of, and a parent that has to diff it.
-                    if now != around {
-                        around = now;
-                        say(&Heard::Around { names: around.clone() });
+                    if now != listed {
+                        listed = now;
+                        say(&Heard::Around { agents: listed.clone() });
                     }
                 }
                 // Both remaining arms can close on their own — the serving task dropping its
@@ -693,3 +744,10 @@ mod flag_tests {
         );
     }
 }
+
+/// The pipe is a wire between two repositories, so its spellings are pinned here.
+///
+/// Split from this file under THE RULE, which caps a file at 800 lines.
+#[cfg(test)]
+#[path = "main/pipe.rs"]
+mod pipe;

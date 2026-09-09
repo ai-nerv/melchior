@@ -162,7 +162,7 @@ mod tests {
         // Through `announce`, because that is the wiring worth testing: the note is written
         // where the socket is announced, and a session that bound without writing it would be
         // on nobody's roster including its own.
-        super::super::announce(&root, &crate::directory::roles::Role::default());
+        super::super::announce(&root, &crate::directory::roles::Role::default(), None);
         let run = session_of(&root).expect("the note");
         assert!(run.starts_with("alpha-rho-"), "{run}");
         assert_eq!(session_in(&project, "alpha-rho"), Some(run));

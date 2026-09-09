@@ -45,6 +45,7 @@
 
 pub mod claims;
 pub mod roles;
+pub mod screens;
 pub mod sending;
 pub mod sessions;
 
@@ -332,9 +333,14 @@ fn safe(name: &str) -> String {
 /// The role is handed in rather than taken off `me`. An [`Identity`] carries only the name, and
 /// the description is half the record: resolving it is the caller's, because the sources are a
 /// flag, an environment variable and a config file, and this module knows about none of them.
-pub fn announce(me: &Identity, role: &roles::Role) {
+///
+/// `ui` is where the harness draws this agent, which melchior cannot work out for itself and
+/// which nothing else in this directory can be asked for — see [`screens`]. `None` for a
+/// session with no screen to offer, and that is what a bare `melchior serve` is.
+pub fn announce(me: &Identity, role: &roles::Role, ui: Option<&Path>) {
     sessions::began(me);
     roles::began(me, role);
+    screens::began(me, ui);
     let Some(parent) = parent() else { return };
     let path = kin_at(me);
     if let Some(dir) = path.parent() {
@@ -348,6 +354,7 @@ pub fn forget(me: &Identity) {
     let _ = std::fs::remove_file(kin_at(me));
     sessions::ended(me);
     roles::ended(me);
+    screens::ended(me);
     sending::ended(me);
     claims::forget_in(&me.project, &me.id);
 }
@@ -517,6 +524,7 @@ fn forget_id(project: &str, id: &str) {
     let _ = std::fs::remove_file(home(project).join(format!("{}.parent", safe(id))));
     sessions::forget_in(project, id);
     roles::forget_in(project, id);
+    screens::forget_in(project, id);
     sending::forget_in(project, id);
     // And what it had taken. A process that died did not get to let go of its work, and a claim
     // nobody can be asked about is a piece of work nobody will ever do again.
