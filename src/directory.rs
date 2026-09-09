@@ -170,15 +170,21 @@ impl Address {
         out
     }
 
-    /// The full name, with the gaps filled in from whoever is asking.
+    /// The full name, with the gaps filled in: the project from whoever is asking, the role from
+    /// the target's own note. An unqualified name borrowing the asker's role reported every
+    /// message as landing in an inbox belonging to somebody with a role the target does not have.
     #[must_use]
     pub fn against(&self, asker: &Identity) -> Identity {
+        let project = self
+            .project
+            .clone()
+            .unwrap_or_else(|| asker.project.clone());
+        let role = self.role.clone().unwrap_or_else(|| {
+            roles::role_in(&project, &self.id).map_or_else(|| roles::MAIN.to_owned(), |it| it.name)
+        });
         Identity {
-            project: self
-                .project
-                .clone()
-                .unwrap_or_else(|| asker.project.clone()),
-            role: self.role.clone().unwrap_or_else(|| asker.role.clone()),
+            project,
+            role,
             id: self.id.clone(),
         }
     }
@@ -443,6 +449,55 @@ mod tests {
         assert_eq!(address.role.as_deref(), Some("review"));
         assert_eq!(address.project, None, "which fills in from the asker");
         assert_eq!(address.against(&asker()).full(), "magi/review/iota-mu");
+    }
+
+    #[test]
+    fn an_unqualified_name_wears_the_target_s_role_and_never_the_asker_s() {
+        let project = crate::scratch::Project::new("melchior-address", "role");
+        roles::given(&project, "iota-mu", &roles::Role::new("reviewer", None)).expect("the note");
+        let asker = Identity {
+            project: project.to_string(),
+            role: "coordinator".to_owned(),
+            id: "alpha-rho".to_owned(),
+        };
+        let whole = Address::read("$iota-mu")
+            .expect("an address")
+            .against(&asker);
+        assert_eq!(whole.role, "reviewer", "it reported the asker's own role");
+        assert_eq!(whole.full(), format!("{project}/reviewer/iota-mu"));
+    }
+
+    #[test]
+    fn a_target_nobody_has_described_is_a_main_rather_than_whatever_the_asker_is() {
+        let project = crate::scratch::Project::new("melchior-address", "unknown");
+        let asker = Identity {
+            project: project.to_string(),
+            role: "coordinator".to_owned(),
+            id: "alpha-rho".to_owned(),
+        };
+        let whole = Address::read("$nobody-nowhere")
+            .expect("an address")
+            .against(&asker);
+        assert_eq!(
+            whole.role,
+            roles::MAIN,
+            "an unknown target borrowed the asker's role"
+        );
+    }
+
+    #[test]
+    fn a_role_written_into_the_name_still_wins_over_the_note() {
+        let project = crate::scratch::Project::new("melchior-address", "written");
+        roles::given(&project, "iota-mu", &roles::Role::new("reviewer", None)).expect("the note");
+        let asker = Identity {
+            project: project.to_string(),
+            role: "main".to_owned(),
+            id: "alpha-rho".to_owned(),
+        };
+        let whole = Address::read("$scratch/iota-mu")
+            .expect("an address")
+            .against(&asker);
+        assert_eq!(whole.role, "scratch");
     }
 
     #[test]
