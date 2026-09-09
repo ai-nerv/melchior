@@ -183,11 +183,12 @@ pub fn take(project: &str, by: &str, about: &str) -> Result<Claim, String> {
 ///
 /// The scratch file carries a leading dot for the same reason the directory does — [`all`] reads
 /// this directory, and a half-made claim is not one. A process that died between writing it and
-/// linking it leaves one behind, and the sweep that clears a corpse's claims clears that too,
-/// because it is a record with the corpse's name in it.
+/// linking it leaves one behind holding the corpse's name, and the sweep that clears a corpse's
+/// claims clears that with them; one that died a syscall earlier leaves an empty file that names
+/// nobody, and [`abandoned`] is what clears that.
 fn named_at(project: &str, mine: &Claim, path: &Path) -> std::io::Result<bool> {
     let scratch = held_in(project).join(format!(
-        ".making-{}-{}",
+        "{MAKING_AT}{}-{}",
         std::process::id(),
         MAKING.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
@@ -203,6 +204,11 @@ fn named_at(project: &str, mine: &Claim, path: &Path) -> std::io::Result<bool> {
 
 /// One counter per process, so two threads claiming at once do not share a scratch file.
 static MAKING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// What a half-made claim is called, before the name that counts.
+///
+/// The pid is in it, and that is what makes [`abandoned`] safe.
+const MAKING_AT: &str = ".making-";
 
 /// Let a piece of work go, in `by`'s name.
 ///
@@ -265,10 +271,38 @@ pub fn forget_in(project: &str, id: &str) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if read_at(&path).is_some_and(|held| held.by == id) {
+        if read_at(&path).is_some_and(|held| held.by == id) || abandoned(&path) {
             let _ = std::fs::remove_file(path);
         }
     }
+}
+
+/// Whether `path` is a half-made claim whose process is gone.
+///
+/// [`named_at`] writes the record and then names it, and a process killed between creating that
+/// scratch file and writing into it leaves an empty one. Nothing removed it: it parses as no
+/// claim, so it is held by no id and the sweep above passed over it — and `remove_dir` then
+/// refuses the claims directory for good, which keeps the project's own directory standing after
+/// every session in it has gone. One process killed in a one-syscall window, and that project
+/// never folds away again.
+///
+/// The pid in the name is what makes this safe to unlink. A claimant that is still between the
+/// two calls is a process that is still running, so its scratch is never taken out from under it;
+/// a pid that has come round again only means the file stays, which is where it was.
+fn abandoned(path: &Path) -> bool {
+    let Some(pid) = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(MAKING_AT))
+        .and_then(|rest| rest.split('-').next())
+        .and_then(|pid| pid.parse::<i32>().ok())
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return false;
+    };
+    // `ESRCH` and nothing else. A process that exists and may not be signalled answers `EPERM`,
+    // and reading every error as death would unlink the scratch of somebody still using it.
+    rustix::process::test_kill_process(pid) == Err(rustix::io::Errno::SRCH)
 }
 
 /// Take the directory down if nothing is left in it.
@@ -470,6 +504,39 @@ mod tests {
             !home(&project).exists(),
             "the project directory outlived every session in it"
         );
+    }
+
+    #[test]
+    fn a_half_made_claim_from_a_dead_process_does_not_keep_the_project_standing() {
+        // The one-syscall window in `named_at`: the scratch file exists and nothing has been
+        // written into it yet. It parses as no claim, so it is held by no id, so the sweep
+        // passed over it -- and `remove_dir` then refused this directory for good.
+        let project = alone("halfmade");
+        std::fs::create_dir_all(held_in(&project)).expect("the claims directory");
+        // Above `pid_max`, which is at most 2^22, so this names no process now and cannot come to
+        // name one while the test runs -- which a real corpse's pid could.
+        let half = held_in(&project).join(format!("{MAKING_AT}{}-0", i32::MAX));
+        std::fs::write(&half, "").expect("the scratch file");
+
+        super::super::forget(&id(&project, "alpha-rho"));
+        super::super::leave(&project);
+        assert!(
+            !home(&project).exists(),
+            "an empty scratch file outlived the process that made it and kept the project"
+        );
+    }
+
+    #[test]
+    fn a_half_made_claim_from_a_live_process_is_left_where_it_is() {
+        // The other half. A claimant between the write and the link is a process that is still
+        // running, and unlinking its scratch turns a race it would have won into `ENOENT`.
+        let project = alone("halfmaking");
+        std::fs::create_dir_all(held_in(&project)).expect("the claims directory");
+        let live = held_in(&project).join(format!("{MAKING_AT}{}-0", std::process::id()));
+        std::fs::write(&live, "").expect("the scratch file");
+
+        super::super::forget(&id(&project, "alpha-rho"));
+        assert!(live.exists(), "a live claimant's scratch file was swept");
     }
 
     #[test]
