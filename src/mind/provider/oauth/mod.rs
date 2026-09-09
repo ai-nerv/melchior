@@ -124,10 +124,7 @@ pub enum Error {
 
     /// The store is not valid JSON; reported rather than repaired.
     #[error("{path} is not readable as credentials ({detail}); move it aside to start again")]
-    Corrupt {
-        path: PathBuf,
-        detail: String,
-    },
+    Corrupt { path: PathBuf, detail: String },
 
     #[error("credentials: {0}")]
     Encode(#[from] serde_json::Error),

@@ -15,23 +15,14 @@ pub mod stream;
 #[derive(Debug, thiserror::Error)]
 pub enum LuaError {
     #[error("{file}: {message}")]
-    Syntax {
-        file: String,
-        message: String,
-    },
+    Syntax { file: String, message: String },
 
     #[error("{file}: {message}")]
-    Runtime {
-        file: String,
-        message: String,
-    },
+    Runtime { file: String, message: String },
 
     /// A declaration was the wrong shape.
     #[error("{what}: {message}")]
-    Shape {
-        what: String,
-        message: String,
-    },
+    Shape { what: String, message: String },
 
     #[error("reading {file}: {source}")]
     Io {

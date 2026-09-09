@@ -291,8 +291,7 @@ mod shape {
 
     #[test]
     fn context_windows_are_plausible() {
-        // A window of zero cannot be over, so it never compacts; one of a hundred million
-        // compacts never. Both fail silently, which is why this is asserted rather than trusted.
+        // A window of zero or of a hundred million never compacts, and fails silently.
         for provider in &shipped().providers {
             for model in &provider.models {
                 assert!(
@@ -459,8 +458,7 @@ mod discovery_tests {
 
     #[test]
     fn a_plugin_that_raises_does_not_stop_the_others() {
-        // Somebody else's package. Refusing to start over it would make installing one a risk
-        // rather than a try — where the two shipped files are fatal, because they are melchior's.
+        // Somebody else's package: a raise costs itself, where the shipped files are fatal.
         let dir = Scratch::new("melchior-disc", "broken");
         std::fs::create_dir_all(dir.join("plugin")).expect("mkdir");
         std::fs::write(dir.join("plugin/a-broken.lua"), "error(\"no\")").expect("write");
