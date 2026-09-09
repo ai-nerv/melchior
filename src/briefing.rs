@@ -1,18 +1,9 @@
 //! Telling the model an instance was named.
 //!
-//! `$iota-mu` in a prompt does not send anything. It appends a note saying that instance exists,
-//! how it stands to this session, what has already passed between them, and that there is a tool
-//! for reaching it — and then the model decides what "tell it to stop" meant and calls the tool,
-//! or does not.
-//!
-//! That order matters and it is the whole design. A harness that delivered the message itself
-//! would be deciding what the sentence meant: whether "ask $iota-mu about the parser" is a
-//! question to relay, a plan to make first, or a thing to do after reading a file. Naming an
-//! instance is a *fact given to the model*, exactly like naming a file is.
-//!
-//! What is appended is bounded and it is not a system prompt. It is the smallest thing that
-//! turns a name into something callable: who they are, how they stand to you, whether they can
-//! be reached at all, what has already been said, and the name of the tool.
+//! `$iota-mu` in a prompt sends nothing. It appends a bounded note — who they are, how they stand
+//! to this session, what has already passed between them, and the name of the tool for reaching
+//! them — and the model decides what to do with it. Empty when a prompt named nobody, so there is
+//! never anything to strip back out.
 
 use crate::directory::{Address, TOOL};
 use crate::policy::Reach;
@@ -20,22 +11,11 @@ use crate::policy::{self, Relation};
 use crate::verbs::Standing;
 
 /// How many earlier messages with an instance are worth repeating.
-///
-/// Enough to make a reply make sense and not so many that naming a long-running sibling costs
-/// the turn its context. The whole exchange is in the journal; this is the part that reads as
-/// conversation.
 const RECALLED: usize = 6;
 
-/// What the model needs in order to act on the instances a prompt names.
-///
-/// `named` is what the harness found in the prompt, because finding it is the harness's job:
-/// scanning for `$iota-mu` means knowing what a prompt is, where the cursor sits and which
-/// sigils mean what, and none of that is this crate's business. It is handed the names and
-/// answers about them.
-///
-/// Empty when it is given none, which is almost every prompt — and empty is what makes this an
-/// aside rather than an edit: nothing is added to the prompt, so there is nothing to strip back
-/// out and no way for the two to disagree about where one ends.
+/// What the model needs in order to act on the instances a prompt names. `named` is what the
+/// harness found in the prompt: scanning one means knowing about cursors and sigil tables, so
+/// this is handed the names rather than the prompt.
 #[must_use]
 pub fn about(named: &[String], standing: &Standing) -> String {
     if named.is_empty() {
@@ -64,9 +44,8 @@ pub fn about(named: &[String], standing: &Standing) -> String {
 fn brief(address: &Address, app: &Standing) -> String {
     let whole = address.against(&app.identity());
     let me = app.whom();
-    // Through the same [`Standing`](crate::verbs::Standing) the tool will use, so the briefing
-    // and the refusal can never disagree about where somebody sits. A model told it may stop a
-    // session and then refused when it tries has been lied to by the harness.
+    // Through the same `Standing` the tool will use, so the briefing and the refusal cannot
+    // disagree about where somebody sits.
     let relation = app.stands(&whole);
     let mut said = format!(
         "`{}` is another magi, addressed as `{}`. It is {}.",
@@ -74,8 +53,7 @@ fn brief(address: &Address, app: &Standing) -> String {
         address.written(),
         relation.named()
     );
-    // Said before anything else about it, because a model that reads the history and then meets
-    // a refusal has spent the turn planning something it was never going to be allowed to do.
+    // Said before anything else about it, so a model does not plan a turn against a refusal.
     if !policy::may(&me, relation, Reach::Ask) {
         said.push_str(" This session cannot reach it: ");
         said.push_str(&policy::refusal(&me, relation, Reach::Ask));
@@ -103,17 +81,12 @@ fn brief(address: &Address, app: &Standing) -> String {
     said
 }
 
-/// Naming an instance adds a fact, and nothing else moves.
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::wire::Message;
 
-    /// What the harness would have found in a prompt.
-    ///
-    /// Scanning is not this crate's job -- a prompt, a cursor and a sigil table are all the
-    /// harness's -- so the real one is `magi_tui::trigger`. This is the same answer, badly, for
-    /// tests that want to say what they mean.
+    /// What the harness would have found in a prompt. The real one is `magi_tui::trigger`.
     fn named(text: &str) -> Vec<String> {
         text.split_whitespace()
             .filter_map(|word| word.strip_prefix('$'))
@@ -130,9 +103,6 @@ mod tests {
 
     #[test]
     fn a_prompt_that_names_nobody_produces_nothing_at_all() {
-        // Almost every prompt. Anything here is context somebody pays for, and an empty aside
-        // is what keeps a prompt that named nobody indistinguishable from one typed before any
-        // of this existed.
         let app = app();
         for text in ["fix the parser", "look at @src/main.rs", "it cost me 20$"] {
             assert!(
@@ -144,8 +114,7 @@ mod tests {
 
     #[test]
     fn naming_one_says_what_is_known_about_it_and_nothing_of_the_prompt() {
-        // The prompt is the model's to answer, and the person's to read. This goes beside it:
-        // spliced onto the end, it put a page of facts into the transcript under their name.
+        // Beside the prompt rather than spliced onto it.
         let said = about(&named("tell $beta-nu to stop"), &app());
         assert!(!said.contains("tell $beta-nu to stop"), "{said}");
         assert!(said.contains("magi/main/beta-nu"), "{said}");
@@ -153,15 +122,12 @@ mod tests {
 
     #[test]
     fn it_names_the_tool_rather_than_doing_anything() {
-        // The point of the whole file. The model decides what "tell it to stop" meant.
         let said = about(&named("tell $beta-nu to stop"), &app());
         assert!(said.contains(crate::directory::TOOL), "{said}");
     }
 
     #[test]
     fn it_says_how_the_named_one_stands_to_this_session() {
-        // Otherwise the model tries, is refused, and spends a turn finding out something the
-        // harness knew before it asked.
         let said = about(&named("ask $beta-nu"), &app());
         assert!(said.contains("another instance's main"), "{said}");
         assert!(said.contains("not stopped"), "{said}");
@@ -169,8 +135,6 @@ mod tests {
 
     #[test]
     fn one_it_cannot_reach_says_so_instead_of_its_history() {
-        // A model that reads the history and then meets a refusal has spent the turn planning
-        // something it was never going to be allowed to do.
         let mut app = app();
         app.me = "somewhere-with-no-runtime-dir/main/alpha-rho".to_owned();
         app.parent = Some("beta-nu".to_owned());
@@ -180,8 +144,6 @@ mod tests {
 
     #[test]
     fn what_has_already_been_said_comes_back_oldest_first() {
-        // A reply reads in the order it happened. Reversed, the model answers the first message
-        // as though it were the last.
         let mut app = app();
         for text in ["first", "second", "third"] {
             app.inbox.push(Message::new("magi/main/beta-nu", text));
@@ -206,7 +168,6 @@ mod tests {
 
     #[test]
     fn a_long_exchange_is_cut_rather_than_pasted_whole() {
-        // Naming a long-running sibling must not cost the turn its context.
         let mut app = app();
         for at in 0..50 {
             app.inbox

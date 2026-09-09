@@ -1,12 +1,4 @@
 //! Naming a child, and the secret that makes `stop` refusable.
-//!
-//! Split from [`super`] under THE RULE. These are the half of the subagent lattice that was
-//! never produced: `parent()` and `token()` read `MAGI_MELCHIOR_PARENT` and
-//! `MAGI_MELCHIOR_TOKEN`, `announce` writes the note that makes the tree readable off the
-//! directory, `children` reads it back and `stop` refuses anything a session did not start —
-//! every piece correct, and every piece inert, because nothing anywhere minted a secret or
-//! handed a name down. A harness that spawned a child got a *main*: no parent, outside every
-//! wall the policy draws, and unstoppable by the thing that started it.
 
 use super::tests::{alone, listening, named};
 use std::time::Duration;
@@ -32,14 +24,6 @@ fn asked_as(at: &std::path::Path, verb: &str, from: &str) -> serde_json::Value {
 }
 
 /// A session names a child and mints its secret, and remembers having done so.
-///
-/// **The half of the subagent lattice that was never produced.** `parent()` and `token()`
-/// read `MAGI_MELCHIOR_PARENT` and `MAGI_MELCHIOR_TOKEN`, `announce` writes the note that
-/// makes the tree readable off the directory, `children` reads it back and `stop` refuses
-/// anything a session did not start — every piece correct, and every piece inert, because
-/// nothing anywhere minted a secret or handed a name down. A harness that spawned a child
-/// got a *main*: no parent, outside every wall the policy draws, and unstoppable by the
-/// thing that started it.
 #[tokio::test]
 async fn a_session_names_a_child_and_keeps_the_secret_it_minted() {
     let it = alone("minting");
@@ -61,8 +45,8 @@ async fn a_session_names_a_child_and_keeps_the_secret_it_minted() {
     assert_eq!(child["parent"], me.id, "and it knows whose it is");
     assert_eq!(token.len(), 32, "sixteen bytes as hex: {token}");
 
-    // The environment a harness starts it with, named here so the harness does not have to
-    // know which variables melchior reads.
+    // The environment a harness starts it with, so it need not know which variables melchior
+    // reads.
     let env = &child["environment"];
     assert_eq!(env[crate::inherited::PARENT], me.id);
     assert_eq!(env[crate::inherited::TOKEN], token);
@@ -73,9 +57,8 @@ async fn a_session_names_a_child_and_keeps_the_secret_it_minted() {
         "a root hands down its own id as the run: {env}"
     );
 
-    // Kept, which is what makes `stop` refusable rather than a guess. Read back over the
-    // socket because that is where it lives: never on the directory, where a sibling would
-    // have authority over a session it did not start.
+    // Read back over the socket, never off the directory: a secret a sibling could read there
+    // would be authority over a session it did not start.
     let held = tokio::task::spawn_blocking(move || asked_as(&at, "minted", &full))
         .await
         .expect("the thread finished");
@@ -83,11 +66,6 @@ async fn a_session_names_a_child_and_keeps_the_secret_it_minted() {
 }
 
 /// A run is handed down, not started afresh at every hop.
-///
-/// The failure without it: a coordinator that spawns a coordinator gives its grandchildren a
-/// run named after their own parent, and one job comes out as a tree of runs that share no
-/// roster and no memory directory. The child inherits what the *note beside this socket* says,
-/// which is what everybody else reads too.
 #[tokio::test]
 async fn a_child_inherits_the_run_rather_than_starting_one() {
     let it = alone("minting-run");
@@ -117,8 +95,8 @@ async fn what_was_minted_is_refused_to_anybody_who_could_not_stop_this() {
     let _bound = listening(&me).await;
     let at = crate::directory::listening_at(&me);
 
-    // A main in the same project: it may ask this session things and tell it things, and it
-    // may not end it — so it may not hold what would let it.
+    // A main in the same project: it may ask this session things and tell it things, and it may
+    // not end it.
     let stranger = named(&it, "gamma-pi").full();
     let reply = tokio::task::spawn_blocking(move || asked_as(&at, "minted", &stranger))
         .await

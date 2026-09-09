@@ -1,16 +1,8 @@
 //! What a caller says it is for buys it nothing.
 //!
-//! Split from [`super`] under THE RULE, which caps a file at 800 lines.
-//!
 //! [`super::placed`] reads a caller's whole name off the frame and throws the middle of it away.
-//! That is the one place a role could have got into [`crate::policy`] over a socket: the name is
-//! the caller's to write, every process of this user can open the socket, and a role in a
-//! [`Whom`](crate::policy::Whom) would be a permission a caller granted itself.
-//!
-//! **These need a directory with a real `.parent` note in it.** Written against the ambient one
-//! first, every caller came back with no parent whatever it signed as — so the assertions held
-//! against a `placed` that believed the frame outright. A test that passes against the bug is
-//! worse than no test.
+//! The name is the caller's to write and every process of this user can open the socket, so a
+//! role in a [`Whom`](crate::policy::Whom) would be a permission a caller granted itself.
 
 use super::placed;
 use crate::answering::About;
@@ -19,13 +11,8 @@ use crate::identity::Identity;
 use crate::policy::{self, Relation, Whom};
 use crate::scratch::Project;
 
-/// A project of its own, holding one agent that is somebody's child.
-///
-/// `beta-nu` is `gamma-xi`'s subagent, and the directory is the only place that says so — which
-/// is the whole point: the caller signs its own name, and the note is what answers back.
-///
-/// A guard rather than a name: removing the directory on the last line of each test left it
-/// behind whenever one of them failed — see [`crate::scratch`].
+/// A project of its own, holding one agent that is somebody's child. `beta-nu` is `gamma-xi`'s
+/// subagent, and the directory is the only place that says so.
 fn alone(name: &str) -> Project {
     let project = Project::new("melchior-placed", name);
     std::fs::write(
@@ -67,9 +54,7 @@ fn mine(project: &str) -> Whom {
 
 #[test]
 fn the_role_a_caller_signs_with_is_dropped_before_anything_is_decided() {
-    // Five names for one agent, differing only in the middle. The directory says `beta-nu` is
-    // `gamma-xi`'s subagent; if any signature placed it anywhere else, a caller would be
-    // choosing where it stands by choosing what to call itself.
+    // Five names for one agent, differing only in the middle.
     let project = alone("dropped");
     let expected = Some("gamma-xi".to_owned());
     for signed in [
@@ -89,10 +74,8 @@ fn the_role_a_caller_signs_with_is_dropped_before_anything_is_decided() {
 
 #[test]
 fn calling_yourself_main_does_not_make_you_one() {
-    // The sentence the invariant is written in: a session that could pick its own role could
-    // pick `main` and claim a main's reach. `Root` is what a main gets at every setting and
-    // `Cousin` is what another instance's subagent gets at none, so this is the concrete thing
-    // a believed role would have bought.
+    // `Root` is what a main gets at every setting and `Cousin` what another's subagent gets at
+    // none, so this is the concrete thing a believed role would have bought.
     let project = alone("main");
     let claiming =
         placed(Some(&format!("{project}/main/beta-nu")), &about(&project)).expect("a caller");

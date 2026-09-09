@@ -1,23 +1,6 @@
-//! Reaching another instance.
-//!
-//! The other half of [`crate::serving`], and deliberately blocking. The caller is a tool peer
-//! whose whole existence is one round trip — it has no UI to keep responsive and no turn to
-//! yield to — and a blocking socket there is a dozen lines where an async one would be a
-//! runtime, a spawn and a channel to carry the answer back out of it.
-//!
-//! # One connection, several calls
-//!
-//! [`Held`] stays open until it is dropped. Closing after each call is the tempting
-//! simplification and it is the one the family's own guidance warns about: a client that holds a
-//! connection is the obvious way to write one, and it dies on its *second* call with a broken
-//! pipe. `list`, `status` on each of them, then `send` to one is four calls and one connection.
-//!
-//! # Every call says who is making it
-//!
-//! Not as courtesy — [`crate::answering`] refuses anything but `verbs` without it, because
-//! every other verb is about that session and a stranger has no standing to ask. The name is
-//! taken at face value; what it buys is a *relation*, which is read off the directory at the
-//! far end and is not the caller's to claim.
+//! Reaching another instance: the other half of [`crate::serving`], and deliberately blocking.
+//! [`Held`] stays open across calls — a client that closes after each one dies on its second with
+//! a broken pipe. Every call names its caller, or the far end answers `verbs` and nothing else.
 
 use crate::framing;
 use crate::identity::Identity;
@@ -27,12 +10,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
-/// How long to wait for a connection, and then for each answer.
-///
-/// A session mid-turn answers its socket from another task, so this is not "how long a turn
-/// takes" — it is how long a *healthy* peer can take to notice a frame. Long enough to survive
-/// a loaded machine, short enough that a wedged instance does not hold a tool call open until
-/// the model gives up on it.
+/// How long to wait for a connection, and then for each answer from a healthy peer.
 const PATIENCE: Duration = Duration::from_secs(10);
 
 /// An open connection to one instance.
@@ -46,8 +24,8 @@ impl Held {
     /// Open a connection to whatever is listening at `path`.
     pub fn at(path: &Path, me: &Identity) -> std::io::Result<Self> {
         let stream = UnixStream::connect(path)?;
-        // Both directions: a peer that accepted and then never answered would otherwise hold
-        // this open for as long as it felt like, and the tool call with it.
+        // Both directions: a peer that accepted and never answered would hold this open, and the
+        // tool call with it.
         stream.set_read_timeout(Some(PATIENCE))?;
         stream.set_write_timeout(Some(PATIENCE))?;
         Ok(Self {
@@ -56,11 +34,7 @@ impl Held {
         })
     }
 
-    /// Make one call and read its answer.
-    ///
-    /// A refusal comes back as a [`Reply`] with `ok: false`, not as an error: that is the
-    /// family's shape, and it is the difference between "no such call: nope", which says what
-    /// to fix, and "connection reset", which does not.
+    /// Make one call and read its answer. A refusal comes back as a [`Reply`] with `ok: false`.
     pub fn call(&mut self, verb: &str, args: Vec<serde_json::Value>) -> std::io::Result<Reply> {
         self.ask(Call {
             call: verb.to_owned(),
@@ -70,11 +44,8 @@ impl Held {
         })
     }
 
-    /// The same, carrying the secret the far end was started with.
-    ///
-    /// Only `stop` needs one. Kept separate rather than an `Option` on every call so a verb
-    /// cannot pick up a secret by accident, and so the one place a secret is sent is one line
-    /// that can be read.
+    /// The same, carrying the secret the far end was started with. Only `stop` needs one; kept
+    /// separate so a verb cannot pick one up by accident.
     pub fn call_with(
         &mut self,
         verb: &str,
@@ -117,18 +88,14 @@ impl Read for Reading<'_> {
     }
 }
 
-/// Whether anything is actually listening as `them`.
-///
-/// A socket file outlives the process that made it, so the directory says who *was* here. This
-/// is the cheapest question that distinguishes a running session from a crash's leftovers, and
-/// it is worth asking before a message is reported as delivered.
+/// Whether anything is actually listening as `them`. A socket file outlives the process that made
+/// it, so the directory only says who *was* here.
 #[must_use]
 pub fn answers(where_it_is: &Path, me: &Identity) -> bool {
     match Held::at(where_it_is, me) {
         Ok(_) => true,
         Err(why) => {
-            // The only place the reason survives. The caller wants a yes or a no, and "the
-            // socket is stale" and "the peer accepted and then hung up" are the same no.
+            // The only place the reason survives: the caller wants a yes or a no.
             crate::noted!(
                 "asking: nothing answers at {}: {why}",
                 where_it_is.display()
@@ -138,7 +105,6 @@ pub fn answers(where_it_is: &Path, me: &Identity) -> bool {
     }
 }
 
-/// A refusal is a reply, and a caller always says who it is.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,8 +119,6 @@ mod tests {
 
     #[test]
     fn a_call_carries_the_caller_s_name() {
-        // Without it the far end answers `verbs` and refuses everything else, which presents as
-        // "that instance does not work" rather than as a client that forgot to introduce itself.
         let held = Held {
             // Any fd will do: nothing is written, and building the frame is what is under test.
             stream: UnixStream::pair().expect("a pair").0,
@@ -172,7 +136,6 @@ mod tests {
 
     #[test]
     fn a_round_trip_over_a_real_socket_pair_reads_back() {
-        // The framing and the two halves of one stream, over something a kernel made.
         let (mine, theirs) = UnixStream::pair().expect("a pair");
         let mut held = Held {
             stream: mine,
@@ -196,8 +159,7 @@ mod tests {
 
     #[test]
     fn nothing_listening_is_an_error_rather_than_a_wait() {
-        // A path, not a name. Turning a name into a path is `directory::dial`'s job now, and
-        // this module no longer knows that sessions have names at all.
+        // A path, not a name: turning a name into a path is `directory::dial`'s job.
         assert!(!answers(std::path::Path::new("/no/such/socket"), &me()));
     }
 }
