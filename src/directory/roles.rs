@@ -85,7 +85,7 @@ impl Role {
     /// tell — the `role` and `assign` verbs — the answer is a refusal naming [`AT_MOST`], so an
     /// agent finds out its description was shortened rather than discovering it in a roster.
     ///
-    /// The name goes through [`safe`] because it is the middle of `project/role/id` and a role
+    /// The name goes through `safe` because it is the middle of `project/role/id` and a role
     /// with a slash in it makes a name that reads back as somebody else.
     #[must_use]
     pub fn new(name: &str, description: Option<&str>) -> Self {
