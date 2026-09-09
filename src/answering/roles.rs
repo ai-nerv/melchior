@@ -1,20 +1,6 @@
-//! Being told what you are for.
-//!
-//! Split from [`super`] under THE RULE, which caps a file at 800 lines.
-//!
-//! One call, two callers, and the second is the whole reason it is not simply a file an agent
-//! writes for itself:
-//!
-//! - **the session itself**, which is requirement 5. An agent choosing what it is for is a hole
-//!   only if a role buys something, and it buys nothing: [`crate::policy`] has no field for one.
-//! - **the session that started it**, which is `assign`. The same relation `stop` needs — a
-//!   parent, over its own child — and none of the proof, because a secret exists to make ending
-//!   a life refusable and a role is a word. Requiring the token here would guard a label with
-//!   the one thing in this crate that guards a life, which reads as the label mattering more
-//!   than it does.
-//!
-//! Everything else is refused, and refused by *relation* rather than by a name in the frame:
-//! a caller that could claim to be a parent could name every agent in the project.
+//! Being told what you are for: by the session itself, or by the session that started it, and by
+//! nobody else. A role grants nothing — [`crate::policy`] has no field for one — so no token is
+//! asked for. Everything else is refused by *relation* rather than by a name in the frame.
 
 use super::{About, Then};
 use crate::directory::roles::{AT_MOST, Role};
@@ -23,9 +9,8 @@ use crate::wire::{Call, Reply};
 
 /// Whether this caller may say what the answering session is for, and why not.
 ///
-/// `theirs` is how *this* session stands to the caller, which is the direction `stop` is decided
-/// in: `Child` means the caller started us. Asking the other way round would let anything
-/// somebody's parent set that somebody's role.
+/// `theirs` is how *this* session stands to the caller, so `Child` means the caller started us;
+/// asking the other way round would let anything somebody's parent set that somebody's role.
 #[must_use]
 pub(super) fn refused(relation: Relation, theirs: Relation) -> Option<Reply> {
     if relation == Relation::Myself || theirs == Relation::Child {
@@ -38,11 +23,8 @@ pub(super) fn refused(relation: Relation, theirs: Relation) -> Option<Reply> {
     )))
 }
 
-/// Take a role off a call, or say what is wrong with it.
-///
-/// **Refused rather than cut**, where the parsing paths cut — see [`Role::new`]. There is
-/// somebody to tell here, and a description silently shortened is router copy that stops half
-/// way through a sentence and reads as though the agent meant it.
+/// Take a role off a call, or say what is wrong with it. An over-long description is refused
+/// rather than cut, where the parsing paths cut — see [`Role::new`].
 pub(super) fn taken(call: &Call) -> Result<Role, Reply> {
     let Some(name) = super::text_at(call, 0).filter(|name| !name.trim().is_empty()) else {
         return Err(Reply::refused(
@@ -63,10 +45,6 @@ pub(super) fn taken(call: &Call) -> Result<Role, Reply> {
 }
 
 /// The same, where naming one at all is optional.
-///
-/// `mint` takes a role so a coordinator can say what a child is for *at birth*. Without it there
-/// is a window — however short — where a child is up, on the roster, and described as `main`,
-/// and a coordinator fanning work out during it hands work to a description nobody wrote.
 pub(super) fn asked(call: &Call) -> Result<Role, Reply> {
     if super::text_at(call, 0).is_none_or(|name| name.trim().is_empty()) {
         return Ok(Role::default());
@@ -78,10 +56,8 @@ pub(super) fn asked(call: &Call) -> Result<Role, Reply> {
 pub(super) fn set(call: &Call, about: &About) -> (Reply, Then) {
     match taken(call) {
         Err(refusal) => (refusal, Then::Nothing),
-        // Carried up rather than written here, for the same reason [`Then::Minted`] is: this
-        // function decides and the loop that owns the session records. The note is also what
-        // every other agent reads, so writing it from a connection handler would be two writers
-        // for one file with no reason to agree.
+        // Carried up rather than written here: the loop that owns the session writes the note, so
+        // a connection handler must not, or one file has two writers.
         Ok(role) => (
             Reply::of(serde_json::json!({
                 "role": role.name,

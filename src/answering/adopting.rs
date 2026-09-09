@@ -1,10 +1,5 @@
-//! Being adopted is asked for, never taken.
-//!
-//! Split from [`super`] under THE RULE, which caps a file at 800 lines.
-//!
-//! The whole point of the handshake: one session cannot make itself another's master, and cannot
-//! make itself another's child either. It can only put the question, and somebody at a keyboard
-//! on the other side answers it.
+//! Being adopted is asked for, never taken: a session can only put the question, and somebody at
+//! a keyboard on the other side answers it.
 
 use super::*;
 use crate::wire::Call;
@@ -45,8 +40,7 @@ fn caller(parent: Option<&str>) -> Whom {
 
 #[test]
 fn asking_puts_the_question_and_settles_nothing() {
-    // The reply must not read as a yes. A caller told "accepted" by the process it asked
-    // would be reading its own request back, and would carry on as though it had a parent.
+    // The reply says the question was put, not that it was answered.
     let (reply, then) = answer(
         &call_from("I want your grants"),
         &a_main(),
@@ -66,12 +60,8 @@ fn asking_puts_the_question_and_settles_nothing() {
 
 #[test]
 fn a_session_that_already_answers_to_somebody_is_not_taken_on() {
-    // Two lines of authority over one session makes "who may direct this" unanswerable.
-    //
-    // Refused twice over, and either is enough: the wall gets there first — a session with a
-    // parent is not a main, and another instance's main may not reach it — and the rule in
-    // the `adopt` arm catches the cases the wall lets through. What matters is that nothing
-    // reaches a person: a prompt is the only thing that can turn into a yes.
+    // Refused twice over: the wall refuses it first, and the rule in the `adopt` arm catches
+    // what the wall lets through.
     let mut held = a_main();
     held.parent = Some("demo/main/gamma-xi".to_owned());
     let (reply, then) = answer(&call_from("be mine"), &held, Some(&caller(None)));
@@ -81,8 +71,6 @@ fn a_session_that_already_answers_to_somebody_is_not_taken_on() {
 
 #[test]
 fn a_session_with_a_parent_may_not_go_looking_for_another() {
-    // Behind its parent's back, which is the objection: the parent lent it authority on the
-    // understanding that it answers to them.
     let (reply, then) = answer(
         &call_from("adopt me too"),
         &a_main(),
@@ -94,7 +82,7 @@ fn a_session_with_a_parent_may_not_go_looking_for_another() {
 
 #[test]
 fn a_stranger_that_says_nothing_about_itself_is_not_asked_about() {
-    // `None` is a caller that did not name itself. Everything here is about who they are.
+    // `None` is a caller that did not name itself.
     let (reply, then) = answer(&call_from("hello"), &a_main(), None);
     assert!(!reply.ok);
     assert_eq!(then, Then::Nothing);
