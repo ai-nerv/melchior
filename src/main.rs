@@ -1,8 +1,5 @@
 //! `melchior` — the agent layer, as a program.
 //!
-//! Three jobs, and they are three because each has a different lifetime and a different way of
-//! being talked to:
-//!
 //! | | |
 //! |---|---|
 //! | `melchior serve` | binds this session's socket and answers for it, for as long as its parent lives |
@@ -11,28 +8,8 @@
 //! | `melchior ask` | run a turn against one, streaming what it says |
 //! | `melchior lua-api` | prints the client library, for redirecting into a config directory |
 //!
-//! # Nothing here is a daemon
-//!
-//! `serve` is a *child*. It reads its parent's pipe and exits when that closes, so a session's
-//! socket lives exactly as long as the session does. A layer that outlived its harness would
-//! leave a name in the directory that answers and cannot act, which is worse than a name that
-//! is simply gone: a sibling would send to it and be told the message landed.
-//!
-//! Neither is `ask`, for a different reason and by the same means — see [`tied`]. The pipe is
-//! only half of it in both cases, and the kernel's half is what covers the magi that is killed
-//! rather than the one that leaves.
-//!
-//! # Why a pipe and not a library call
-//!
-//! The harness could link this crate — it did once. It is a separate program now so that a
-//! harness in another language can use it, and so that the two can be released apart. What
-//! crosses the boundary is what a harness genuinely cannot do for itself, and no more:
-//!
-//! - **up**, on stdin: what this session is doing, so `status` can answer truthfully
-//! - **down**, on stdout: a message arrived, and here it is
-//!
-//! One JSON object per line, because both ends are line-oriented already and a length prefix
-//! buys nothing on a pipe that nothing else shares.
+//! Nothing here is a daemon: `serve` is a child that exits when its parent's pipe closes, and
+//! `ask` is tied to the magi by [`tied`]. Up on stdin and down on stdout, one JSON object a line.
 
 use std::io::{BufRead, Write};
 
@@ -47,32 +24,21 @@ fn main() -> std::io::Result<()> {
             Ok(())
         }
         Some("models") => melchior::mind::speaking::models(&flags(args)),
-        // Before stdin is read, because reading it is where the pipe stops being a way of
-        // noticing anything: the turn that follows holds a provider connection with no timeout
-        // over it, and a magi killed there left one open behind it.
+        // Before stdin is read: from there on the turn holds a connection with no timeout over it.
         Some("ask") => {
             tied::to_magi()?;
             melchior::mind::speaking::ask(&flags(args))
         }
-        // magi coordinates: it says what melchior should be, and melchior says what it takes.
         Some("needs") => melchior::mind::speaking::needs(&flags(args)),
         Some("configure") => melchior::mind::speaking::configure(&flags(args)),
-        // Credentials live where the model does. A subscription is not something a person can
-        // export, so "how do I enable this" needs a command for an answer, and it belongs to
-        // whoever holds the token.
         Some("auth") => signing(args),
         // `client` is the family's name for it; `lua-api` is what this program called it first.
-        // Both stay, because a name is not worth breaking a caller over — see FAMILY.md.
         Some("client" | "lua-api") => {
             print!("{}", melchior::CLIENT);
             Ok(())
         }
         Some("fork") => fork(&flags(args)),
-        // **In the reply shape, not as prose.** A program's self-description is the one thing
-        // another program has to be able to parse; this printed two columns of text, so the only
-        // way to discover melchior's surface was to read it with your eyes.
         Some("verbs") => melchior::mind::speaking::verbs(&flags(args)),
-        // The distribution half. Fetching is `git clone`; the idea is the lockfile.
         Some("acknowledge") => melchior::mind::speaking::acknowledge(&flags(args)),
         Some(other) => {
             eprintln!("melchior: no such command: {other}");
@@ -108,31 +74,19 @@ mod tool;
 enum Told {
     /// What this session is doing now, so `status` answers truthfully rather than plausibly.
     Doing {
-        /// Whether a turn is running.
         busy: bool,
         /// For how long, in seconds.
         #[serde(default)]
         working_for: u64,
-        /// How much is waiting to be read.
         #[serde(default)]
         waiting: usize,
     },
     /// What the person said to a request this session was asked to answer.
-    ///
-    /// Comes back up rather than being decided here, because the question was never this
-    /// process's to answer: it asks whether another session may act with this one's authority,
-    /// and only somebody at a keyboard can say.
     Answered {
         /// Which request, as [`Heard::Asked`] named it.
         id: String,
-        /// Whether they said yes.
         accept: bool,
         /// Anything the accepting harness wants the adopted one to have, carried unread.
-        ///
-        /// **Opaque on purpose.** What a harness lends a session it has taken on — permissions,
-        /// in magi's case — is that harness's own idea. A layer that understood it would be a
-        /// second place needing a change every time it changed. This goes in one side and comes
-        /// out the other, and nothing here looks at it.
         #[serde(default)]
         handover: Option<String>,
     },
@@ -144,99 +98,53 @@ enum Told {
 enum Heard {
     /// Ready: the socket is bound and this session can be reached.
     Listening {
-        /// Where, so a parent can say so and a test can find it.
         at: String,
         /// And as whom, since the name may have been chosen here rather than handed down.
-        ///
-        /// A parent that passed only `--project` has no other way to learn it, and it needs to:
-        /// the name goes on its own screen and into what it signs.
         #[serde(rename = "as")]
         named: String,
-        /// Which run this session belongs to, which is the name written in its `.session` note.
-        ///
-        /// Told rather than left to be worked out. A root's run is its id plus the moment it
-        /// began, so a parent deriving one from the name alone would get a different answer to
-        /// the one every other agent reads off the directory — and a harness files its memory
-        /// under this, so the two disagreeing is a run whose agents cannot find each other.
+        /// Which run this session belongs to, as written in its `.session` note.
         run: String,
     },
     /// A message arrived for this session.
     Message {
         /// Who sent it, as `project/role/id`.
         who: String,
-        /// What sort it is.
         sort: String,
-        /// What they said.
         text: String,
         /// The message it answers, when it answers one.
         about: Option<String>,
     },
-    /// Who else is in this project, whenever that changes.
-    ///
-    /// Pushed rather than asked for, because the thing that wants it is a completion popup: a
-    /// harness offering `$` on a keystroke cannot spawn a process or open a socket to answer it,
-    /// and one that cached the answer at startup would offer a session that has since gone and
-    /// miss the one that just arrived.
-    ///
-    /// It also keeps the layout here. A harness listing the directory for itself would be a
-    /// second place that knows where sockets live and what a `.parent` file is called.
+    /// Who else is in this project, pushed whenever that changes.
     Around {
         /// Every session listening, this one included.
-        ///
-        /// Records rather than names. A bare id completes a `$` and does nothing else: a harness
-        /// holding one cannot say what that agent is for without asking, and cannot find the
-        /// screen it draws on at all, because that socket is named after a key the harness keeps
-        /// to itself. Both facts are already in this directory, and reading them here is one
-        /// listing of a directory that was being listed anyway.
         agents: Vec<Peer>,
     },
     /// Somebody with the right to stop this session did.
     Stopped,
     /// Another session is asking to become this one's child, and a person has to answer.
-    ///
-    /// Up the pipe rather than into the inbox, because the answer is not a model's to give: it
-    /// decides whether another session may act with this one's authority. A model accepting on
-    /// its own behalf would be granting itself a second pair of hands.
     Asked {
-        /// The request, so an answer names one rather than "the last thing asked".
         id: String,
         /// Who is asking, as `project/role/id`.
         who: String,
-        /// Why, in their words. The person answering has no other way to know.
         why: String,
     },
-    /// A session this one asked to be taken on by has accepted.
-    ///
-    /// Its own line rather than the message that also arrives, because the two have different
-    /// readers. The message is for the model — somebody said yes, here is who. This is for the
-    /// harness, and carries what the accepting session lent it, which no model should see:
-    /// permissions written into a transcript are permissions a model can read and reason about
-    /// acquiring.
+    /// A session this one asked to be taken on by has accepted. Carries what that session lent
+    /// it, which goes to the harness and never into a transcript a model can read.
     Adopted {
         /// Who took this session on, as `project/role/id`.
         by: String,
-        /// What they handed over, exactly as they wrote it.
         handover: Option<String>,
     },
 }
 
 /// One session listening in this project, as a harness needs it.
-///
-/// Not a [`Whom`](melchior::policy::Whom): that answers who may stop whom, and this answers what
-/// is on the screen. The parent chain is deliberately absent — a harness drawing a peer has no
-/// use for it, and putting it here would make a completion popup a second reader of the policy.
 #[derive(serde::Serialize, Clone, PartialEq, Eq)]
 struct Peer {
-    /// Its id, which is what addresses it and what `$` completes to.
     id: String,
     /// What it says it is for, one word. `main` for an agent that never said.
     role: String,
-    /// Where its harness draws it, or `null` for one that published no screen.
-    ///
-    /// Read off the note the harness left at announce time — see
-    /// [`directory::screens`](melchior::directory::screens). melchior neither opens this socket
-    /// nor checks it; a peer that dials a path nobody answers has learnt the same thing it
-    /// learns about a socket in this directory, and by the same call.
+    /// Where its harness draws it, or `null` for one that published no screen — read off the note
+    /// left at announce time, see [`directory::screens`](melchior::directory::screens).
     ui: Option<String>,
 }
 
@@ -254,24 +162,9 @@ fn around(project: &str) -> Vec<Peer> {
         .collect()
 }
 
-/// Bind this session's socket and answer for it until the parent goes away.
-///
-/// Everything it needs to *be* somebody comes from the environment, the same way it did when
-/// this ran inside a harness: `MAGI_MELCHIOR_PROJECT`, `MAGI_MELCHIOR_ROLE`, `MAGI_MELCHIOR_ID`, and the `MAGI_*` names
-/// they replaced. That is the one thing a separate process cannot work out for itself.
-/// `melchior fork` — a name and a secret for a session this one is about to start.
-///
-/// Prints the environment the child should be started with, as JSON, and nothing else. Over argv
-/// like every other question with an answer, and to *this* session's socket: the secret is the
-/// whole of what makes `stop` refusable, so the party that gets one is the party that already
-/// holds this session's own pipe.
-///
-/// **The harness spawns, melchior names.** A layer that started harnesses would have to know
-/// what one is — which command, which arguments, which working directory — and none of that is
-/// its business. It hands down a name and a secret the same way it hands down a name.
-/// `--role` and `--role-description` say what the child is for, at birth. Without them there is
-/// a window in which a child is up, on the roster and described as `main`, and a coordinator
-/// fanning work out during it routes by a description nobody wrote.
+/// `melchior fork` — a name and a secret for a session this one is about to start, printed as
+/// JSON. `--role` and `--role-description` say what the child is for at birth, so it is never on
+/// the roster described as `main` while a coordinator is routing by description.
 fn fork(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
     let Some(me) = melchior::directory::mine() else {
         return Err(std::io::Error::other(
@@ -305,26 +198,13 @@ fn fork(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<(
 
 /// Bind this session's socket and answer for it until the parent lets go.
 ///
-/// `--project` when nothing in the environment says which session this is, and `--role` /
-/// `--role-description` when the person starting it knows what it is for. The role outranks
-/// `MAGI_MELCHIOR_ROLE` and the config, and it is taken whole — the two flags are one source,
-/// so naming a role on the command line never picks up a description from anywhere else.
-///
-/// `--ui <path>` is where the harness draws this session, written to a note beside the socket so
-/// a peer can find the screen — see [`directory::screens`](melchior::directory::screens). Only
-/// the harness knows it: magi names its host socket after a key it keeps to itself, so without
-/// this flag a sibling can find every live magi in the project and tell which is which for none
-/// of them. Left off, this session offers no screen, which is what `melchior serve` run by hand
-/// honestly is.
+/// `--project` when nothing in the environment says which session this is. `--role` and
+/// `--role-description` are one source taken whole, outranking `MAGI_MELCHIOR_ROLE` and the
+/// config. `--ui <path>` is where the harness draws this session, written to a note beside the
+/// socket — see [`directory::screens`](melchior::directory::screens).
 fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
-    // Before anything is bound or announced: a session that outlived its magi would leave a
-    // name in the directory that answers and cannot act.
     tied::to_magi()?;
 
-    // Named here when the caller only says which project it is in, and that is the useful way
-    // round: a harness choosing its own name is choosing out of a namespace it cannot see, and
-    // the collision would surface as a failed bind after it had told everyone what it was
-    // called. Whoever holds the directory should be the one that looks first.
     let me = match (melchior::directory::mine(), asked.get("project")) {
         (Some(me), _) => me,
         (None, Some(project)) => melchior::directory::free_in(project),
@@ -340,11 +220,8 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         }
     };
 
-    // **Whole-record, and this is the one place the four sources meet.** The flag, then the
-    // environment, then a config, then `main` — and whichever speaks first is taken entirely,
-    // because a name from one and a sentence from another describes a role nobody declared.
-    // Resolved here rather than in `directory` because that module knows about none of these:
-    // argv is this file's, and where a config lives is `mind`'s.
+    // Flag, then environment, then config, then `main`, and whichever speaks first is taken
+    // whole: a name from one and a sentence from another describes a role nobody declared.
     let role = melchior::directory::roles::resolve(
         asked
             .get("role")
@@ -390,30 +267,21 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         let (asked_tx, mut asked) = tokio::sync::mpsc::channel(16);
         let (adopted_tx, mut adopted) = tokio::sync::mpsc::channel(4);
         let (stopped_tx, mut stopped) = tokio::sync::mpsc::channel(1);
-        // Children this session named, on their way into its own record of them. The secret is
-        // what a `stop` has to quote back, so it is held here and nowhere a sibling can read.
+        // Children this session named. The secret a `stop` has to quote back is held here only.
         let (minted_tx, mut minted) = tokio::sync::mpsc::channel::<(String, String)>(4);
-        // What this session has been told it is for, by itself or by whoever started it.
         let (named_tx, mut named) =
             tokio::sync::mpsc::channel::<melchior::directory::roles::Role>(4);
 
-        // The note beside the socket, so the tree can be read off the directory: a session that
-        // finds this one there can tell whose subagent it is without asking it, and without
-        // trusting what it would have said.
-        //
-        // Refused rather than served when a note will not land. This was `let _ = …`, and when
-        // `/tmp` filled the sessions came up as *mains*: no parent, no run, a crew of one, and a
-        // main's reach in `policy` — the failure handed out authority, silently, and read exactly
-        // like a bug in the session model.
+        // The note beside the socket, so the tree can be read off the directory. Refused rather
+        // than served when it will not land: without it a session comes up as a main, with a
+        // main's reach.
         if let Err(why) = melchior::directory::announce(&me, &role, ui.as_deref()) {
             eprintln!("melchior serve: {why}");
             std::process::exit(1);
         }
         let at = melchior::directory::listening_at(&me);
 
-        // Bound *here*, and only then announced. Spawning the accept loop and saying "listening"
-        // in one breath announces a future: the bind is several awaits away, and a parent that
-        // started sending on the strength of it met its own session as "nothing is listening".
+        // Bound here, and only then announced: saying "listening" first announces a future.
         let listener = match melchior::serving::listening_on(&at).await {
             Ok(listener) => listener,
             Err(why) => {
@@ -424,8 +292,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         say(&Heard::Listening {
             at: at.display().to_string(),
             named: me.full(),
-            // Read back from the note `announce` has just written rather than computed again
-            // here, so there is one answer and the directory holds it.
+            // Read back from the note `announce` just wrote, so the directory holds one answer.
             run: melchior::directory::sessions::session_of(&me).unwrap_or_else(|| me.id.clone()),
         });
         tokio::spawn(async move {
@@ -444,17 +311,13 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
             .await;
         });
 
-        // Who else is in the project, watched on a slow tick. There is no event to hook: the
-        // directory is the registry, and a session appears in it by binding a socket that this
-        // process has no reason to be told about. Two seconds is well under how long it takes
-        // somebody to notice a name is missing from a completion popup, and the check is a
-        // directory listing.
+        // Who else is in the project, on a slow tick. There is no event to hook: the directory is
+        // the registry, and a session appears in it by binding a socket.
         let mut listed: Vec<Peer> = Vec::new();
         let mut sweep = tokio::time::interval(std::time::Duration::from_secs(2));
         sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-        // The parent's side of the pipe, read on a thread because it is a blocking stdin and
-        // everything else here is not.
+        // The parent's side of the pipe, read on a thread because it is a blocking stdin.
         let (told_tx, mut told) = tokio::sync::mpsc::channel::<Told>(16);
         std::thread::spawn(move || {
             for line in std::io::stdin().lock().lines().map_while(Result::ok) {
@@ -462,8 +325,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                     continue;
                 }
                 match serde_json::from_str::<Told>(&line) {
-                    // A line we cannot read is the parent's bug, not a reason to stop answering
-                    // a socket other sessions are using.
+                    // A line we cannot read is the parent's bug, not a reason to stop answering.
                     Err(why) => eprintln!("melchior serve: {why}"),
                     Ok(told) => {
                         if told_tx.blocking_send(told).is_err() {
@@ -475,9 +337,8 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         });
 
         let mut inbox: Vec<melchior::wire::Message> = Vec::new();
-        // Requests put to this session and not yet answered. Held here rather than in the
-        // serving task because the answer arrives on the *pipe*, from the person, long after the
-        // connection that carried the question has closed.
+        // Requests not yet answered. Held here because the answer arrives on the pipe, long after
+        // the connection that carried the question has closed.
         let mut pending: Vec<melchior::wire::Request> = Vec::new();
         loop {
             tokio::select! {
@@ -489,14 +350,10 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                         about: message.about.clone(),
                     });
                     // Bounded, so a handoff that has come back round runs out of somewhere to go.
-                    // The hop count in the frame is the guard that counts; this is the one that
-                    // holds when the count is wrong.
                     melchior::answering::keeping::kept(&mut inbox, message);
                     about_tx.send_modify(|about| about.inbox.clone_from(&inbox));
                 }
-                // Held here until the person answers. Kept rather than answered on the spot,
-                // because the socket call that carried it has already been replied to: the
-                // caller was told the question was put, not what the answer was.
+                // Held until the person answers: the call that carried it was already replied to.
                 Some(request) = asked.recv() => {
                     say(&Heard::Asked {
                         id: request.id.clone(),
@@ -505,70 +362,46 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                     });
                     pending.push(request);
                 }
-                // Straight up the pipe, never into the inbox. What a parent lends a session it
-                // has taken on is for the harness; a model that could read it in its own
-                // transcript could reason about acquiring more.
+                // Straight up the pipe, never into the inbox: a handover is not a model's to read.
                 Some((by, handover)) = adopted.recv() => {
                     say(&Heard::Adopted { by, handover });
                 }
-                // A child this session named. Held here and nowhere else: `stop` is refused
-                // unless the caller quotes the secret the child was started with, and a secret a
-                // sibling could read off the directory would be authority over a session it did
-                // not start. Never said up the pipe either — the harness that asked for it
-                // already has it, and nothing else has any business with it.
+                // A child this session named. The secret is held here and said nowhere else.
                 Some((id, token)) = minted.recv() => {
                     about_tx.send_modify(|about| {
                         about.minted.insert(id, token);
                     });
                 }
-                // The note first, then the copy this session answers with, because the note is
-                // what every *other* agent reads and a peer that saw the old one would route by
-                // it. Never said up the pipe: a role changes nothing a harness does, and the
-                // harness that asked for it already knows.
+                // The note first, then the copy this session answers with: peers route by the
+                // note, and a peer that saw the old one would route by it.
                 Some(role) = named.recv() => {
-                    // Said out loud, and the copy this session answers with is left alone. A note
-                    // that did not land leaves every peer routing by the old role while this
-                    // session believes it has the new one — two answers to what an agent is for,
-                    // which is the disagreement the note exists to prevent.
                     match melchior::directory::roles::given(&me.project, &me.id, &role) {
                         Ok(()) => about_tx.send_modify(|about| about.me.role.clone_from(&role.name)),
                         Err(why) => eprintln!("melchior: {} is still {}: {why}", me.id, me.role),
                     }
                 }
-                // **`None` here is the parent letting go, and it is the whole lifetime rule.**
-                // Matched rather than left to `else`, because a `select!` arm whose pattern
-                // does not match is *disabled*, not taken: with `Some(..) = told.recv()` the
-                // closed pipe silently dropped this branch and the loop went on waiting on the
-                // socket. `melchior serve` outlived the session that started it, kept a name in the
-                // directory that answers and cannot act, and a sibling sending to it would be
-                // told the message landed. Found by closing the pipe and looking.
+                // `None` is the parent letting go. Matched rather than left to `else`: a
+                // `select!` arm whose pattern does not match is disabled, not taken.
                 told = told.recv() => match told {
                     None => break,
                     Some(Told::Doing { busy, working_for, waiting }) => {
                         about_tx.send_modify(|about| {
                             about.busy = busy;
                             about.working_for = working_for;
-                            // What the *harness* still holds unread, which is not the same as
-                            // what has arrived here: it reads its inbox and acts on it, and a
-                            // count that only ever grew would tell a sibling this session is
-                            // falling behind when it is keeping up.
+                            // What the harness still holds unread, which is not the same as what
+                            // has arrived here.
                             about.inbox.truncate(waiting.min(about.inbox.len()));
                         });
                     }
-                    // What the person said. Taking a session on is written to the directory
-                    // *here*, by the side that consented — the asker writing its own note would
-                    // be a session appointing its own parent, which is the one thing the whole
-                    // handshake exists to prevent.
+                    // Written by the side that consented: an asker writing its own note would be
+                    // a session appointing its own parent.
                     Some(Told::Answered { id, accept, handover }) => {
                         let Some(at) = pending.iter().position(|held| held.id == id) else {
                             continue;
                         };
                         let request = pending.remove(at);
-                        // A refusal that a person gave is still a refusal if the note will not
-                        // write — so the acceptance is downgraded rather than reported as one.
-                        // Told below either way, and what it is told has to be true: an adoption
-                        // both sides believe in, over a directory that still calls the child
-                        // somebody's main, is the one outcome nothing later can reconcile.
+                        // The acceptance is downgraded rather than reported as one when the note
+                        // will not write.
                         let mut accept = accept;
                         if accept && let Some(them) = melchior::identity::Identity::read(&request.from)
                             && let Err(why) = melchior::directory::adopted(&them, &me.id)
@@ -576,9 +409,8 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                             eprintln!("melchior: {} was not taken on: {why}", request.from);
                             accept = false;
                         }
-                        // Told either way, and told by us: the asker has been waiting since its
-                        // call was answered with "the question has been put", and a silence it
-                        // could not tell from a refusal would leave it waiting for good.
+                        // Told either way: a silence the asker could not tell from a refusal
+                        // would leave it waiting for good.
                         melchior::directory::answer_request(
                             &request.from,
                             &me,
@@ -592,44 +424,31 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                     break;
                 }
                 _ = sweep.tick() => {
-                    // Re-read on the tick, because being adopted happens to this session from
-                    // outside it: whoever accepted wrote the note, and no variable can be set on
-                    // a process already running. Left as it stood at startup, a session that had
-                    // been taken on would go on telling callers it was a main, and its own `kin`
-                    // would disagree with every other reading of the same directory.
+                    // Re-read on the tick: being adopted happens to this session from outside it,
+                    // and no variable can be set on a process already running.
                     let mine = melchior::directory::parent_of(&me);
                     if mine != about_tx.borrow().parent {
                         about_tx.send_modify(|about| about.parent.clone_from(&mine));
                     }
-                    // Compared whole, so a peer that changed its role or published a screen is a
-                    // change too. Against the ids alone, an agent that came up as a `main` and
-                    // then took a role kept the name it had on every other screen in the project.
+                    // Compared whole: a peer that changed role or published a screen is a change.
                     let now = around(&me.project);
-                    // Only on a change. A line every two seconds for the life of a session is a
-                    // pipe nobody can read a log out of, and a parent that has to diff it.
                     if now != listed {
                         listed = now;
                         say(&Heard::Around { agents: listed.clone() });
                     }
                 }
-                // How this session ends when its magi is killed: the kernel sends the signal, and
-                // for as long as nothing waited for it the lines under this loop never ran.
                 () = ending.came() => break,
-                // Both remaining arms can close on their own — the serving task dropping its
-                // senders — and either way there is nobody left to answer for.
                 else => break,
             }
         }
         melchior::directory::forget(&me);
         let _ = std::fs::remove_file(&at);
-        // And the directory itself, if this was the last session in the project. It refuses
-        // while anybody else is still there, so whoever leaves last does it.
+        // And the directory itself, which refuses while anybody else is still in the project.
         melchior::directory::leave(&me.project);
         Ok(())
     })
 }
 
-/// The wire name of a sort.
 fn name_of(sort: melchior::wire::Sort) -> String {
     serde_json::to_value(sort)
         .ok()
@@ -637,10 +456,7 @@ fn name_of(sort: melchior::wire::Sort) -> String {
         .unwrap_or_else(|| "note".to_owned())
 }
 
-/// One line to the parent, flushed.
-///
-/// Flushed every time because the parent is waiting on it: a buffered "listening" that arrives
-/// when the buffer happens to fill is a parent that hangs at startup for no reason it can see.
+/// One line to the parent, flushed every time because the parent is waiting on it.
 fn say(heard: &Heard) {
     let Ok(line) = serde_json::to_string(heard) else {
         return;
@@ -650,10 +466,8 @@ fn say(heard: &Heard) {
     let _ = out.flush();
 }
 
-/// `--name value` pairs, as a caller wrote them.
-///
-/// Repeats accumulate under one key, separated by newlines, because `--name a --name b` is how
-/// a shell says "these several" and dropping all but the last would silently brief on one.
+/// `--name value` pairs, as a caller wrote them. Repeats accumulate under one key separated by
+/// newlines, because `--name a --name b` is how a shell says "these several".
 fn flags(args: impl Iterator<Item = String>) -> std::collections::BTreeMap<String, String> {
     let mut out: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     let mut args = args.peekable();
@@ -665,9 +479,6 @@ fn flags(args: impl Iterator<Item = String>) -> std::collections::BTreeMap<Strin
             Some((key, value)) => (key.to_owned(), value.to_owned()),
             None => {
                 // A flag with another flag after it, or with nothing after it, is a bare yes.
-                // Taking the next argument regardless made `--cbor` mean nothing — the empty
-                // value was dropped below — and made `--name --json` set the name to "--json"
-                // and lose the encoding.
                 let takes = args.peek().is_some_and(|next| !next.starts_with("--"));
                 let value = if takes {
                     args.next().unwrap_or_default()
@@ -690,12 +501,7 @@ fn flags(args: impl Iterator<Item = String>) -> std::collections::BTreeMap<Strin
     out
 }
 
-/// What a harness should put in front of a model about the sessions a prompt named.
-///
-/// Printed rather than returned, because the caller is a program that runs this and reads what
-/// it said. It is the one piece of the surface that is *about* a prompt, and it still does not
-/// read one: scanning for a name means knowing what a prompt, a cursor and a sigil table are,
-/// and none of those are melchior's. It is handed the names.
+/// What a harness should put in front of a model about the sessions a prompt named, printed.
 fn brief(project: Option<&str>, asked: &std::collections::BTreeMap<String, String>) {
     let named: Vec<String> = asked
         .get("name")
@@ -718,10 +524,7 @@ fn brief(project: Option<&str>, asked: &std::collections::BTreeMap<String, Strin
     );
 }
 
-/// `melchior auth login|logout|status`.
-///
-/// Its own runtime, because signing in opens a browser and waits on a loopback redirect, and a
-/// one-shot command has none to borrow.
+/// `melchior auth login|logout|status`, on a runtime of its own for the loopback redirect.
 fn signing(mut args: impl Iterator<Item = String>) -> std::io::Result<()> {
     let what = args.next().unwrap_or_else(|| "status".to_owned());
     let who = args.next().unwrap_or_default();
@@ -767,8 +570,6 @@ mod flag_tests {
 
     #[test]
     fn a_bare_flag_is_a_yes_rather_than_nothing() {
-        // `--cbor` meant nothing at all: it took the next argument, found none, and the empty
-        // value was dropped. Every answer came out as JSON however it was asked for.
         assert_eq!(parse(&["--cbor"]).get("cbor"), Some(&"yes".to_owned()));
     }
 
@@ -789,8 +590,6 @@ mod flag_tests {
 }
 
 /// The pipe is a wire between two repositories, so its spellings are pinned here.
-///
-/// Split from this file under THE RULE, which caps a file at 800 lines.
 #[cfg(test)]
 #[path = "main/pipe.rs"]
 mod pipe;
