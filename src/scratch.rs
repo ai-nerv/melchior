@@ -1,37 +1,15 @@
-//! Directories a test owns, and that go when it does.
-//!
-//! **Every test here used to clean up on its last line.** A `let _ = remove_dir_all(&dir);` after
-//! the assertions runs when the test passes and does not run when it fails: `assert!` unwinds
-//! straight past it. So the directories a *failing* test left behind stayed, and the delete-then-
-//! create helpers only ever revisited their own name under their own pid — which never repeats.
-//! The tree filled up quietly, across two renames of this project, and nothing anywhere said so.
-//!
-//! The fix is the one the language already offers: own the directory, and let `Drop` do it. A
-//! guard runs on the unwind as well as on the return, which is the case that was leaking.
-//!
-//! Two of them, because the suite writes to two trees. [`Scratch`] is a directory under
-//! `$TMPDIR`; [`Project`] is one under `$XDG_RUNTIME_DIR/melchior`, where the code under test
-//! keeps sockets and notes and where nothing may point it elsewhere.
-//!
-//! Here rather than in a testkit crate because there is no second crate to put it in: melchior
-//! is one crate. The siblings each carry their own copy of this for the same reason the wire
-//! types are duplicated — a shared crate would be a dependency between repositories.
+//! Directories a test owns, and that go when it does, on the unwind as well as on the return.
+//! [`Scratch`] is a directory under `$TMPDIR`; [`Project`] is one under
+//! `$XDG_RUNTIME_DIR/melchior`, which is where the code under test keeps sockets and notes.
 
 use std::path::{Path, PathBuf};
 
-/// Distinguishes two scratches made in one process.
-///
-/// The pid alone is not enough. Two tests in one binary run on two threads, and a name is the
-/// caller's to choose — so two that happened to choose the same one deleted each other's fixture
-/// halfway through. A counter costs nothing and removes the question.
+/// Distinguishes two scratches made in one process: the pid alone is not enough, because two
+/// tests in one binary run on two threads and the name is the caller's to choose.
 static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// A directory under the temporary directory, removed when this is dropped.
-///
-/// Derefs to [`Path`], so a helper that used to hand back a `PathBuf` can hand back one of these
-/// and every `dir.join(…)` at the call sites keeps compiling. What stops compiling is a caller
-/// that wanted to *own* the path — those want [`Scratch::leak`] or `.to_path_buf()`, and the
-/// compiler names each one.
+/// A directory under the temporary directory, removed when this is dropped. Derefs to [`Path`];
+/// a caller that wants to own the path wants [`Scratch::leak`] or `.to_path_buf()`.
 #[derive(Debug)]
 pub struct Scratch {
     path: PathBuf,
@@ -39,24 +17,17 @@ pub struct Scratch {
 
 impl Scratch {
     /// A fresh directory, named after `prefix` and `name`.
-    ///
-    /// # Panics
-    /// If the directory cannot be created, which is a broken machine rather than a failed test.
     #[must_use]
     pub fn new(prefix: &str, name: &str) -> Self {
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("{prefix}-{}-{n}-{name}", std::process::id()));
-        // Still removed first. A pid is reused eventually, and a run that was killed rather than
-        // unwound leaves its directory behind for the next process that happens to match.
+        // A pid is reused, and a run that was killed rather than unwound left its directory.
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("a scratch directory");
         Self { path }
     }
 
-    /// Keep the directory, and stop owning it.
-    ///
-    /// For the handful of tests that inspect what was left behind after the thing that wrote it
-    /// has gone. Whoever calls this owns the cleanup.
+    /// Keep the directory, and stop owning it: whoever calls this owns the cleanup.
     #[must_use]
     pub fn leak(self) -> PathBuf {
         let path = self.path.clone();
@@ -65,15 +36,11 @@ impl Scratch {
     }
 }
 
-/// A path *inside* a scratch directory, where the directory is what is removed.
-///
-/// The shape a dozen helpers here already had: hand back the journal path, and clean up the
-/// directory around it. Returning the [`Scratch`] instead would push the `join` out to every
-/// caller for no gain, and holding only the file path would delete the directory the moment the
-/// helper returned. Derefs to the file, so a caller writes `&temp("x")` as it always did.
+/// A path *inside* a scratch directory, where the directory is what is removed. Derefs to the
+/// file.
 #[derive(Debug)]
 pub struct ScratchFile {
-    /// Kept for its `Drop`, which is the entire point.
+    /// Kept for its `Drop`.
     _dir: Scratch,
     path: PathBuf,
 }
@@ -118,25 +85,14 @@ impl AsRef<Path> for Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        // Ignored: the test has already said whether it passed, and a cleanup that panicked
-        // during an unwind would abort the process and hide it.
+        // Ignored: a cleanup that panicked during an unwind would abort the process.
         let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 
-/// A project directory under the runtime directory, removed when this is dropped.
-///
-/// [`Scratch`]'s sibling, for the other tree the suite writes to. A test about the *directory* —
-/// who is listening, whose child is whose, what a role note says — cannot use a temporary
-/// directory instead, because the code under test looks under `$XDG_RUNTIME_DIR/melchior` and
-/// nowhere else. So every one of those tests made a project there and removed it on its last
-/// line, with the same hole [`Scratch`] was written for.
-///
-/// That tree is also not `$TMPDIR`, which is the part that made it expensive: `gate-hermetic`
-/// runs the suite under a temporary directory of its own and looks there, so what piled up here
-/// was invisible to the one thing that was supposed to be watching. Around eighteen hundred
-/// directories accumulated, and the suite that failed was magi's — its `resume_live` gives up
-/// once this directory is full enough — which cost most of a day to attribute.
+/// A project directory under `$XDG_RUNTIME_DIR/melchior`, removed when this is dropped: a test
+/// about the directory cannot use a temporary one, because the code under test looks there and
+/// nowhere else.
 #[derive(Debug)]
 pub struct Project {
     name: String,
@@ -144,17 +100,12 @@ pub struct Project {
 
 impl Project {
     /// A project nothing else is in, named after `prefix` and `name`.
-    ///
-    /// # Panics
-    /// If the directory cannot be created, which is a broken machine rather than a failed test.
     #[must_use]
     pub fn new(prefix: &str, name: &str) -> Self {
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let it = Self {
             name: format!("{prefix}-{}-{n}-{name}", std::process::id()),
         };
-        // Removed first for the same reason a scratch is: a pid comes round again, and a run
-        // that was killed rather than unwound left its sockets behind under that name.
         let _ = std::fs::remove_dir_all(it.home());
         std::fs::create_dir_all(it.home()).expect("a project directory");
         it
@@ -210,7 +161,6 @@ mod tests {
 
     #[test]
     fn a_scratch_removes_itself_when_a_test_panics() {
-        // The case the trailing `remove_dir_all` never covered, and the whole reason for this.
         let path = std::panic::catch_unwind(|| {
             let dir = Scratch::new("melchior-scratch", "panicked");
             let path = dir.to_path_buf();
@@ -224,7 +174,6 @@ mod tests {
 
     #[test]
     fn two_scratches_of_one_name_are_two_directories() {
-        // Two tests in one binary may choose the same name, and a pid does not tell them apart.
         let a = Scratch::new("melchior-scratch", "same");
         let b = Scratch::new("melchior-scratch", "same");
         assert_ne!(a.to_path_buf(), b.to_path_buf());
@@ -245,8 +194,6 @@ mod projects {
 
     #[test]
     fn a_project_removes_its_directory_when_a_test_panics() {
-        // The case the trailing `remove_dir_all(home(&project))` never covered, and the one that
-        // filled the runtime directory.
         let home = std::panic::catch_unwind(|| {
             let it = Project::new("melchior-project", "panicked");
             let home = it.home();
@@ -268,8 +215,6 @@ mod projects {
 
     #[test]
     fn a_project_is_under_the_runtime_directory_the_code_reads() {
-        // Not `$TMPDIR`. A guard that tidied a temporary directory would leave the tree that
-        // actually fills up untouched, and read as a fix.
         let it = Project::new("melchior-project", "where");
         assert_eq!(it.home(), crate::directory::home(&it));
     }
