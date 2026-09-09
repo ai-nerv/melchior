@@ -130,6 +130,10 @@ impl Reply {
 /// and the two are not the same set. `mint`, `minted` and `stop` are listed here and refused to
 /// every caller but the session itself: a verb that is answered and unlisted breaks "advertised
 /// equals dispatched" from the side nobody checks.
+///
+/// `identity` and `tell` are this door's names for what [`crate::verbs`] calls `whoami` and
+/// `send`, and are not aliases of them: this door answers a program with a record, and that one
+/// answers a model with a paragraph that also names what the session started.
 pub const VERBS: &[(&str, &str)] = &[
     ("verbs", "what this instance answers"),
     (

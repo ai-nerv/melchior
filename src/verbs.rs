@@ -115,8 +115,10 @@ pub fn parameters() -> Value {
 }
 
 /// What the tool can be asked to do. These names and descriptions are the wire contract magi
-/// parses, so an edit here is an edit to what every harness sees.
-const VERBS: &[(&str, &str)] = &[
+/// parses, so an edit here is an edit to what every harness sees. Public because `melchior verbs`
+/// advertises them under `door: "tool"`: a verb that is answered and unlisted breaks "advertised
+/// equals dispatched" from the side nobody checks.
+pub const VERBS: &[(&str, &str)] = &[
     // Knowing where you are.
     ("help", "list these verbs and what each takes"),
     (

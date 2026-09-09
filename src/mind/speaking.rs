@@ -184,18 +184,26 @@ pub fn acknowledge(flags: &std::collections::BTreeMap<String, String>) -> std::i
 pub fn verbs(flags: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
     let how = As::asked(flags);
     let mut out = std::io::stdout().lock();
-    // Both doors, each verb saying which it is on.
-    let listed: Vec<serde_json::Value> = crate::wire::CLI_VERBS
+    // The registrar surface rides on the self-description and nowhere else.
+    let mut body = Reply::rows(doors());
+    body.surface = Some(crate::wire::SURFACE);
+    emit(&mut out, how, &body)
+}
+
+/// Every verb this program answers, one row per verb per door. Three tables, not one: a verb
+/// reachable on two doors is two rows, because what a caller needs is where to knock and a
+/// deduplicated name says nothing about that.
+fn doors() -> Vec<serde_json::Value> {
+    crate::wire::CLI_VERBS
         .iter()
         .map(|(verb, about)| serde_json::json!({ "verb": verb, "about": about, "door": "cli" }))
         .chain(crate::wire::VERBS.iter().map(
             |(verb, about)| serde_json::json!({ "verb": verb, "about": about, "door": "socket" }),
         ))
-        .collect();
-    // The registrar surface rides on the self-description and nowhere else.
-    let mut body = Reply::rows(listed);
-    body.surface = Some(crate::wire::SURFACE);
-    emit(&mut out, how, &body)
+        .chain(crate::verbs::VERBS.iter().map(
+            |(verb, about)| serde_json::json!({ "verb": verb, "about": about, "door": "tool" }),
+        ))
+        .collect()
 }
 
 /// `melchior configure` — read config Lua on stdin and apply it.
@@ -286,6 +294,79 @@ mod tests {
         let text = String::from_utf8(out).expect("utf8");
         assert_eq!(text.lines().count(), 1, "one said, one line: {text:?}");
         assert!(text.contains("\"event\""), "untagged: {text}");
+    }
+}
+
+#[cfg(test)]
+mod door_tests {
+    use super::*;
+
+    fn rows() -> Vec<serde_json::Value> {
+        doors()
+    }
+
+    fn on(door: &str) -> Vec<String> {
+        rows()
+            .into_iter()
+            .filter(|row| row["door"] == serde_json::json!(door))
+            .filter_map(|row| row["verb"].as_str().map(ToOwned::to_owned))
+            .collect()
+    }
+
+    #[test]
+    fn every_row_names_one_of_the_three_doors_and_says_what_it_does() {
+        for row in rows() {
+            let door = row["door"].as_str().expect("a door");
+            assert!(
+                ["cli", "socket", "tool"].contains(&door),
+                "`{door}` is not a door FAMILY.md knows: {row}"
+            );
+            assert!(row["verb"].as_str().is_some_and(|v| !v.is_empty()), "{row}");
+            assert!(
+                row["about"].as_str().is_some_and(|v| !v.is_empty()),
+                "{row}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_tool_door_is_advertised_whole() {
+        // The eleven coordination verbs were dispatched and named on no door at all.
+        let listed = on("tool");
+        for (verb, _) in crate::verbs::VERBS {
+            assert!(
+                listed.iter().any(|named| named == verb),
+                "`{verb}` is answered by the tool and advertised nowhere: {listed:?}"
+            );
+        }
+        assert_eq!(listed.len(), crate::verbs::VERBS.len());
+    }
+
+    #[test]
+    fn each_door_advertises_its_own_table_and_nothing_is_deduplicated_away() {
+        assert_eq!(on("cli").len(), crate::wire::CLI_VERBS.len());
+        assert_eq!(on("socket").len(), crate::wire::VERBS.len());
+        // The verbs on more than one door: each is listed once per door it is actually on.
+        for verb in ["verbs", "needs", "inbox", "role", "stop", "status", "adopt"] {
+            let doors: Vec<&str> = ["cli", "socket", "tool"]
+                .into_iter()
+                .filter(|door| on(door).iter().any(|named| named == verb))
+                .collect();
+            assert!(
+                doors.len() > 1,
+                "`{verb}` is on one door only, so this test is watching the wrong verb"
+            );
+        }
+    }
+
+    #[test]
+    fn a_verb_a_door_does_not_answer_is_not_listed_on_it() {
+        // The tool's own vocabulary is not reachable by `melchior crew` and never claims to be.
+        for verb in ["crew", "claim", "claims", "release", "whoami", "announce"] {
+            assert!(!on("cli").contains(&(*verb).to_owned()), "{verb}");
+            assert!(!on("socket").contains(&(*verb).to_owned()), "{verb}");
+            assert!(on("tool").contains(&(*verb).to_owned()), "{verb}");
+        }
     }
 }
 
