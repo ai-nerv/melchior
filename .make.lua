@@ -220,16 +220,27 @@ make.alias("c", "compile")
 make.recipe{
   name = "gates",
   desc = "the architectural gates",
+  -- Globbed rather than listed. This named four gates one by one, and `tests.yml` globs and says
+  -- in as many words that a gate added to `scripts/` and forgotten here would be invisible --
+  -- which is what happened to `gate-sandbox` and `gate-independent` the moment they were written.
+  -- The three skipped have recipes of their own: two re-run the whole suite and one needs a built
+  -- binary, so a failure in them is attributable rather than reported as "the gates".
   run = function()
+    local mine = oslo.run{ "sh", "-c", "ls scripts/gate-*.sh", capture = true }
+    assert(mine.ok, "could not list scripts/")
+    local apart = { ["gate-hermetic"] = true, ["gate-family"] = true, ["gate-no-llm"] = true }
     local failed = {}
-    for _, name in ipairs({ "gate-cycles", "gate-file-size", "gate-modules", "gate-wire" }) do
-      -- Executed, not handed to `sh`: the shebang is the portability contract, and CI runs
-      -- these on a machine whose /bin/sh is dash.
-      local result = oslo.run{ "scripts/" .. name .. ".sh", capture = true }
-      print((result.ok and "\u{2713}  %s" or "\u{2717}  %s"):format(name))
-      if not result.ok then
-        failed[#failed + 1] = name
-        print(((result.out or "") .. (result.err or "")))
+    for path in (mine.out or ""):gmatch("[^\n]+") do
+      local name = path:match("([^/]+)%.sh$")
+      if name and not apart[name] then
+        -- Executed, not handed to `sh`: the shebang is the portability contract, and CI runs
+        -- these on a machine whose /bin/sh is dash.
+        local result = oslo.run{ path, capture = true }
+        print((result.ok and "\u{2713}  %s" or "\u{2717}  %s"):format(name))
+        if not result.ok then
+          failed[#failed + 1] = name
+          print(((result.out or "") .. (result.err or "")))
+        end
       end
     end
     assert(#failed == 0, ("%d gate(s) failed"):format(#failed))
