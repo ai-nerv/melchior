@@ -1,13 +1,6 @@
-//! `melchior auth` — signing in to a subscription.
-//!
-//! The command exists because there is nothing to export. An API key is a string a person can
-//! put in their shell profile; a subscription is a token you are given, that expires, and that
-//! has to be renewed on your behalf. So "how do I enable this" has a command for an answer,
-//! and this is it.
-//!
-//! The browser is opened rather than embedded. melchior has no business rendering a sign-in page,
-//! the person's own browser already holds the session they are signing in with, and a terminal
-//! program asking for a password is the shape of every credential-phishing attack there is.
+//! `melchior auth` — signing in to a subscription, whose token expires and is renewed on the
+//! person's behalf rather than being a string they can put in a shell profile. The sign-in page
+//! opens in the person's own browser and is never rendered here.
 
 use crate::mind::provider::endpoint::{Auth, Provider};
 use crate::mind::provider::oauth::{self, Pkce, Store};
@@ -29,8 +22,7 @@ pub async fn login(id: &str) -> Result<()> {
             requirement_or_nothing(&provider)
         );
     };
-    // A provider can be in the catalog before this build knows how to sign in to it. Saying so
-    // is better than a sign-in that fails against an endpoint somebody guessed.
+    // A provider can be in the catalog before this build knows how to sign in to it.
     let (Some(authorize_url), Some(token_url), Some(client_id)) = (
         authorize_url.as_ref(),
         token_url.as_ref(),
@@ -115,9 +107,7 @@ pub fn status() -> Result<()> {
         any = true;
         let state = match store.get(&provider.id) {
             None => "not signed in".to_owned(),
-            // Reported rather than hidden, because a stale token is not a problem: it is
-            // renewed on the next request. Saying "expired" would send people to a command
-            // they do not need to run.
+            // A stale token is renewed on the next request, so it is not reported as expired.
             Some(tokens) if tokens.is_stale(now) => "signed in (will renew)".to_owned(),
             Some(_) => "signed in".to_owned(),
         };
@@ -151,10 +141,7 @@ fn requirement_or_nothing(provider: &Provider) -> String {
     }
 }
 
-/// Ask the desktop to open a URL, and shrug if it cannot.
-///
-/// Best effort on purpose: the URL is printed above regardless, so a machine with no browser —
-/// a server over ssh, which is where this is most likely — loses nothing but a convenience.
+/// Ask the desktop to open a URL, and shrug if it cannot: the URL is printed above regardless.
 fn open_browser(url: &str) {
     if let Err(why) = std::process::Command::new("xdg-open")
         .arg(url)

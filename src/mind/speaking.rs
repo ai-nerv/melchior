@@ -1,13 +1,9 @@
-//! The mind on the command line, in either encoding.
+//! The mind on the command line, in either encoding: JSON to read, CBOR to keep a signature
+//! byte-for-byte.
 //!
-//! Two ways in and the same answers out of both. A sibling with a Lua VM dials the socket and
-//! gets JSON, because the family's stub cannot decode anything else. A sibling that would rather
-//! spawn than dial runs this, and picks: JSON to read, CBOR to keep a signature byte-for-byte.
-//!
-//! The reply is the family's shape either way — `{"ok":true,"n":N,"result":[…]}` — because a
-//! caller should not need a second parser to find out that a call was refused. A refusal is a
-//! reply with `ok:false`, and the exit status stays zero: a non-zero exit is how a program says
-//! it did not run, and melchior answering "no" is not that.
+//! The reply is the family's shape either way — `{"ok":true,"n":N,"result":[…]}`. A refusal is a
+//! reply with `ok:false` and the exit status stays zero, a non-zero exit being reserved for
+//! melchior not running at all.
 
 use crate::mind::catalog::Catalog;
 use crate::mind::wire::{Ask, Said};
@@ -35,9 +31,6 @@ impl As {
 }
 
 /// Write one reply in the family's shape.
-///
-/// # Errors
-/// When the answer will not encode, or stdout will not take it.
 pub fn reply<T: serde::Serialize>(
     out: &mut impl Write,
     how: As,
@@ -53,9 +46,6 @@ pub fn reply<T: serde::Serialize>(
 }
 
 /// Write one refusal, which is a reply and not an error.
-///
-/// # Errors
-/// When stdout will not take it.
 pub fn refuse(out: &mut impl Write, how: As, why: &str, fault: &str) -> std::io::Result<()> {
     let body = serde_json::json!({
         "ok": false,
@@ -78,9 +68,6 @@ fn emit(out: &mut impl Write, how: As, body: &serde_json::Value) -> std::io::Res
 }
 
 /// `melchior models` — what this machine could talk to.
-///
-/// # Errors
-/// When the answer will not be written.
 pub fn models(flags: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
     let how = As::asked(flags);
     let mut out = std::io::stdout().lock();
@@ -105,9 +92,6 @@ pub fn models(flags: &std::collections::BTreeMap<String, String>) -> std::io::Re
 /// The request arrives on stdin, in the encoding named by the flags. Every [`Said`] is written
 /// as it arrives — one line of JSON, or one CBOR value — so a caller sees the answer forming
 /// rather than waiting for the whole of it.
-///
-/// # Errors
-/// When the request will not decode, or the answer will not be written.
 pub fn ask(flags: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
     let how = As::asked(flags);
     let mut out = std::io::stdout().lock();
@@ -145,9 +129,6 @@ pub fn ask(flags: &std::collections::BTreeMap<String, String>) -> std::io::Resul
 }
 
 /// Write one [`Said`] as it happens.
-///
-/// # Errors
-/// When stdout will not take it.
 pub fn stream(out: &mut impl Write, how: As, said: &Said) -> std::io::Result<()> {
     match how {
         As::Json => {
@@ -164,24 +145,14 @@ pub fn stream(out: &mut impl Write, how: As, said: &Said) -> std::io::Result<()>
 }
 
 /// `melchior needs` — what this sibling wants to be told.
-///
-/// # Errors
-/// When the answer will not be written.
 pub fn needs(flags: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
     let how = As::asked(flags);
     let mut out = std::io::stdout().lock();
     reply(&mut out, how, &crate::mind::setup::needs())
 }
 
-/// `melchior acknowledge` — clear the installed packages, so their declarations may run.
-///
-/// A file in your own `plugin/` directory runs on sight: you put it there, and a prompt about
-/// your own configuration is one nobody reads. A package under `site/pack/` is somebody else's
-/// code that arrived by being fetched, so it runs once you have said it may — and stops running
-/// again the moment it changes.
-///
-/// # Errors
-/// When the manifest cannot be written, or the answer cannot be printed.
+/// `melchior acknowledge` — clear the packages under `site/pack/`, so their declarations may run
+/// until the file they were cleared for changes.
 pub fn acknowledge(flags: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
     let how = As::asked(flags);
     let dir = crate::mind::catalog::Catalog::dir();
@@ -212,17 +183,11 @@ pub fn acknowledge(flags: &std::collections::BTreeMap<String, String>) -> std::i
 }
 /// `melchior verbs` — what this instance answers.
 ///
-/// In the family reply shape. A self-description another program cannot parse is one only a
-/// person can use, which is exactly the situation the contract exists to end — this printed two
-/// columns of text until the conformance gate asked it for JSON and got prose.
-///
-/// # Errors
-/// When the answer cannot be written.
+/// In the family reply shape, so another program can parse the self-description.
 pub fn verbs(flags: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
     let how = As::asked(flags);
     let mut out = std::io::stdout().lock();
-    // Both doors, each verb saying which it is on. A caller that asks the socket for a command
-    // line verb gets told what it is rather than refused as though it did not exist.
+    // Both doors, each verb saying which it is on.
     let listed: Vec<serde_json::Value> = crate::wire::CLI_VERBS
         .iter()
         .map(|(verb, about)| serde_json::json!({ "verb": verb, "about": about, "door": "cli" }))
@@ -230,8 +195,7 @@ pub fn verbs(flags: &std::collections::BTreeMap<String, String>) -> std::io::Res
             |(verb, about)| serde_json::json!({ "verb": verb, "about": about, "door": "socket" }),
         ))
         .collect();
-    // The one verb that says which registrar surface this program offers -- a fact about the
-    // program, not about the reply, so it rides on the self-description and nowhere else.
+    // The registrar surface rides on the self-description and nowhere else.
     let body = serde_json::json!({
         "ok": true,
         "family": crate::wire::FAMILY,
@@ -243,9 +207,6 @@ pub fn verbs(flags: &std::collections::BTreeMap<String, String>) -> std::io::Res
 }
 
 /// `melchior configure` — read config Lua on stdin and apply it.
-///
-/// # Errors
-/// When the chunk cannot be read, or the answer cannot be written.
 pub fn configure(flags: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
     let how = As::asked(flags);
     let mut out = std::io::stdout().lock();
@@ -342,10 +303,7 @@ mod family_tests {
 
     #[test]
     fn a_one_shot_reply_says_which_wire_it_is() {
-        // The socket has carried this since the version check landed; these did not, so the only
-        // replies in the family with no version on them were the ones a coordinator reads first.
-        // A missing `family` is taken for a peer older than the check — exactly the wrong thing
-        // to say about the current build.
+        // A missing `family` is taken for a peer older than the version check.
         let mut out = Vec::new();
         reply(&mut out, As::Json, &["a"]).expect("write");
         let value: serde_json::Value = serde_json::from_slice(&out).expect("decode");

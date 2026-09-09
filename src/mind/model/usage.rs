@@ -2,10 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Tokens consumed by one request.
-///
-/// Cache reads and writes are counted apart from ordinary input because they are priced apart,
-/// and because their ratio is the only way to tell whether caching is working.
+/// Tokens consumed by one request, with cache reads and writes counted apart from ordinary input
+/// because they are priced apart.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     /// Prompt tokens billed at the input rate.
@@ -60,11 +58,8 @@ pub struct Cost {
     /// Completion tokens.
     #[serde(default)]
     pub output: f64,
-    /// Prompt tokens served from cache, usually far cheaper than `input`.
-    ///
-    /// Defaults to zero rather than to `input`: a provider that does not price caching
-    /// separately is not the same as one whose cache is free, and only the catalog knows
-    /// which this is.
+    /// Prompt tokens served from cache, usually far cheaper than `input`; defaults to zero rather
+    /// than to `input`, so a provider that does not price caching separately must say so.
     #[serde(default)]
     pub cache_read: f64,
     /// Prompt tokens written to cache, usually dearer than `input`.

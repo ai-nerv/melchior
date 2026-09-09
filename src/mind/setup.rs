@@ -1,24 +1,11 @@
-//! Being told how to behave, by whoever is coordinating.
-//!
-//! melchior runs alone perfectly well and reads its own `config/` when it does. Under a
-//! coordinator it should not: magi decides, and two configurations that have to agree are one
-//! that will not. So this is the other way in — the same Lua, the same VM, the same registrars,
-//! arriving down a socket instead of off a disk.
-//!
-//! **What it takes is declared, not guessed.** [`needs`] is the list a coordinator reads to
-//! know what to send; anything else sent is refused by name rather than ignored, because a
-//! setting that silently does nothing is the worst kind of typo.
-//!
-//! What is *asked* of melchior per turn — which model, how much thinking, how many tokens —
-//! travels on an `Ask` and is not configuration. These are the standing answers: what to do
-//! when a turn does not say.
+//! Being told how to behave, by whoever is coordinating: the same Lua, VM and registrars as
+//! melchior's own `config/`, arriving down a socket instead of off a disk. [`needs`] is the list
+//! a coordinator reads to know what to send, and anything else sent is refused by name rather
+//! than ignored. What is asked per turn travels on an `Ask`; these are the standing answers.
 
 use crate::mind::wire::{Applied, Kind, Need, Refused};
 
-/// What melchior wants to be told.
-///
-/// Short on purpose. A coordinator that had to fill in twenty fields before starting one would
-/// be a coordinator nobody uses, so everything here has a default and nothing is required.
+/// What melchior wants to be told. Everything here has a default and nothing is required.
 #[must_use]
 pub fn needs() -> Vec<Need> {
     vec![
@@ -86,23 +73,13 @@ pub fn needs() -> Vec<Need> {
 
 /// The settings a coordinator may set in a config chunk, beside the registrars.
 ///
-/// Narrower than [`needs`], and on purpose: two things it declares do not arrive by assignment.
-/// A registrar reaches the VM by being called, and `agent_talk` reaches [`crate::policy`] in the
-/// environment a session is spawned with — a chunk could only set it for the process running the
-/// chunk, which is not the process holding the socket.
+/// Narrower than [`needs`]: a registrar reaches the VM by being called, and `agent_talk` reaches
+/// [`crate::policy`] in the environment a session is spawned with, not by assignment here.
 const SETTINGS: &[&str] = &["model", "thinking", "max_tokens", "discover", "role"];
 
-/// What a config assigned to one setting, without building the model catalog.
-///
-/// [`crate::mind::catalog::Catalog::load`] is the full read and would answer this too, at the
-/// cost of running eight hundred lines of shipped provider descriptions and everything installed
-/// beside them. Binding a socket must not depend on the model layer loading cleanly: melchior
-/// answers for its session whether or not a provider file compiles, and a role that could not be
-/// read because somebody's `apis.lua` raised would be a session with no word for what it does.
-///
-/// So: what a person or a coordinator declared, and nothing shipped. A file that raises costs
-/// itself and nothing else, for the same reason it does in the catalog — it is somebody else's
-/// package, and refusing to start over it would make installing one a risk rather than a try.
+/// What a person or a coordinator assigned to one setting, without building the model catalog:
+/// binding a socket must not depend on the model layer loading cleanly, so nothing shipped is
+/// read here and a file that raises costs only itself.
 #[must_use]
 pub fn assigned(name: &str) -> Option<serde_json::Value> {
     let dir = crate::mind::catalog::Catalog::dir();
@@ -124,31 +101,16 @@ pub fn assigned(name: &str) -> Option<serde_json::Value> {
 
 /// Run a chunk of config Lua and say what it did.
 ///
-/// The chunk is run in a VM of its own rather than the one a turn will use: a turn builds its
-/// VM when it runs, from the configuration standing at that moment, so what this changes is
-/// what the *next* turn is built from. Running it into a live VM would configure a turn already
-/// in flight, which is a turn nobody asked for.
-///
-/// # Errors
-/// When the chunk will not compile or raises. Fatal rather than partial: a description that did
-/// not run has expressed no intention, and applying half of one is worse than applying none.
+/// The chunk runs in a VM of its own, so what it changes is what the *next* turn is built from.
+/// A chunk that will not compile or raises is an error and applies nothing.
 pub fn configure(source: &str) -> Result<Applied, String> {
     configure_into(&given(), source)
 }
 
-/// The same, kept somewhere named.
-///
-/// The path is a parameter so a test can own one. It was process-wide, and tests running
-/// together deleted each other's file — the same shape as two coordinators sharing a melchior,
-/// which is a thing neither should do.
-///
-/// # Errors
-/// As [`configure`].
+/// The same, with the path a parameter so a test can own one rather than share the live file.
 pub fn configure_into(path: &std::path::Path, source: &str) -> Result<Applied, String> {
     let mut engine = crate::mind::lua::engine::Engine::new();
-    // What the VM holds before the chunk runs. The module carries entries of its own — `ui`,
-    // `self` — and a hardcoded list of those would be a list to keep in step with the VM. The
-    // *difference* is what the coordinator said, whatever the VM happens to install.
+    // What the VM holds before the chunk runs; the difference is what the coordinator said.
     engine.harvest();
     let before = engine.config().settings.clone();
 
@@ -160,8 +122,7 @@ pub fn configure_into(path: &std::path::Path, source: &str) -> Result<Applied, S
     let config = engine.config();
     let mut applied = Applied::default();
     for name in SETTINGS {
-        // Changed, not merely present. A VM that installs a setting of its own would otherwise
-        // report it as something the coordinator said.
+        // Changed, not merely present.
         if config.get(name).is_some() && config.get(name) != before.get(*name) {
             applied.set.push((*name).to_owned());
         }
@@ -172,9 +133,7 @@ pub fn configure_into(path: &std::path::Path, source: &str) -> Result<Applied, S
         applied.set.push(format!("provider ({declared})"));
     }
 
-    // Anything else the chunk set is refused by name. Silence here is how a coordinator's typo
-    // becomes an afternoon: the setting reads as accepted and does nothing for the rest of the
-    // session.
+    // Anything else the chunk set is refused by name.
     for name in config.settings.keys() {
         if !before.contains_key(name) && !SETTINGS.contains(&name.as_str()) {
             applied.refused.push(Refused {
@@ -186,19 +145,15 @@ pub fn configure_into(path: &std::path::Path, source: &str) -> Result<Applied, S
     }
     drop(config);
 
-    // Written where the next VM will read it, so it outlives this call. A setting held only in
-    // memory would be lost the moment a turn built its own VM, which is every turn.
+    // Written where the next VM will read it, so it outlives this call.
     if applied.whole() {
         remember(path, source)?;
     }
     Ok(applied)
 }
 
-/// Where configuration sent over the wire is kept.
-///
-/// A file, in the runtime directory rather than the config directory: this is what a coordinator
-/// said for as long as it is running, not something a person edits or should find later. It goes
-/// when the machine restarts, which is exactly the lifetime a coordinator's instructions have.
+/// Where configuration sent over the wire is kept: the runtime directory rather than the config
+/// directory, so it goes when the machine restarts.
 #[must_use]
 pub fn given() -> std::path::PathBuf {
     let base = std::env::var_os("XDG_RUNTIME_DIR")
@@ -214,19 +169,13 @@ fn remember(path: &std::path::Path, source: &str) -> Result<(), String> {
     std::fs::write(path, source).map_err(|why| why.to_string())
 }
 
-/// Forget what a coordinator said.
-///
-/// So a melchior restarted without one reads its own files again rather than yesterday's
-/// instructions.
+/// Forget what a coordinator said, so a restart reads melchior's own files again.
 pub fn forget() {
     forget_at(&given());
 }
 
-/// The same, for a named file.
-///
-/// The other half of [`configure_into`], and for the same reason: [`given`] is one path shared by
-/// every melchior this user runs, so a test that forgot *it* would delete the settings of
-/// whatever session happens to be running -- and two tests doing it would delete each other's.
+/// The same, for a named file: [`given`] is one path shared by every melchior this user runs, so
+/// a test must forget its own rather than that one.
 pub fn forget_at(path: &std::path::Path) {
     let _ = std::fs::remove_file(path);
 }
@@ -243,7 +192,6 @@ mod tests {
 
     #[test]
     fn everything_it_needs_has_a_default_or_is_optional() {
-        // A coordinator must be able to start one by saying nothing at all.
         for need in needs() {
             assert!(!need.required, "{} is required: {need:?}", need.name);
         }
@@ -251,8 +199,6 @@ mod tests {
 
     #[test]
     fn what_it_declares_is_what_it_takes() {
-        // The list a coordinator reads and the list `configure` accepts are the same list, or
-        // the declaration is a lie a coordinator finds out about one setting at a time.
         let declared: Vec<String> = needs().into_iter().map(|need| need.name).collect();
         for name in SETTINGS {
             assert!(declared.contains(&(*name).to_owned()), "{name} undeclared");
@@ -261,10 +207,8 @@ mod tests {
 
     #[test]
     fn the_setting_every_refusal_names_is_one_a_coordinator_can_find() {
-        // `agent_talk` decides who may reach whom and is named by name in every refusal it
-        // causes, and it was declared nowhere — so a coordinator reading `needs` could see the
-        // refusal, read the setting out of it, and still have no way to know it was melchior's
-        // to set or what the levels were called.
+        // `agent_talk` is named in every refusal it causes, so `needs` must name it and its
+        // levels too.
         let declared = needs();
         let talk = declared
             .iter()
@@ -299,9 +243,7 @@ mod tests {
 
     #[test]
     fn a_chunk_that_will_not_run_is_an_error_rather_than_a_partial_apply() {
-        // The file this call was given, not the shared one. Asking after `given()` here was
-        // asking whether *some other* melchior had been configured: it passed while nothing
-        // else on the machine had run, and failed the moment a real session did.
+        // The file this call was given, not the shared one `given()` answers.
         let path = mine("broken");
         let why = configure_into(&path, "this is not lua at all !!").expect_err("must fail");
         assert!(!why.is_empty());
@@ -343,9 +285,6 @@ mod tests {
 
     #[test]
     fn forgetting_is_aimed_at_one_file_and_not_at_the_shared_one() {
-        // What the bug was. Every one of these tests called the no-argument `forget`, which
-        // deletes the path a *running* melchior reads -- so the suite quietly took the
-        // settings out from under whatever session the person had open.
         let path = mine("aimed");
         configure_into(&path, r#"melchior.thinking = "low""#).expect("runs");
         let live = given();

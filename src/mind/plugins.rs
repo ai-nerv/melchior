@@ -1,21 +1,9 @@
-//! Where declarations come from, and in what order.
+//! Where declarations come from, and in what order: neovim's model, unchanged — a runtimepath of
+//! roots, `plugin/` run at startup, `after/` last.
 //!
-//! neovim's model, unchanged: a runtimepath of roots, `plugin/` run at startup, `after/` last.
-//! Twenty years of real plugins have been written against it and most people arriving already
-//! know it. Deviating buys nothing and costs everyone the transfer.
-//!
-//! **The mechanism is balthasar's, generalised.** It was written there, tested there, and named
-//! as one program's arrangement rather than the family's — so the one program a person could
-//! extend by dropping a file in a directory was the one nobody would think to look at for it.
-//!
-//! **The shipped files and the config's own copies stay exactly where they were.** `apis.lua` and
-//! `providers.lua` are compiled in, and a file of the same name in the config directory layers
-//! over each — see [`super::catalog`]. This adds the directories after them: somewhere for a wire
-//! protocol somebody else wrote to live that is not "edit the file the binary also ships".
-//!
-//! **The sandbox covers all of it.** A discovered file runs in the same VM as the shipped ones,
-//! and the removals happen before any of them run, so dropping a file in a directory extends
-//! melchior and cannot spawn a process.
+//! `apis.lua` and `providers.lua` are not part of it; they are compiled in and layered by
+//! [`super::catalog`]. A discovered file runs in the same sandboxed VM as the shipped ones, with
+//! the removals already done before any of them run.
 
 use std::path::{Path, PathBuf};
 
@@ -24,12 +12,8 @@ use std::path::{Path, PathBuf};
 pub enum Trust {
     /// The owner's own. Runs on sight.
     Owner,
-    /// A package installed under `site/`, which runs once it has been acknowledged.
-    ///
-    /// The distinction is not about what the file can express; it is about who wrote it. A file
-    /// in your own `plugin/` directory is one you put there, and asking you to confirm your own
-    /// configuration is a prompt nobody reads. A package is somebody else's code that arrived by
-    /// being fetched, and it can change under you between one run and the next.
+    /// A package installed under `site/`, which runs once it has been acknowledged and stops
+    /// again the moment it changes.
     Installed,
 }
 
@@ -51,14 +35,8 @@ pub struct Roots {
 }
 
 impl Roots {
-    /// The usual roots, for a configuration directory the caller has already decided on.
-    ///
-    /// Handed the directory rather than looking it up, so what this answers is a function of what
-    /// it is given — reading the environment inside would make every test of the order depend on
-    /// the machine it ran on.
-    ///
-    /// No `given` root: what a coordinator says arrives through `configure`, which is settings
-    /// rather than declarations, and melchior has no equivalent of casper's `load`.
+    /// The usual roots, for a configuration directory the caller has already decided on. There is
+    /// no `given` root: what a coordinator says arrives through `configure` as settings.
     #[must_use]
     pub fn at(config: &Path) -> Self {
         Self {
@@ -88,8 +66,7 @@ fn data_home() -> Option<PathBuf> {
 ///   <config>/after/plugin/*.lua        the last word
 /// ```
 ///
-/// `apis.lua` and `providers.lua` are not here: they are compiled in and layered by the caller,
-/// and a second copy of that decision would be two places to change it.
+/// `apis.lua` and `providers.lua` are not here: they are compiled in and layered by the caller.
 #[must_use]
 pub fn runtimepath(roots: &Roots) -> Vec<(PathBuf, Trust)> {
     let mut out = Vec::new();
@@ -112,8 +89,7 @@ pub fn runtimepath(roots: &Roots) -> Vec<(PathBuf, Trust)> {
         }
     }
 
-    // `after/` runs last, which is what lets it win: the registrar replaces on `(registrar, id)`,
-    // so whoever declares an api or a provider last decides what that name means.
+    // `after/` runs last, and the registrar replaces on `(registrar, id)`, so it wins.
     if let Some(config) = &roots.config {
         out.extend(
             lua_files(&config.join("after/plugin"))
@@ -124,10 +100,8 @@ pub fn runtimepath(roots: &Roots) -> Vec<(PathBuf, Trust)> {
     out
 }
 
-/// Every `.lua` directly in a directory, alphabetically.
-///
-/// Alphabetical rather than by whatever the filesystem answers: a load order that changes between
-/// machines is a catalog that behaves differently on each of them.
+/// Every `.lua` directly in a directory, sorted rather than left in the order the filesystem
+/// answers, so the load order is the same on every machine.
 fn lua_files(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -176,8 +150,6 @@ mod tests {
 
     #[test]
     fn dropping_a_file_in_plugin_is_enough_to_declare_a_protocol() {
-        // What P3 made cheap and this makes reachable: adding one wire protocol was eight hundred
-        // lines of fork, then ten lines in `apis.lua`, and is now ten lines in a file of its own.
         let dir = Scratch::new("melchior-rtp", "dropped");
         touch(&dir.join("plugin/mine.lua"));
 
@@ -195,7 +167,6 @@ mod tests {
 
     #[test]
     fn the_order_is_plugin_then_pack_then_after() {
-        // The registrar replaces on `(registrar, id)`, so this list *is* the precedence.
         let dir = Scratch::new("melchior-rtp", "order");
         let config = dir.join("config");
         let site = dir.join("site");
@@ -213,7 +184,6 @@ mod tests {
             .collect();
         assert_eq!(names, ["a.lua", "b.lua", "c.lua"]);
 
-        // And which of them somebody else wrote. Only the package under `site/` needs clearing.
         let theirs: Vec<_> = files
             .iter()
             .filter(|(_, trust)| trust.needs_acknowledging())
@@ -224,7 +194,6 @@ mod tests {
 
     #[test]
     fn nothing_installed_is_no_files_rather_than_an_error() {
-        // The ordinary case for everybody who has not used this.
         let dir = Scratch::new("melchior-rtp", "empty");
         let files = runtimepath(&Roots {
             config: Some(dir.join("nowhere")),
@@ -235,7 +204,6 @@ mod tests {
 
     #[test]
     fn only_lua_files_are_picked_up() {
-        // A README or an editor's backup in a plugin directory is not a declaration.
         let dir = Scratch::new("melchior-rtp", "kinds");
         touch(&dir.join("plugin/real.lua"));
         touch(&dir.join("plugin/README.md"));

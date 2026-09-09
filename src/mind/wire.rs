@@ -1,71 +1,34 @@
-//! The contract for asking a mind a question — melchior's copy.
-//!
-//! The same shapes magi holds, written out again rather than shared. A sibling that depended on
-//! a harness's crate to speak to it would be a component of that harness wearing a socket. The
-//! wire is the contract; these are two implementations of it, and the tests on both sides are
-//! what keep them one shape.
-//!
-//! magi does not talk to models. melchior does: it owns the protocols, the credentials and the
-//! HTTP, and this is the vocabulary magi asks it in. Everything here is deliberately neutral
-//! about *which* model — a card describes one, an [`Ask`] names one, and neither knows what a
-//! provider is.
-//!
-//! # Two encodings, one shape
+//! The contract for asking a mind a question — melchior's copy of the shapes magi holds.
 //!
 //! Every type here is `Serialize + Deserialize` with no borrowed data and no untagged enums, so
-//! the same value round-trips through JSON and through CBOR. JSON is what a person reads and
-//! what a Lua sibling speaks — the family stub cannot decode CBOR. CBOR is what magi and
-//! melchior use between themselves once neither needs to read it: it keeps byte strings and the
-//! integer/float split that JSON flattens, and a signature is exactly the sort of opaque bytes
-//! JSON would quietly mangle.
-//!
-//! Both are offered because neither is right everywhere, and a family whose members guess is a
-//! family that fails on the first signature.
-//!
-//! # Streaming
-//!
-//! An [`Ask`] answers with many [`Said`], not one. The family socket is request and reply, so
-//! the stream travels on melchior's pipe instead: one JSON object per line, in order, ending in
-//! [`Said::Stop`] or [`Said::Failed`]. A caller that sees neither has lost the mind, which is
-//! the only failure it must tell apart from a refusal.
+//! the same value round-trips through JSON and through CBOR. A Lua sibling is answered in JSON
+//! because the family stub cannot decode CBOR; magi and melchior use CBOR between themselves,
+//! which keeps byte strings and the integer/float split JSON flattens. An [`Ask`] answers with
+//! many [`Said`] on melchior's pipe rather than the request-and-reply socket: one JSON object per
+//! line, in order, ending in [`Said::Stop`] or [`Said::Failed`].
 
 use crate::mind::model::{Context, StopReason, ThinkingLevel, Usage};
 use serde::{Deserialize, Serialize};
 
 /// One model, as melchior describes it.
-///
-/// What a picker shows and what an [`Ask`] names. `api` is the *interface* — which wire protocol
-/// this model is spoken to over — and it is the field that makes the rest of it neutral: magi
-/// never learns what an Anthropic request looks like, only that this model wants `anthropic`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Card {
     /// How an [`Ask`] names it: `provider/model`.
     pub id: String,
-    /// Who serves it.
     pub provider: String,
-    /// What the provider calls it.
     pub name: String,
-    /// The wire protocol it is spoken to over — `anthropic`, `openai`, `google`.
-    ///
-    /// The interface, not the vendor. Two providers reselling one model may speak different
-    /// protocols, and one provider may speak several.
+    /// The wire protocol it is spoken to over — `anthropic`, `openai`, `google` — not the vendor.
     pub api: String,
-    /// How much it will read, in tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
-    /// How much it will write, when it says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output: Option<u64>,
     /// Whether it reasons, so a caller knows whether asking for thinking means anything.
     #[serde(default)]
     pub reasons: bool,
-    /// Whether melchior could talk to it right now.
     #[serde(default)]
     pub ready: bool,
-    /// What it would need to become ready, when it is not.
-    ///
-    /// A variable name, not a value. Nothing here ever carries a credential: melchior resolves
-    /// those and magi has no reason to see one.
+    /// What it would need to become ready: the name of a variable, never a credential value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs: Option<String>,
 }
@@ -73,10 +36,8 @@ pub struct Card {
 /// What a caller wants beyond the conversation.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Wants {
-    /// How much reasoning to ask for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingLevel>,
-    /// Cap the answer below the model's own maximum.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
     /// A JSON Schema the answer must satisfy, and what to call it.
@@ -84,12 +45,10 @@ pub struct Wants {
     pub schema: Option<Schema>,
 }
 
-/// A named JSON Schema an answer must satisfy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Schema {
-    /// What to call it. Some providers require a name and none of them show it to anybody.
+    /// What to call it; some providers require a name and none of them show it to anybody.
     pub name: String,
-    /// The schema itself.
     pub schema: serde_json::Value,
 }
 
@@ -100,23 +59,14 @@ pub struct Ask {
     pub model: String,
     /// The conversation, the system prompt, and the tools that may be called.
     pub context: Context,
-    /// Everything else the caller wants.
     #[serde(default)]
     pub wants: Wants,
     /// The caller's own name for this turn, quoted back on every [`Said`].
-    ///
-    /// So a broker driving more than one turn can tell the streams apart without a connection
-    /// each.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub about: String,
 }
 
-/// Why a mind could not answer.
-///
-/// The same seven a provider's own classifier produces, carried across so a broker can act on
-/// them rather than only report them. `Overflow` is the one that earns its place on its own:
-/// it is answered by compacting the conversation and asking again, and a broker told only
-/// "it failed, try later" would give up on a turn that a summary would have fixed.
+/// Why a mind could not answer, in the terms a broker can act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Refusal {
@@ -132,7 +82,6 @@ pub enum Refusal {
     Invalid,
     /// The context window overflowed. Compact and ask again.
     Overflow,
-    /// Unrecognised.
     Unknown,
 }
 
@@ -145,55 +94,37 @@ impl Refusal {
 }
 
 /// One thing that happened while an answer streamed.
-///
-/// Smaller than any protocol's own event set on purpose: a broker wants to know that text
-/// arrived, not that a content block of index three opened. What an adapter remembers between
-/// events stays on melchior's side, where the adapter is.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "event")]
 pub enum Said {
     /// Answer text.
     Text {
-        /// The text that arrived.
         text: String,
     },
     /// Reasoning text, which is shown differently and sent back differently.
     Thinking {
-        /// The reasoning that arrived.
         text: String,
     },
-    /// Opaque provider state for the block being streamed.
-    ///
-    /// Replayed verbatim on the next request or the provider refuses it. Carried as a string
-    /// here because that is what every provider issues; CBOR keeps it byte-exact and JSON keeps
-    /// it because it is already text.
+    /// Opaque provider state for the block being streamed, replayed verbatim on the next request
+    /// or the provider refuses it.
     Signature {
-        /// The token standing for reasoning already done.
         signature: String,
     },
-    /// A tool call began.
     ToolCallStart {
         /// Provider-issued identity, which the result must quote back.
         id: String,
-        /// Which tool.
         name: String,
     },
     /// Arguments for the tool call in progress, as raw JSON text.
     ToolCallArgs {
-        /// The fragment that arrived.
         args: String,
     },
     /// What the turn cost. Arrives at its own pace, and more than once.
     Spent {
-        /// Tokens, by kind.
         usage: Usage,
     },
-    /// An attempt failed and another is starting.
-    ///
-    /// Everything said so far belongs to the attempt that failed and is retracted by this: half
-    /// an answer concatenated with a whole one parses as neither. Reported *during* the wait
-    /// rather than after it, because the whole value of saying "retrying" is saying it while
-    /// somebody is watching a spinner and wondering whether it has hung.
+    /// An attempt failed and another is starting; everything said so far belongs to the attempt
+    /// that failed and is retracted by this.
     Retrying {
         /// Which attempt just failed, counting from one.
         attempt: u32,
@@ -201,31 +132,21 @@ pub enum Said {
         of: u32,
         /// How long before the next one, in seconds.
         seconds: f64,
-        /// What went wrong, for the person watching.
         why: String,
     },
-    /// The turn finished, and why.
     Stop {
-        /// What ended it.
         reason: StopReason,
     },
-    /// The turn did not finish.
-    ///
-    /// Distinct from [`Said::Stop`] with an error reason: this is melchior saying it could not
-    /// run the turn at all, which is a different thing from a model that answered badly.
+    /// melchior could not run the turn at all, as against a model that answered badly.
     Failed {
-        /// What went wrong, in a sentence.
         message: String,
-        /// Which kind of failure, so a broker can act rather than only report.
         why: Refusal,
     },
 }
 
 impl Said {
-    /// Whether this ends the stream.
-    ///
-    /// A caller reads until one of these. Anything after it belongs to another turn, and
-    /// anything instead of it means the mind was lost rather than that it refused.
+    /// Whether this ends the stream: a caller reads until one of these, and a stream ending
+    /// without one means the mind was lost rather than that it refused.
     #[must_use]
     pub fn is_last(&self) -> bool {
         matches!(self, Said::Stop { .. } | Said::Failed { .. })
@@ -345,18 +266,12 @@ mod tests {
         };
         let text = serde_json::to_string(&card).expect("encode");
         assert_eq!(serde_json::from_str::<Card>(&text).expect("decode"), card);
-        // The variable is named; its value is melchior's and never travels.
         assert!(text.contains("OPENROUTER_API_KEY"));
         assert!(!text.contains("sk-"), "a card must not carry a credential");
     }
 }
 
 /// The same shapes, through CBOR.
-///
-/// Its own module because the claim in this file's header — one shape, two encodings — is worth
-/// nothing unless something checks it. A field that JSON tolerates and CBOR does not, or an
-/// enum representation that only survives one of them, would otherwise be found by whichever
-/// sibling happened to pick the other.
 #[cfg(test)]
 mod cbor_tests {
     use super::tests::an_ask;
@@ -387,8 +302,6 @@ mod cbor_tests {
 
     #[test]
     fn a_signature_comes_back_byte_for_byte() {
-        // The reason CBOR is offered at all: this is opaque provider state, and a next request
-        // carrying anything but these exact bytes is refused.
         let said = Said::Signature {
             signature: "Er cB\u{1}\u{2}\u{7f} +/=".into(),
         };
@@ -398,21 +311,14 @@ mod cbor_tests {
     }
 }
 
-/// What kind of value a setting takes.
-///
-/// Deliberately coarse. This says enough for a coordinator to send the right shape and for a
-/// person to read the list; anything finer would be a schema language, and the sibling is going
-/// to validate what it receives regardless.
+/// What kind of value a setting takes, coarsely enough for a coordinator to send the right shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
-    /// A string.
     Text,
-    /// A number.
     Number,
-    /// True or false.
     Flag,
-    /// A table — a list or a map, and the sibling says which in `about`.
+    /// A list or a map, and the sibling says which in `about`.
     Table,
 }
 
@@ -421,15 +327,10 @@ pub enum Kind {
 pub struct Need {
     /// What to set, as the config names it: `thinking`, `retention.days`.
     pub name: String,
-    /// What sort of value it takes.
     pub kind: Kind,
     /// One line, for a person reading the list.
     pub about: String,
     /// Whether the sibling cannot work without it.
-    ///
-    /// Most settings are not: a sibling with a sensible default should say so rather than
-    /// demand an answer, and a coordinator that had to fill in twenty fields to start one would
-    /// be a coordinator nobody uses.
     #[serde(default)]
     pub required: bool,
     /// What it does when nothing is said, when that is expressible.
@@ -437,17 +338,11 @@ pub struct Need {
     pub default: Option<serde_json::Value>,
 }
 
-/// What a `configure` call did.
-///
-/// Named rather than counted: "3 settings applied" cannot be checked against what was sent, and
-/// the case that matters is the one where a coordinator sent something the sibling does not
-/// take. That is a refusal with a reason, never silence.
+/// What a `configure` call did, naming the settings rather than counting them.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Applied {
-    /// Settings that took effect, by name.
     #[serde(default)]
     pub set: Vec<String>,
-    /// Settings that were sent and not taken, with why.
     #[serde(default)]
     pub refused: Vec<Refused>,
 }
@@ -463,8 +358,6 @@ impl Applied {
 /// One setting a sibling would not take.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Refused {
-    /// What was sent.
     pub name: String,
-    /// Why it was not taken.
     pub why: String,
 }
