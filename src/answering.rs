@@ -96,15 +96,15 @@ pub enum Then {
 pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then) {
     // Answered before any permission check, so a client never has to guess the vocabulary.
     if call.call == "verbs" {
-        return (
-            Reply::of(serde_json::json!(
-                VERBS
-                    .iter()
-                    .map(|(name, said)| serde_json::json!({"verb": name, "does": said}))
-                    .collect::<Vec<_>>()
-            )),
-            Then::Nothing,
-        );
+        let mut listed = Reply::of(serde_json::json!(
+            VERBS
+                .iter()
+                .map(|(name, said)| serde_json::json!({"verb": name, "does": said}))
+                .collect::<Vec<_>>()
+        ));
+        // What a plugin writes against, on the self-description and nowhere else.
+        listed.surface = Some(crate::wire::SURFACE);
+        return (listed, Then::Nothing);
     }
     // Hands over the client library, before the permission check as `verbs` is. Safe to answer a
     // stranger: it is a file this crate ships, and it says nothing about *this* session.

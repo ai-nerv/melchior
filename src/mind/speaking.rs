@@ -7,6 +7,7 @@
 
 use crate::mind::catalog::Catalog;
 use crate::mind::wire::{Ask, Said};
+use crate::wire::{Fault, Reply};
 use std::io::Write;
 
 /// Which encoding an answer goes out in.
@@ -36,29 +37,25 @@ pub fn reply<T: serde::Serialize>(
     how: As,
     values: &[T],
 ) -> std::io::Result<()> {
-    let body = serde_json::json!({
-        "ok": true,
-        "family": crate::wire::FAMILY,
-        "n": values.len(),
-        "result": values.iter().map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null)).collect::<Vec<_>>(),
-    });
-    emit(out, how, &body)
+    let rows = values
+        .iter()
+        .map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null))
+        .collect();
+    emit(out, how, &Reply::rows(rows))
 }
 
 /// Write one refusal, which is a reply and not an error.
-pub fn refuse(out: &mut impl Write, how: As, why: &str, fault: &str) -> std::io::Result<()> {
-    let body = serde_json::json!({
-        "ok": false,
-        "family": crate::wire::FAMILY,
-        "error": why,
-        "fault": fault,
-    });
-    emit(out, how, &body)
+pub fn refuse(out: &mut impl Write, how: As, why: &str, fault: Fault) -> std::io::Result<()> {
+    emit(out, how, &Reply::no(why, fault))
 }
 
-fn emit(out: &mut impl Write, how: As, body: &serde_json::Value) -> std::io::Result<()> {
+/// The one place a command-line answer becomes bytes, so both doors carry the same [`Reply`].
+fn emit(out: &mut impl Write, how: As, body: &Reply) -> std::io::Result<()> {
     match how {
-        As::Json => writeln!(out, "{body}"),
+        As::Json => {
+            let line = serde_json::to_string(body).map_err(std::io::Error::other)?;
+            writeln!(out, "{line}")
+        }
         As::Cbor => {
             let mut bytes = Vec::new();
             ciborium::into_writer(body, &mut bytes).map_err(std::io::Error::other)?;
@@ -83,7 +80,7 @@ pub fn models(flags: &std::collections::BTreeMap<String, String>) -> std::io::Re
             }
             reply(&mut out, how, &cards)
         }
-        Err(why) => refuse(&mut out, how, &why.to_string(), "refused"),
+        Err(why) => refuse(&mut out, how, &why.to_string(), Fault::Refused),
     }
 }
 
@@ -108,7 +105,7 @@ pub fn ask(flags: &std::collections::BTreeMap<String, String>) -> std::io::Resul
             &mut out,
             how,
             &format!("that is not an ask: {why}"),
-            "refused",
+            Fault::Refused,
         );
     };
 
@@ -178,7 +175,7 @@ pub fn acknowledge(flags: &std::collections::BTreeMap<String, String>) -> std::i
                 .map(|(path, _)| serde_json::json!({ "acknowledged": path.display().to_string() }))
                 .collect::<Vec<_>>(),
         ),
-        Err(why) => refuse(&mut out, how, &why, "refused"),
+        Err(why) => refuse(&mut out, how, &why, Fault::Refused),
     }
 }
 /// `melchior verbs` — what this instance answers.
@@ -196,13 +193,8 @@ pub fn verbs(flags: &std::collections::BTreeMap<String, String>) -> std::io::Res
         ))
         .collect();
     // The registrar surface rides on the self-description and nowhere else.
-    let body = serde_json::json!({
-        "ok": true,
-        "family": crate::wire::FAMILY,
-        "surface": crate::wire::SURFACE,
-        "n": listed.len(),
-        "result": listed,
-    });
+    let mut body = Reply::rows(listed);
+    body.surface = Some(crate::wire::SURFACE);
     emit(&mut out, how, &body)
 }
 
@@ -222,7 +214,7 @@ pub fn configure(flags: &std::collections::BTreeMap<String, String>) -> std::io:
         Ok(applied) => reply(&mut out, how, &[applied]),
         // A chunk that will not run is a refusal, not a crash: the coordinator sent something,
         // and what it needs back is which part was wrong.
-        Err(why) => refuse(&mut out, how, &why, "refused"),
+        Err(why) => refuse(&mut out, how, &why, Fault::Refused),
     }
 }
 
@@ -257,7 +249,7 @@ mod tests {
     #[test]
     fn a_refusal_is_a_reply_and_says_which_kind() {
         let mut out = Vec::new();
-        refuse(&mut out, As::Json, "no such model", "refused").expect("write");
+        refuse(&mut out, As::Json, "no such model", Fault::Refused).expect("write");
         let value: serde_json::Value = serde_json::from_slice(&out).expect("decode");
         assert_eq!(value["ok"], serde_json::json!(false));
         assert_eq!(value["fault"], serde_json::json!("refused"));
@@ -310,7 +302,7 @@ mod family_tests {
         assert_eq!(value["family"], serde_json::json!(crate::wire::FAMILY));
 
         let mut refused = Vec::new();
-        refuse(&mut refused, As::Json, "no", "refused").expect("write");
+        refuse(&mut refused, As::Json, "no", Fault::Refused).expect("write");
         let value: serde_json::Value = serde_json::from_slice(&refused).expect("decode");
         assert_eq!(
             value["family"],

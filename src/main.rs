@@ -33,36 +33,59 @@ fn main() -> std::io::Result<()> {
         Some("configure") => melchior::mind::speaking::configure(&flags(args)),
         Some("auth") => signing(args),
         // `client` is the family's name for it; `lua-api` is what this program called it first.
+        // Bare it is source, for redirecting into a file; framed when an encoding is asked for.
         Some("client" | "lua-api") => {
-            print!("{}", melchior::CLIENT);
-            Ok(())
+            let asked = flags(args);
+            if asked.contains_key("json") || asked.contains_key("cbor") {
+                let mut out = std::io::stdout().lock();
+                melchior::mind::speaking::reply(
+                    &mut out,
+                    melchior::mind::speaking::As::asked(&asked),
+                    &[melchior::CLIENT],
+                )
+            } else {
+                print!("{}", melchior::CLIENT);
+                Ok(())
+            }
         }
         Some("fork") => fork(&flags(args)),
         Some("verbs") => melchior::mind::speaking::verbs(&flags(args)),
         Some("acknowledge") => melchior::mind::speaking::acknowledge(&flags(args)),
+        Some("--help" | "-h" | "help") => {
+            print!("{USAGE}");
+            Ok(())
+        }
+        // A verb this program does not have is a machine's question, so it gets a machine's
+        // answer: the reply shape, on stdout, at exit 0. Usage is for `--help`, where a person
+        // asked; an argument parser's exit 2 cannot be told from the binary being absent.
         Some(other) => {
-            eprintln!("melchior: no such command: {other}");
-            eprintln!(
-                "usage: melchior serve | tool | fork | brief | models | ask | lua-api | verbs"
-            );
-            std::process::exit(2);
+            let mut out = std::io::stdout().lock();
+            melchior::mind::speaking::refuse(
+                &mut out,
+                melchior::mind::speaking::As::asked(&flags(args)),
+                &format!("no such call: {other}"),
+                melchior::wire::Fault::Refused,
+            )
         }
         None => {
-            eprintln!(
-                "usage: melchior serve | tool | fork | brief | models | ask | lua-api | verbs"
-            );
-            eprintln!();
-            eprintln!("  serve     bind this session's socket and answer for it");
-            eprintln!("  tool      the vocabulary a model calls, one exec per request");
-            eprintln!("  brief     what to tell a model about the sessions a prompt named");
-            eprintln!("  models    what this machine could talk to  [--json|--cbor]");
-            eprintln!("  ask       run a turn, an Ask on stdin      [--json|--cbor]");
-            eprintln!("  lua-api   print the Lua client library");
-            eprintln!("  verbs     what a session answers");
+            eprint!("{USAGE}");
             std::process::exit(2);
         }
     }
 }
+
+/// What a person gets from `melchior --help`, and from a bare `melchior` on stderr.
+const USAGE: &str = "\
+usage: melchior serve | tool | fork | brief | models | ask | client | verbs
+
+  serve     bind this session's socket and answer for it
+  tool      the vocabulary a model calls, one exec per request
+  brief     what to tell a model about the sessions a prompt named
+  models    what this machine could talk to  [--json|--cbor]
+  ask       run a turn, an Ask on stdin      [--json|--cbor]
+  client    print the Lua client library     [--json|--cbor]
+  verbs     what a session answers           [--json|--cbor]
+";
 
 mod ending;
 mod tied;
