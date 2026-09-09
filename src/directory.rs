@@ -9,6 +9,7 @@
 //!     iota-mu
 //!     iota-mu.parent       <- "alpha-rho": who started it
 //!     iota-mu.session      <- "alpha-rho": which run it belongs to
+//!     iota-mu.role         <- "reviewer", and a line saying what that means
 //!   other-project/
 //!     beta-nu
 //! ```
@@ -34,10 +35,11 @@
 //! secret handed to the session in [`TOKEN`] when it was started, which only whoever started it
 //! ever held. A session nobody started holds none, so nothing can stop it.
 
+pub mod roles;
 pub mod sessions;
 
 use crate::identity::Identity;
-use crate::inherited::{ID, PARENT, PROJECT, ROLE, TOKEN, said};
+use crate::inherited::{ID, PARENT, PROJECT, TOKEN, said};
 
 use crate::policy::{self, Whom};
 use std::path::{Path, PathBuf};
@@ -93,7 +95,17 @@ pub fn mine() -> Option<Identity> {
     let id = said(ID)?;
     // The one part with a sensible default. Project and id place a session and a wrong guess at
     // either would sign messages as somebody else; a role only says what it is for.
-    let role = said(ROLE).unwrap_or_else(|| "main".to_owned());
+    //
+    // The note first, the environment second, for the same reason [`parent_of`] reads its note
+    // first: `assign` and `role` change what an agent is for *while it runs*, and no variable
+    // can be set on a process already started. Every process of this session — the socket, and
+    // a tool spawned per call — would otherwise go on signing as what it was spawned as.
+    let role = roles::role_of(&Identity {
+        project: project.clone(),
+        role: roles::MAIN.to_owned(),
+        id: id.clone(),
+    })
+    .name;
     Some(Identity { project, role, id })
 }
 
@@ -302,12 +314,17 @@ fn safe(name: &str) -> String {
     }
 }
 
-/// Leave the notes saying who started this session and which run it is part of.
+/// Leave the notes saying who started this session, which run it is part of, and what it is for.
 ///
 /// A main writes no parent, and that absence is what says it is one. It writes a run all the
 /// same — see [`sessions::began`] for why the two are not symmetrical.
-pub fn announce(me: &Identity) {
+///
+/// The role is handed in rather than taken off `me`. An [`Identity`] carries only the name, and
+/// the description is half the record: resolving it is the caller's, because the sources are a
+/// flag, an environment variable and a config file, and this module knows about none of them.
+pub fn announce(me: &Identity, role: &roles::Role) {
     sessions::began(me);
+    roles::began(me, role);
     let Some(parent) = parent() else { return };
     let path = kin_at(me);
     if let Some(dir) = path.parent() {
@@ -320,6 +337,7 @@ pub fn announce(me: &Identity) {
 pub fn forget(me: &Identity) {
     let _ = std::fs::remove_file(kin_at(me));
     sessions::ended(me);
+    roles::ended(me);
 }
 
 /// Record that `them` now answers to `parent`.
@@ -486,6 +504,7 @@ fn forget_id(project: &str, id: &str) {
     let _ = std::fs::remove_file(socket(project, id));
     let _ = std::fs::remove_file(home(project).join(format!("{}.parent", safe(id))));
     sessions::forget_in(project, id);
+    roles::forget_in(project, id);
 }
 
 /// Last one out turns off the lights: drop the project's directory if nothing is left in it.

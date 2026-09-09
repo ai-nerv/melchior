@@ -28,11 +28,11 @@
 
 pub mod doing;
 pub mod saying;
+mod standing;
+
+pub use standing::Standing;
 
 use crate::directory::TOOL;
-use crate::identity::Identity;
-use crate::policy::{self, Relation, Whom};
-use crate::wire::Message;
 use serde_json::{Value, json};
 
 /// What a verb produced, for a host to turn into whatever a tool result looks like there.
@@ -114,6 +114,12 @@ pub fn parameters() -> Value {
                                 being let go. Required by `reply` and `release`; `inbox` \
                                 lists the ids.",
             },
+            "role": {
+                "type": "string",
+                "description": "for `role` and `assign`, what to call the role — one word, \
+                                like `reviewer`. `message` then says what it does, in a \
+                                sentence, which is what a coordinator reads to pick somebody.",
+            },
             "sort": {
                 "type": "string",
                 "enum": ["note", "question", "answer", "attention", "claim", "release",
@@ -148,6 +154,16 @@ const VERBS: &[(&str, &str)] = &[
     (
         "about",
         "who an instance is: project, role, id, and who started it",
+    ),
+    // What an agent is for. Descriptive and nothing else: no verb, no wall and no reach reads a
+    // role, which is the only reason it is safe to let a session choose its own.
+    (
+        "role",
+        "say what this session is for, so the crew list can route work to it",
+    ),
+    (
+        "assign",
+        "say what a subagent this session started is for — its role, not its orders",
     ),
     (
         "status",
@@ -217,8 +233,15 @@ const VERBS: &[(&str, &str)] = &[
 /// A table rather than a condition per verb, because the third one written by hand disagreed
 /// with the schema and the model was told `whoami` needed a `who`.
 const ALONE: &[&str] = &[
-    "help", "whoami", "list", "crew", "inbox", "claims", "announce", "trouble", "reply",
+    "help", "whoami", "list", "crew", "inbox", "claims", "announce", "trouble", "reply", "role",
 ];
+
+/// Which verbs name a role, and what goes wrong when one does not.
+///
+/// A table for the same reason [`ALONE`] and [`SPEAKS`] are. `assign` without a name is a parent
+/// telling a child it is for something and not saying what, which reaches the far end as a
+/// refusal the model has to guess its way out of.
+const NAMES_A_ROLE: &[&str] = &["role", "assign"];
 
 /// Which verbs need something said.
 const SPEAKS: &[&str] = &[
@@ -241,81 +264,6 @@ const QUOTES: &[(&str, &str)] = &[
     ("reply", "the id of the message being answered"),
     ("release", "the id of the work being let go"),
 ];
-
-/// What the tool needs from the session in order to answer.
-///
-/// Handed in rather than reached for, because a tool runs on the turn thread and the session is
-/// the UI's. What is here is a copy taken when the call started.
-#[derive(Debug, Clone, Default)]
-pub struct Standing {
-    /// Who this session is.
-    pub me: String,
-    /// Who started it, if anybody.
-    pub parent: Option<String>,
-    /// The ids of what it started, which is what it may stop.
-    ///
-    /// Ids rather than whole names, because that is what the directory holds: a role is not on
-    /// disk, so a full name built from it would carry a guess.
-    pub forked: Vec<String>,
-    /// The secret handed to each of them at spawn, by id, which a `stop` has to quote back.
-    pub minted: std::collections::BTreeMap<String, String>,
-    /// What has arrived.
-    pub inbox: Vec<Message>,
-}
-
-impl Standing {
-    /// This session as an identity, for filling the gaps in a short name.
-    #[must_use]
-    pub fn identity(&self) -> Identity {
-        Identity::read(&self.me).unwrap_or_else(|| Identity {
-            project: String::new(),
-            role: "main".to_owned(),
-            id: String::new(),
-        })
-    }
-
-    /// Where this session sits in the tree.
-    ///
-    /// Project and id, and no role: what a session is *for* has no bearing on what it may reach.
-    /// A session that could pick its own role could pick `main` and claim a main's reach, so
-    /// the relation is worked out from the spawn tree and nothing else.
-    #[must_use]
-    pub fn whom(&self) -> Whom {
-        let me = self.identity();
-        // The run comes off the note rather than out of this struct: a tool process is spawned
-        // per call and the note is the one copy every other agent reads, so reading it here is
-        // what keeps this session's idea of its run and everybody else's the same one.
-        let session = crate::directory::sessions::session_of(&me);
-        Whom {
-            project: me.project,
-            id: me.id,
-            parent: self.parent.clone(),
-            session,
-        }
-    }
-
-    /// How `them` stands to this session.
-    ///
-    /// What this session *started* comes first and is not up for discussion. The rest is read
-    /// off the project directory, never from what the far end says about itself — a session
-    /// that could describe its own place in the tree could describe itself as somebody's child.
-    /// A child that declined to leave its note beside its socket would otherwise have made
-    /// itself unstoppable by forgetting who its parent was.
-    #[must_use]
-    pub fn stands(&self, them: &Identity) -> Relation {
-        let me = self.whom();
-        if me.project != them.project {
-            return Relation::Elsewhere;
-        }
-        // By id. What this session started is a list of ids, because that is what the directory
-        // holds — a role is not on disk, and matching whole names would have missed a child
-        // that called itself something this session did not expect.
-        if self.forked.contains(&them.id) {
-            return Relation::Child;
-        }
-        policy::between(&me, &crate::directory::whom(&them.project, &them.id))
-    }
-}
 
 /// Answer one call.
 ///
@@ -351,6 +299,17 @@ pub fn answer(arguments: &Value, standing: &Standing) -> Answer {
             "`{verb}` needs `about` — {what}. `inbox` lists them."
         ));
     }
+    if NAMES_A_ROLE.contains(&verb)
+        && arguments
+            .get("role")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return Answer::refused(format!(
+            "`{verb}` needs `role` — one word to call it. `message` says what it does, in a \
+             sentence, and that is what a coordinator reads."
+        ));
+    }
     match verb {
         "help" => Answer::said(saying::help(standing)),
         "whoami" => Answer::said(saying::whoami(standing)),
@@ -367,6 +326,18 @@ pub fn answer(arguments: &Value, standing: &Standing) -> Answer {
             },
             Err(refused) => refused,
         },
+        // Aimed at this session and nowhere else, so it takes no `who`: the verb for saying what
+        // *somebody else* is for is `assign`, and it is a different verb because it needs a
+        // different relation. It still goes through the socket rather than writing the note here
+        // — the session holds the answer every other agent reads, and a tool process that wrote
+        // it directly would be a second writer with no reason to agree.
+        "role" => {
+            let me = standing.identity().id;
+            match doing::decide(verb, &me, arguments, standing) {
+                Ok(wanted) => doing::perform(&wanted, standing),
+                Err(refused) => refused,
+            }
+        }
         _ if ALONE.contains(&verb) => Answer::said(format!(
             "`{verb}` is understood but not yet carried out: the socket call it makes is \
                  not wired into the turn loop."
@@ -432,6 +403,9 @@ fn answering(arguments: &Value, standing: &Standing) -> Result<String, Answer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::Identity;
+    use crate::policy::Relation;
+    use crate::wire::Message;
 
     fn standing() -> Standing {
         Standing {
@@ -593,7 +567,7 @@ mod tests {
 #[cfg(test)]
 mod surface_tests {
     use super::*;
-    use crate::wire::Sort;
+    use crate::wire::{Message, Sort};
 
     fn standing() -> Standing {
         Standing {
@@ -615,7 +589,7 @@ mod surface_tests {
         // as the model being told `whoami` wants a `who`.
         for (verb, _) in VERBS {
             let out = call(
-                json!({"verb": verb, "message": "x", "about": "y"}),
+                json!({"verb": verb, "message": "x", "about": "y", "role": "z"}),
                 standing(),
             );
             let wants_who = out.failed && out.said.contains("needs `who`");
@@ -751,3 +725,8 @@ mod surface_tests {
 #[cfg(test)]
 #[path = "verbs/replying.rs"]
 mod replying;
+
+/// What an agent is for is said by the agent or by its parent, and read as a claim.
+#[cfg(test)]
+#[path = "verbs/naming.rs"]
+mod naming;

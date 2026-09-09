@@ -9,6 +9,8 @@
 //! connection", "`n` did not match the result" are all decidable without a socket, and a test
 //! that has to bind one to check them is a test nobody writes.
 
+mod roles;
+
 use crate::identity::Identity;
 use crate::policy::Reach;
 use crate::policy::{self, Whom};
@@ -98,6 +100,13 @@ pub enum Then {
         /// What it will be started with, and what a `stop` has to quote back.
         token: String,
     },
+    /// This session has been told what it is for — by itself, or by the one that started it.
+    ///
+    /// Carried up rather than written where it is decided, for the same reason [`Then::Minted`]
+    /// is. The note is what every *other* agent reads, so a second writer for it — a connection
+    /// handler, running while the loop holds its own copy — would be two answers to "what is
+    /// this for" with no reason to agree.
+    Named(crate::directory::roles::Role),
     /// End this instance.
     Stop,
 }
@@ -166,8 +175,19 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
         );
     }
 
+    // Settled by relation before the ladder, the way `mint` is, because the ladder has no rung
+    // for it either: the two callers are this session and the one that started it, and `Ask`
+    // would let a cousin rename us at the `project` setting.
+    if call.call == "role"
+        && let Some(refusal) = roles::refused(relation, theirs)
+    {
+        return (refusal, Then::Nothing);
+    }
+
     let wanted = match call.call.as_str() {
         "identity" | "kin" | "status" | "inbox" | "needs" => Reach::Ask,
+        // Already settled above: only this session and its parent ask this, and they have.
+        "role" => Reach::Ask,
         // Already settled above: only this session asks these, and it has.
         "mint" | "minted" => Reach::Ask,
 
@@ -198,10 +218,15 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
             Reply::of(serde_json::json!(crate::mind::setup::needs())),
             Then::Nothing,
         ),
+        // The description comes off the note rather than out of `About`, which holds only the
+        // name: it is half the record, and a caller reading a role to decide who to hand work to
+        // needs the half that says what the word means.
         "identity" => (
             Reply::of(serde_json::json!({
                 "project": about.me.project,
                 "role": about.me.role,
+                "description": crate::directory::roles::role_in(&about.me.project, &about.me.id)
+                    .and_then(|role| role.description),
                 "id": about.me.id,
                 "full": about.me.full(),
                 "parent": about.parent,
@@ -229,6 +254,7 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
         ),
         "inbox" => (Reply::of(serde_json::json!(about.inbox)), Then::Nothing),
         "minted" => (Reply::of(serde_json::json!(about.minted)), Then::Nothing),
+        "role" => roles::set(call, about),
         // **The half of the subagent lattice that was never produced.** `parent()` and `token()`
         // read `MAGI_MELCHIOR_PARENT` and `MAGI_MELCHIOR_TOKEN`, `announce` writes the note that
         // makes the tree readable, and `stop` refuses anything this session did not start — all
@@ -245,6 +271,14 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
             // gets: a child that worked out its own run would start a second one every time a
             // coordinator spawned a coordinator.
             let run = about.whom().session.unwrap_or_else(|| about.me.id.clone());
+            // What the child will be started as, if the caller said. Named at birth rather than
+            // assigned once it is up, because otherwise there is a window — however short — in
+            // which a child is on the roster described as `main`, and a coordinator fanning work
+            // out during it routes by a description nobody wrote.
+            let role = match roles::asked(call) {
+                Ok(role) => role,
+                Err(refusal) => return (refusal, Then::Nothing),
+            };
             let minted = Then::Minted {
                 id: child.id.clone(),
                 token: secret.clone(),
@@ -252,17 +286,20 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
             (
                 Reply::of(serde_json::json!({
                     "project": child.project,
-                    "role": child.role,
+                    "role": role.name,
+                    "description": role.description,
                     "id": child.id,
-                    "full": child.full(),
+                    "full": format!("{}/{}/{}", child.project, role.name, child.id),
                     "parent": about.me.id,
                     "token": secret.clone(),
                     "session": run.clone(),
                     // Everything the child inherits, named so a harness does not have to know
-                    // any of it — and so adding one more is a change in one place.
+                    // any of it — and so adding one more is a change in one place. The role
+                    // travels as one string, name then description, so the child writes its own
+                    // note from it rather than being handed half a record.
                     "environment": {
                         crate::inherited::PROJECT: child.project,
-                        crate::inherited::ROLE: child.role,
+                        crate::inherited::ROLE: role.written(),
                         crate::inherited::ID: child.id,
                         crate::inherited::PARENT: about.me.id,
                         crate::inherited::TOKEN: secret,

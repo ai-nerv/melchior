@@ -27,6 +27,11 @@ pub const TOKEN: &str = "MAGI_MELCHIOR_TOKEN";
 /// starts, and nothing on disk says which of several a given process was spawned under.
 pub const PROJECT: &str = "MAGI_MELCHIOR_PROJECT";
 /// What that session is for, the middle part of its name.
+///
+/// The first line is the name and the rest is a sentence a coordinator can route by — so every
+/// harness setting a bare `review` today goes on meaning exactly what it always did, and one
+/// that has something to say about what a child is for has somewhere to say it. Read whole or
+/// not at all: see [`crate::directory::roles::resolve`].
 pub const ROLE: &str = "MAGI_MELCHIOR_ROLE";
 /// The last of the three, and the only one the socket is named after.
 pub const ID: &str = "MAGI_MELCHIOR_ID";

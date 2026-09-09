@@ -60,6 +60,17 @@ pub fn needs() -> Vec<Need> {
             default: None,
         },
         Need {
+            name: "role".to_owned(),
+            kind: Kind::Text,
+            about: "what this session is for: a name, and on the lines after it a sentence a \
+                    coordinator can route by. Outranked by `MAGI_MELCHIOR_ROLE` and by \
+                    `melchior serve --role`, and the winner is taken whole — a name from one \
+                    source and a description from another would describe a role nobody declared"
+                .to_owned(),
+            required: false,
+            default: Some(serde_json::json!("main")),
+        },
+        Need {
             name: "agent_talk".to_owned(),
             kind: Kind::Text,
             about: "how far a session may reach: mains, instance, project. Set in the \
@@ -79,7 +90,37 @@ pub fn needs() -> Vec<Need> {
 /// A registrar reaches the VM by being called, and `agent_talk` reaches [`crate::policy`] in the
 /// environment a session is spawned with — a chunk could only set it for the process running the
 /// chunk, which is not the process holding the socket.
-const SETTINGS: &[&str] = &["model", "thinking", "max_tokens", "discover"];
+const SETTINGS: &[&str] = &["model", "thinking", "max_tokens", "discover", "role"];
+
+/// What a config assigned to one setting, without building the model catalog.
+///
+/// [`crate::mind::catalog::Catalog::load`] is the full read and would answer this too, at the
+/// cost of running eight hundred lines of shipped provider descriptions and everything installed
+/// beside them. Binding a socket must not depend on the model layer loading cleanly: melchior
+/// answers for its session whether or not a provider file compiles, and a role that could not be
+/// read because somebody's `apis.lua` raised would be a session with no word for what it does.
+///
+/// So: what a person or a coordinator declared, and nothing shipped. A file that raises costs
+/// itself and nothing else, for the same reason it does in the catalog — it is somebody else's
+/// package, and refusing to start over it would make installing one a risk rather than a try.
+#[must_use]
+pub fn assigned(name: &str) -> Option<serde_json::Value> {
+    let dir = crate::mind::catalog::Catalog::dir();
+    let mut engine = crate::mind::lua::engine::Engine::new();
+    for (path, trust) in crate::mind::plugins::runtimepath(&crate::mind::plugins::Roots::at(&dir)) {
+        if trust.needs_acknowledging() {
+            continue;
+        }
+        if let Ok(source) = std::fs::read_to_string(&path) {
+            let _ = engine.run(&source, &path.display().to_string());
+        }
+    }
+    if let Ok(given) = std::fs::read_to_string(given()) {
+        let _ = engine.run(&given, "given");
+    }
+    engine.harvest();
+    engine.config().get(name).cloned()
+}
 
 /// Run a chunk of config Lua and say what it did.
 ///

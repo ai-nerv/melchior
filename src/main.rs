@@ -57,7 +57,7 @@ fn main() -> std::io::Result<()> {
             print!("{}", melchior::CLIENT);
             Ok(())
         }
-        Some("fork") => fork(),
+        Some("fork") => fork(&flags(args)),
         // **In the reply shape, not as prose.** A program's self-description is the one thing
         // another program has to be able to parse; this printed two columns of text, so the only
         // way to discover melchior's surface was to read it with your eyes.
@@ -210,14 +210,28 @@ enum Heard {
 /// **The harness spawns, melchior names.** A layer that started harnesses would have to know
 /// what one is — which command, which arguments, which working directory — and none of that is
 /// its business. It hands down a name and a secret the same way it hands down a name.
-fn fork() -> std::io::Result<()> {
+/// `--role` and `--role-description` say what the child is for, at birth. Without them there is
+/// a window in which a child is up, on the roster and described as `main`, and a coordinator
+/// fanning work out during it routes by a description nobody wrote.
+fn fork(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
     let Some(me) = melchior::directory::mine() else {
         return Err(std::io::Error::other(
             "`fork` is asked by a session, of itself: nothing here says which session this is",
         ));
     };
     let mut held = melchior::directory::dial(&me, &me)?;
-    let reply = held.call("mint", Vec::new())?;
+    let naming = match asked.get("role") {
+        None => Vec::new(),
+        Some(name) => vec![
+            serde_json::Value::String(name.clone()),
+            asked
+                .get("role-description")
+                .map_or(serde_json::Value::Null, |said| {
+                    serde_json::Value::String(said.clone())
+                }),
+        ],
+    };
+    let reply = held.call("mint", naming)?;
     if !reply.ok {
         return Err(std::io::Error::other(
             reply.error.unwrap_or_else(|| "mint refused".to_owned()),
@@ -230,6 +244,12 @@ fn fork() -> std::io::Result<()> {
     Ok(())
 }
 
+/// Bind this session's socket and answer for it until the parent lets go.
+///
+/// `--project` when nothing in the environment says which session this is, and `--role` /
+/// `--role-description` when the person starting it knows what it is for. The role outranks
+/// `MAGI_MELCHIOR_ROLE` and the config, and it is taken whole — the two flags are one source,
+/// so naming a role on the command line never picks up a description from anywhere else.
 fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
     // Named here when the caller only says which project it is in, and that is the useful way
     // round: a harness choosing its own name is choosing out of a namespace it cannot see, and
@@ -248,6 +268,36 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
             );
             std::process::exit(2);
         }
+    };
+
+    // **Whole-record, and this is the one place the four sources meet.** The flag, then the
+    // environment, then a config, then `main` — and whichever speaks first is taken entirely,
+    // because a name from one and a sentence from another describes a role nobody declared.
+    // Resolved here rather than in `directory` because that module knows about none of these:
+    // argv is this file's, and where a config lives is `mind`'s.
+    let role = melchior::directory::roles::resolve(
+        asked
+            .get("role")
+            .map(|written| {
+                melchior::directory::roles::Role::new(
+                    written,
+                    asked.get("role-description").map(String::as_str),
+                )
+            })
+            .or_else(|| {
+                asked
+                    .get("role-description")
+                    .map(|said| melchior::directory::roles::Role::new("", Some(said)))
+            }),
+        melchior::directory::roles::inherited(),
+        melchior::mind::setup::assigned("role")
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+            .and_then(melchior::directory::roles::Role::read),
+    );
+    let me = melchior::identity::Identity {
+        role: role.name.clone(),
+        ..me
     };
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -270,11 +320,14 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         // Children this session named, on their way into its own record of them. The secret is
         // what a `stop` has to quote back, so it is held here and nowhere a sibling can read.
         let (minted_tx, mut minted) = tokio::sync::mpsc::channel::<(String, String)>(4);
+        // What this session has been told it is for, by itself or by whoever started it.
+        let (named_tx, mut named) =
+            tokio::sync::mpsc::channel::<melchior::directory::roles::Role>(4);
 
         // The note beside the socket, so the tree can be read off the directory: a session that
         // finds this one there can tell whose subagent it is without asking it, and without
         // trusting what it would have said.
-        melchior::directory::announce(&me);
+        melchior::directory::announce(&me, &role);
         let at = melchior::directory::listening_at(&me);
 
         // Bound *here*, and only then announced. Spawning the accept loop and saying "listening"
@@ -301,6 +354,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                     adopted: adopted_tx,
                     stopped: stopped_tx,
                     minted: minted_tx.clone(),
+                    named: named_tx.clone(),
                 },
             )
             .await;
@@ -379,6 +433,14 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                     about_tx.send_modify(|about| {
                         about.minted.insert(id, token);
                     });
+                }
+                // The note first, then the copy this session answers with, because the note is
+                // what every *other* agent reads and a peer that saw the old one would route by
+                // it. Never said up the pipe: a role changes nothing a harness does, and the
+                // harness that asked for it already knows.
+                Some(role) = named.recv() => {
+                    melchior::directory::roles::given(&me.project, &me.id, &role);
+                    about_tx.send_modify(|about| about.me.role.clone_from(&role.name));
                 }
                 // **`None` here is the parent letting go, and it is the whole lifetime rule.**
                 // Matched rather than left to `else`, because a `select!` arm whose pattern

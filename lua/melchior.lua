@@ -268,6 +268,10 @@ local SURFACE = {
   "verbs", "client",
   "identity", "kin", "status", "inbox", "needs",
   "tell",
+  -- What a session is for. Answered for the session itself and for the one that started it,
+  -- and for nobody else -- and it is worth nothing to either of them: no wall, no reach and no
+  -- verb reads a role, which is the only reason a session may name itself.
+  "role",
   -- The adoption handshake, both halves. `adopt` puts the question and a person answers it;
   -- `adopted` is that answer coming back, and is believed only from the session the directory
   -- already calls this one's parent.

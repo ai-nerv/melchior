@@ -11,7 +11,7 @@
 //! permissions — but by then the turn has already been paid for.
 
 use super::Answer;
-use super::{SPEAKS, Standing, TOOL, VERBS};
+use super::{NAMES_A_ROLE, SPEAKS, Standing, TOOL, VERBS};
 use crate::asking;
 use crate::directory::Address;
 use crate::policy;
@@ -32,6 +32,8 @@ pub struct Wanted {
     pub message: Option<String>,
     /// The message being answered or released, for the verbs that quote one.
     pub about: Option<String>,
+    /// What to call the role, for `role` and `assign`. The sentence is in `message`.
+    pub role: Option<String>,
     /// The secret the far end was started with, for the one verb that has to prove itself.
     pub token: Option<String>,
 }
@@ -85,10 +87,35 @@ pub fn decide(
     let me = standing.whom();
     let whole = address.against(&standing.identity());
     let relation = standing.stands(&whole);
+    // **The same relation `stop` needs, and none of the proof.** Saying what a subagent is for is
+    // not ending its life: a role grants nothing, so the secret that makes `stop` refusable would
+    // be guarding a word — and demanding it would say the word mattered more than it does.
+    // Refused with its own sentence rather than through the ladder, whose Stop refusal talks
+    // about ending sessions and would send a model looking for a token it does not need.
+    if verb == "assign" && relation != policy::Relation::Child {
+        return Err(Answer::refused(format!(
+            "this session did not start `{}`, so what it is for is not this session's to say. \
+             An instance sets its own with `role`.",
+            whole.full()
+        )));
+    }
+    if let Some(said) = arguments.get("message").and_then(Value::as_str)
+        && NAMES_A_ROLE.contains(&verb)
+        && said.chars().count() > crate::directory::roles::AT_MOST
+    {
+        return Err(Answer::refused(format!(
+            "that description is {} characters and a role may say {}. It is what a coordinator \
+             reads to pick somebody, not where the work is described.",
+            said.chars().count(),
+            crate::directory::roles::AT_MOST
+        )));
+    }
     if !policy::may(&me, relation, reach) {
         return Err(Answer::refused(policy::refusal(&me, relation, reach)));
     }
-    let token = if reach == Reach::Stop {
+    // By verb rather than by reach, so that a second verb rated `Stop` one day cannot pick a
+    // secret up on the way past. One line sends one, and it can be read.
+    let token = if verb == "stop" {
         // Held only for what this session started. Refused here rather than at the far end,
         // where the answer would be "that is not the secret" — true, and no help at all to a
         // model that never had one.
@@ -112,6 +139,10 @@ pub fn decide(
             .map(ToOwned::to_owned),
         about: arguments
             .get("about")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        role: arguments
+            .get("role")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
         token,
@@ -162,6 +193,15 @@ fn said(held: &mut asking::Held, wanted: &Wanted) -> std::io::Result<Reply> {
             Vec::new(),
             wanted.token.as_deref().unwrap_or_default(),
         ),
+        // Both are the same call: an agent naming itself, and its parent naming it. What differs
+        // is who may make it, and that was settled above and is settled again at the far end.
+        "role" | "assign" => held.call(
+            "role",
+            vec![
+                serde_json::json!(wanted.role.clone().unwrap_or_default()),
+                serde_json::json!(wanted.message),
+            ],
+        ),
         // The reason travels with it: somebody is about to be asked to take responsibility for
         // a session, and "why" is the whole of what they have to go on.
         "adopt" => held.call(
@@ -195,6 +235,15 @@ fn landed(wanted: &Wanted, reply: &Reply) -> String {
             .first()
             .map_or_else(|| "nothing".to_owned(), ToString::to_string),
         "stop" => format!("`{who}` was told to stop."),
+        // Said plainly, because the tempting reading is the wrong one. A role is what `crew`
+        // shows a coordinator so it can pick somebody; it is not an instruction, and nothing
+        // about what this session or that one may do has changed.
+        "role" | "assign" => format!(
+            "`{}` is now `{}`. That is what `crew` will show; it grants nothing and changes \
+             nothing about what may be reached.",
+            wanted.who.id,
+            wanted.role.as_deref().unwrap_or_default()
+        ),
         // Said rather than assumed. `send` returning silently reads as though nothing happened,
         // and the one thing worth knowing is that it is in their inbox and not yet read.
         "ask" => format!(

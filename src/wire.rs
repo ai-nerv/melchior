@@ -231,6 +231,14 @@ pub const VERBS: &[(&str, &str)] = &[
     ),
     ("inbox", "messages it has been sent and not yet acted on"),
     ("tell", "put a message of any sort in its inbox"),
+    // One call, two callers: a session saying what it is for, and the session that started it
+    // saying so. The same relation `stop` needs and none of the proof, because a role grants
+    // nothing — nothing in the policy reads one, which is what makes it safe to let a session
+    // name itself.
+    (
+        "role",
+        "say what it is for: its own, or its parent's word for it",
+    ),
     // The adoption handshake, both halves. One session cannot make itself another's master: it
     // asks, a person answers, and `adopted` is that answer arriving back.
     (
