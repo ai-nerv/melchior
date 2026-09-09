@@ -18,6 +18,10 @@
 //! leave a name in the directory that answers and cannot act, which is worse than a name that
 //! is simply gone: a sibling would send to it and be told the message landed.
 //!
+//! Neither is `ask`, for a different reason and by the same means — see [`tied`]. The pipe is
+//! only half of it in both cases, and the kernel's half is what covers the magi that is killed
+//! rather than the one that leaves.
+//!
 //! # Why a pipe and not a library call
 //!
 //! The harness could link this crate — it did once. It is a separate program now so that a
@@ -43,7 +47,13 @@ fn main() -> std::io::Result<()> {
             Ok(())
         }
         Some("models") => melchior::mind::speaking::models(&flags(args)),
-        Some("ask") => melchior::mind::speaking::ask(&flags(args)),
+        // Before stdin is read, because reading it is where the pipe stops being a way of
+        // noticing anything: the turn that follows holds a provider connection with no timeout
+        // over it, and a magi killed there left one open behind it.
+        Some("ask") => {
+            tied::to_magi()?;
+            melchior::mind::speaking::ask(&flags(args))
+        }
         // magi coordinates: it says what melchior should be, and melchior says what it takes.
         Some("needs") => melchior::mind::speaking::needs(&flags(args)),
         Some("configure") => melchior::mind::speaking::configure(&flags(args)),
@@ -88,6 +98,7 @@ fn main() -> std::io::Result<()> {
     }
 }
 
+mod tied;
 mod tool;
 
 /// What the parent tells us, one JSON object per line on stdin.
@@ -291,36 +302,6 @@ fn fork(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<(
     Ok(())
 }
 
-/// Ask the kernel to end this process when the magi that started it ends.
-///
-/// The pipe is the ordinary way out and this is the floor under it. A magi that goes drops its
-/// end of stdin, the reader below sees the close, and `serve` stops — but that holds only while
-/// stdin is a live pipe held by that magi and by nobody else. `PR_SET_PDEATHSIG` needs neither
-/// condition: the kernel sends the signal, so a `kill -9`, an OOM, or a panic that runs no
-/// destructor is covered exactly as well as a clean exit is.
-///
-/// `SIGTERM` rather than `SIGKILL`, so the socket and the note beside it can still be unlinked.
-/// A session left in the directory answers nothing and is found by a sibling that has already
-/// sent to it, which is worse than a name that is simply gone.
-///
-/// The signal watches only from the moment it is set, so a magi that died a moment before is a
-/// death nothing was ever sent for. Reading who the parent is on either side of the call closes
-/// what can be closed from in here: a different answer means the reparenting has already
-/// happened. What it does not close is the window before the first of those reads, and that
-/// would take magi naming its own pid on the command line the way balthasar's `--tied` does.
-/// It does not have to: in exactly that case stdin is already at end of file, and the loop
-/// below stops on its first read. Comparing against pid 1 is the tempting version and is wrong
-/// — a magi that is itself pid 1 in a container would spawn a melchior that exits before it
-/// binds anything.
-fn tie_to_magi() -> std::io::Result<()> {
-    let magi = rustix::process::getppid();
-    rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::Term))?;
-    if rustix::process::getppid() != magi {
-        std::process::exit(0);
-    }
-    Ok(())
-}
-
 /// Bind this session's socket and answer for it until the parent lets go.
 ///
 /// `--project` when nothing in the environment says which session this is, and `--role` /
@@ -337,7 +318,7 @@ fn tie_to_magi() -> std::io::Result<()> {
 fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
     // Before anything is bound or announced: a session that outlived its magi would leave a
     // name in the directory that answers and cannot act.
-    tie_to_magi()?;
+    tied::to_magi()?;
 
     // Named here when the caller only says which project it is in, and that is the useful way
     // round: a harness choosing its own name is choosing out of a namespace it cannot see, and
