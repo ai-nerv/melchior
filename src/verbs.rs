@@ -5,11 +5,12 @@
 //! One entry in the tool list rather than eight, so a model does not spend its attention choosing
 //! between names that differ by a suffix: `verb` says which, and `help` lists them all.
 //!
-//! Everything here can be done to anything listening except `stop`. A child is handed a secret in
-//! [`crate::inherited::TOKEN`] at spawn, and a `stop` that cannot quote it back is refused however
-//! convincing the name on it was. `list` shows what this session can actually reach rather than
-//! everything that exists; see [`crate::policy`] for where the walls are.
+//! Everything here can be done to anything listening except `stop` and `disband`. A child is
+//! handed a secret in [`crate::inherited::TOKEN`] at spawn, and a stop that cannot quote it back
+//! is refused however convincing the name on it was. `list` shows what this session can actually
+//! reach rather than everything that exists; see [`crate::policy`] for where the walls are.
 
+mod branching;
 mod claiming;
 pub mod doing;
 mod fanning;
@@ -213,6 +214,11 @@ pub const VERBS: &[(&str, &str)] = &[
         "stop",
         "end an instance this session started — refused for any it did not",
     ),
+    (
+        "disband",
+        "end an instance this session started and everything under it, and say which of the \
+         branch went — refused for any it did not start",
+    ),
 ];
 
 /// Which verbs need an instance named, and which do not. A table rather than a condition per verb,
@@ -312,6 +318,8 @@ pub fn answer(arguments: &Value, standing: &Standing) -> Answer {
         }
         // One decision, many peers, each meeting the same wall a `send` would.
         "announce" | "trouble" => fanning::fanned(verb, arguments, standing),
+        // A `stop` that names what it took with it, so a branch is one call rather than a walk.
+        "disband" => branching::disband(arguments, standing),
         // Files, not messages: nothing is sent and nothing is dialled.
         "claim" => claiming::take(arguments, standing),
         "release" => claiming::let_go(arguments, standing),
@@ -419,6 +427,34 @@ mod tests {
             .collect::<Vec<_>>();
         let held: Vec<&str> = VERBS.iter().map(|(name, _)| *name).collect();
         assert_eq!(offered, held);
+    }
+
+    #[test]
+    fn every_verb_the_tool_door_advertises_is_one_it_dispatches() {
+        // `melchior verbs` publishes this table under `door: "tool"`, so a name in it that falls
+        // through to the unknown-verb refusal or to the floor is advertised-and-refused. In a
+        // project of its own: `claim` writes a file, and the run is not to leave one behind.
+        let project = crate::scratch::Project::new("melchior-tool", "dispatch");
+        for (verb, _) in VERBS {
+            let mine = Standing {
+                me: format!("{project}/main/alpha-rho"),
+                ..standing()
+            };
+            let out = call(
+                json!({"verb": verb, "who": "beta-nu", "message": "x", "about": "x", "role": "r"}),
+                mine,
+            );
+            assert!(
+                !out.said.contains("is not one of"),
+                "`{verb}` is advertised and not dispatched: {}",
+                out.said
+            );
+            assert!(
+                !out.said.contains("not yet carried out"),
+                "`{verb}` reached the floor: {}",
+                out.said
+            );
+        }
     }
 
     #[test]
