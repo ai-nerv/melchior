@@ -57,6 +57,13 @@ pub fn disband(arguments: &Value, standing: &Standing) -> Answer {
 /// Everything seen under `id` while watching, and what of it was still listening when the watch
 /// ended. Ends early when a branch that was seen has gone, or when one that was never seen has had
 /// `grace` to appear.
+///
+/// Two readings per look, and they answer different questions. Walking the notes finds whoever has
+/// *joined* the branch, including a session that was still coming up when the stop went out.
+/// Whoever has *left* it is settled by dialling each id remembered, never by walking again: a
+/// grandchild is only reachable through its parent's note, the directory sweeps that note the
+/// moment the parent stops answering, and a second walk would report the whole branch below it as
+/// gone the instant its first generation went.
 fn watched(
     me: &Whom,
     id: &str,
@@ -66,13 +73,13 @@ fn watched(
     let began = std::time::Instant::now();
     let mut ever: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     loop {
-        // `crew` dial-tests as it reads, so what comes back is what is listening now.
         let held = sessions::crew(me);
-        let left: Vec<String> = sessions::under(&held, id)
-            .into_iter()
-            .map(|them| them.id.clone())
-            .collect();
-        ever.extend(left.iter().cloned());
+        ever.extend(
+            sessions::under(&held, id)
+                .into_iter()
+                .map(|them| them.id.clone()),
+        );
+        let left = answering(&me.project, &ever);
         let over = began.elapsed() >= wait
             || (ever.is_empty() && began.elapsed() >= grace)
             || (!ever.is_empty() && left.is_empty());
@@ -81,6 +88,15 @@ fn watched(
         }
         std::thread::sleep(LOOK);
     }
+}
+
+/// Which of `ids` still answers, each asked on its own socket. A socket file outlives the process
+/// that made it, so this is a dial and not a directory listing.
+fn answering(project: &str, ids: &std::collections::BTreeSet<String>) -> Vec<String> {
+    ids.iter()
+        .filter(|id| crate::directory::answers(&crate::directory::socket(project, id)))
+        .cloned()
+        .collect()
 }
 
 /// What to tell the model. A half-stopped branch is the answer this verb exists to give: naming
@@ -226,17 +242,46 @@ mod tests {
     }
 
     #[test]
-    fn a_branch_nothing_is_under_gives_up_after_the_grace_rather_than_the_whole_wait() {
-        let project = Project::new("melchior-branch", "grace");
-        let me = Whom {
-            project: project.to_string(),
+    fn who_is_left_is_settled_by_dialling_each_and_not_by_walking_the_notes_again() {
+        // The live failure: a grandchild is reachable only through its parent's note, the
+        // directory sweeps that note as soon as the parent stops answering, and a second walk
+        // then reported the whole branch below it as gone while it was still running.
+        let project = Project::new("melchior-branch", "dial");
+        let held: std::collections::BTreeSet<String> = ["theta-nu", "phi-beta"]
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect();
+        // Only the grandchild is up; the parent it hangs off has stopped and been swept.
+        let alive =
+            std::os::unix::net::UnixListener::bind(crate::directory::socket(&project, "phi-beta"))
+                .expect("bind");
+        assert!(
+            sessions::under(&sessions::crew(&whom(&project)), "theta-nu").is_empty(),
+            "the walk can still see it, so this test is not watching the failure"
+        );
+        assert_eq!(
+            answering(&project, &held),
+            vec!["phi-beta".to_owned()],
+            "a session still answering was counted as gone"
+        );
+        drop(alive);
+    }
+
+    fn whom(project: &str) -> Whom {
+        Whom {
+            project: project.to_owned(),
             id: "alpha-rho".to_owned(),
             parent: None,
             session: Some("alpha-rho-1".to_owned()),
-        };
+        }
+    }
+
+    #[test]
+    fn a_branch_nothing_is_under_gives_up_after_the_grace_rather_than_the_whole_wait() {
+        let project = Project::new("melchior-branch", "grace");
         let began = std::time::Instant::now();
         let (branch, left) = watched(
-            &me,
+            &whom(&project),
             "theta-nu",
             std::time::Duration::from_secs(30),
             std::time::Duration::from_millis(300),
