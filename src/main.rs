@@ -98,6 +98,7 @@ fn main() -> std::io::Result<()> {
     }
 }
 
+mod ending;
 mod tied;
 mod tool;
 
@@ -374,6 +375,8 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         .enable_all()
         .build()?;
     runtime.block_on(async move {
+        // Before anything is bound or written down, so a signal arriving early finds nothing.
+        let mut ending = ending::Ending::watching()?;
         let (about_tx, about_rx) = tokio::sync::watch::channel(melchior::answering::About {
             me: me.clone(),
             parent: melchior::directory::parent_of(&me),
@@ -609,6 +612,9 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                         say(&Heard::Around { agents: listed.clone() });
                     }
                 }
+                // How this session ends when its magi is killed: the kernel sends the signal, and
+                // for as long as nothing waited for it the lines under this loop never ran.
+                () = ending.came() => break,
                 // Both remaining arms can close on their own — the serving task dropping its
                 // senders — and either way there is nobody left to answer for.
                 else => break,

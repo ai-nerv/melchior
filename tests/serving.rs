@@ -170,6 +170,25 @@ impl Serving {
         serde_json::from_slice(&back[4..]).expect("it is JSON")
     }
 
+    /// End it the way the kernel does, and wait for it to go.
+    ///
+    /// `kill -TERM` rather than [`std::process::Child::kill`], which sends `SIGKILL` — the one
+    /// death nothing inside the process can be asked to tidy up after, and so the one death this
+    /// cannot be about.
+    fn signalled(&mut self) -> bool {
+        let _ = Command::new("kill")
+            .arg("-TERM")
+            .arg(self.child.id().to_string())
+            .status();
+        for _ in 0..200 {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        false
+    }
+
     /// Let go of the pipe, and wait.
     ///
     /// The directory goes with `self`, on the return and on the panic alike.
@@ -245,6 +264,37 @@ fn nothing_outlives_the_parent() {
     assert!(
         serving.let_go(),
         "the socket outlived the session it belonged to"
+    );
+}
+
+/// What is in a project's directory, by name, whether or not the directory is still there.
+fn left_in(project: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(project) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_session_ended_by_a_signal_leaves_the_directory_as_it_found_it() {
+    // The exit path was written, correct, and unreachable. `serve` takes its socket and its notes
+    // back down under its loop, and a signal ends a process without running any of that — so a
+    // melchior that died the way melchiors actually die, on the `SIGTERM` the kernel sends when
+    // the magi that started it is killed, had never once run those lines.
+    let mut serving = Serving::start("signalled");
+    let project = serving.runtime().join("melchior").join("demo");
+    assert!(serving.at().exists(), "it never bound");
+
+    assert!(serving.signalled(), "it did not end on SIGTERM");
+    assert!(
+        left_in(&project).is_empty(),
+        "a signal left these behind: {:?}",
+        left_in(&project)
     );
 }
 
@@ -505,9 +555,12 @@ impl Killable {
         // `gate-hermetic` runs the suite under and so leaked past it unremarked.
         let runtime = Scratch::new("melchior-k", name);
         let pids = runtime.join("pid");
+        // `--ui`, so there is a fourth file to leave behind. Without it a session writes its
+        // socket, its `.role` and its `.session`, and the case the field reported — four files
+        // per session, the screen note among them — is one the fixture could not reproduce.
         let script = format!(
-            "exec 3<&0; XDG_RUNTIME_DIR={runtime} {binary} serve --project killed <&3 \
-             >/dev/null 2>&1 & echo $! > {pids}; wait",
+            "exec 3<&0; XDG_RUNTIME_DIR={runtime} {binary} serve --project killed \
+             --ui {runtime}/screen.sock <&3 >/dev/null 2>&1 & echo $! > {pids}; wait",
             runtime = runtime.display(),
             binary = env!("CARGO_BIN_EXE_melchior"),
             pids = pids.display(),
@@ -530,6 +583,11 @@ impl Killable {
             served,
             _runtime: runtime,
         }
+    }
+
+    /// Where this session's socket and the notes beside it are.
+    fn home(&self) -> std::path::PathBuf {
+        self._runtime.join("melchior").join("killed")
     }
 
     /// End the caller the way a crash would: with nothing running inside it.
@@ -609,5 +667,34 @@ fn nothing_outlives_a_parent_that_was_killed_outright() {
     assert!(
         went,
         "melchior serve must not outlive the process that started it"
+    );
+}
+
+#[test]
+fn a_killed_parent_leaves_none_of_its_sessions_notes_behind() {
+    // The case the field reported, and the reason the exit path being correct was not enough:
+    // a headless magi taken down with `kill -9`, its melchior ended by the kernel's `SIGTERM`,
+    // and four files still in the directory afterwards — the socket, and the `.ui`, `.role` and
+    // `.session` notes beside it. Every sibling that listed the project was then offered a name
+    // that answers nothing until something else came along and swept it.
+    let mut caller = Killable::start("swept");
+    let home = caller.home();
+    let bound = left_in(&home);
+    assert!(
+        bound.iter().any(|name| name.ends_with(".ui")),
+        "the fixture is not the reported case: {bound:?}"
+    );
+
+    caller.killed();
+    let went = gone_within(caller.served, std::time::Duration::from_secs(10));
+    // Read after it is gone rather than on a timer: the unlinking is the last thing it does, so
+    // the process being gone is what makes this listing an answer rather than a race.
+    let left = left_in(&home);
+
+    caller.cleared();
+    assert!(went, "melchior serve outlived the parent that started it");
+    assert!(
+        left.is_empty(),
+        "the kernel's signal ended it and these stayed: {left:?}"
     );
 }

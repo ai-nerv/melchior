@@ -23,7 +23,12 @@ path = "src/main.rs"
 rustix = { version = "0.38", features = ["process"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
-tokio = { version = "1", features = ["rt", "net", "io-util", "fs", "time", "sync", "macros"] }
+# `signal` because the way a `serve` actually ends is a `SIGTERM` from the kernel, and a signal
+# nothing waits for runs none of the lines that take this session's socket and notes back down —
+# see `src/ending.rs` for why it is waited for rather than handled here. A feature on the runtime
+# this program already runs its whole loop on, which is one crate in the lockfile
+# (`signal-hook-registry`) and no new name in this list.
+tokio = { version = "1", features = ["rt", "net", "io-util", "fs", "time", "sync", "macros", "signal"] }
 
 # The mind: talking to a model, and the Lua the protocols are written in.
 base64 = "0.22"
