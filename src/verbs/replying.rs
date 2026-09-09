@@ -1,10 +1,5 @@
-//! `reply` finds who to answer from the message it quotes.
-//!
-//! Split from [`super`] under THE RULE, which caps a file at 800 lines.
-//!
-//! The verb the whole thing turns on: a conversation is an `ask` and a `reply`, and while this
-//! was a stub two agents could open a conversation and never continue one. It read as the model
-//! being unwilling — it said "reply is not wired, sending instead" — rather than as a gap here.
+//! `reply` finds who to answer from the message it quotes. Split from [`super`] under THE RULE,
+//! which caps a file at 800 lines.
 
 use super::*;
 use crate::wire::{Message, Sort};
@@ -29,8 +24,7 @@ fn it_goes_to_whoever_asked() {
 
 #[test]
 fn an_id_that_names_nothing_is_refused_with_what_the_inbox_holds() {
-    // The likely mistake is an invented id or one already acted on, and "no such message"
-    // on its own leaves a model with nowhere to go.
+    // "No such message" on its own leaves a model with nowhere to go.
     let standing = asked_by("magi/main/beta-nu");
     let Err(refused) = answering(&json!({"verb": "reply", "about": "made-up"}), &standing) else {
         panic!("an id that names nothing must not resolve to somebody");
@@ -51,8 +45,7 @@ fn an_empty_inbox_says_so_rather_than_listing_nothing() {
 
 #[test]
 fn a_named_recipient_still_wins_when_the_id_is_not_ours() {
-    // A session may be answering something it was told about out of band. The wall is still
-    // between it and the far end, so letting this through refuses nothing that matters.
+    // A session may be answering something it was told about out of band.
     let standing = asked_by("magi/main/beta-nu");
     let who = answering(
         &json!({"verb": "reply", "about": "elsewhere", "who": "gamma-xi"}),

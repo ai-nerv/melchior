@@ -1,30 +1,14 @@
-//! The tool the model calls to reach other instances.
+//! The tool the model calls to reach other instances. This is the interface: naming `$main/delta`
+//! in a prompt sends nothing — it tells the model that instance exists and that this tool reaches
+//! it, and the model decides what to do.
 //!
-//! This is the interface. Naming `$main/delta` in a prompt does not send anything — it tells the
-//! model that instance exists and that this tool reaches it, and the model decides what to do.
-//! Whether "tell $gamma to stop" means relay a sentence, ask a question first, or finish reading
-//! a file before doing either is the model's judgement, and a harness that acted on the sentence
-//! itself would be making that judgement badly and invisibly.
+//! One entry in the tool list rather than eight, so a model does not spend its attention choosing
+//! between names that differ by a suffix: `verb` says which, and `help` lists them all.
 //!
-//! # One tool, many verbs
-//!
-//! One entry in the tool list rather than eight, because a model given `agent_list`,
-//! `agent_send`, `agent_status`… spends its attention choosing between names that differ by a
-//! suffix. `verb` says which; `help` lists them all, and is the first thing the briefing points
-//! at.
-//!
-//! # Stopping is the one that needs authority
-//!
-//! Everything here can be done to anything listening except `stop`. A session is stopped by the
-//! session that started it and by nothing else — and "is" is not something a caller gets to
-//! claim. A child is handed a secret in [`crate::inherited::TOKEN`] at spawn, and a `stop` that
-//! cannot quote it back is refused however convincing the name on it was.
-//!
-//! # Two walls, and what the model is shown
-//!
-//! `list` shows what this session can actually reach, never everything that exists. A model
-//! told about a cousin it will then be refused spends the turn planning around a wall it was
-//! never going to get through; see [`crate::policy`] for where the walls are.
+//! Everything here can be done to anything listening except `stop`. A child is handed a secret in
+//! [`crate::inherited::TOKEN`] at spawn, and a `stop` that cannot quote it back is refused however
+//! convincing the name on it was. `list` shows what this session can actually reach rather than
+//! everything that exists; see [`crate::policy`] for where the walls are.
 
 mod claiming;
 pub mod doing;
@@ -38,12 +22,9 @@ pub use standing::Standing;
 use crate::directory::TOOL;
 use serde_json::{Value, json};
 
-/// What a verb produced, for a host to turn into whatever a tool result looks like there.
-///
-/// Not a tool trait, and that is the point of the file. This crate does not know what a tool is
-/// — a harness does — and the moment it implemented one, it would depend on that harness and
-/// could not leave. So the vocabulary is [`described`] as data, the work is [`answer`], and the
-/// forty lines that make the two into a tool live on the other side of the boundary.
+/// What a verb produced, for a host to turn into whatever a tool result looks like there. Not a
+/// tool trait: this crate would then depend on a harness, so the vocabulary is [`described`] as
+/// data and the work is [`answer`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Answer {
     /// What to tell the model.
@@ -72,11 +53,8 @@ impl Answer {
     }
 }
 
-/// The tool this crate offers, as a host needs to declare it.
-///
-/// Handed over as data rather than as an implementation, the way aeon publishes its descriptors
-/// to magi: the vocabulary is written once, here, and a harness registers what comes back. Two
-/// copies of nineteen verb descriptions would disagree the first time one was edited.
+/// The tool this crate offers, as a host needs to declare it. The vocabulary is written once,
+/// here, and a harness registers what comes back rather than keeping a second copy of it.
 #[must_use]
 pub fn described() -> Value {
     json!({
@@ -136,12 +114,10 @@ pub fn parameters() -> Value {
     })
 }
 
-/// What the tool can be asked to do.
-///
-/// Extensive on purpose. The narrow version — send, and stop — makes a model that wants to know
-/// whether a sibling is even alive send it a message and wait to see what happens.
+/// What the tool can be asked to do. These names and descriptions are the wire contract magi
+/// parses, so an edit here is an edit to what every harness sees.
 const VERBS: &[(&str, &str)] = &[
-    // Knowing where you are. A subagent that does not know it is one cannot behave like one.
+    // Knowing where you are.
     ("help", "list these verbs and what each takes"),
     (
         "whoami",
@@ -159,8 +135,8 @@ const VERBS: &[(&str, &str)] = &[
         "about",
         "who an instance is: project, role, id, and who started it",
     ),
-    // What an agent is for. Descriptive and nothing else: no verb, no wall and no reach reads a
-    // role, which is the only reason it is safe to let a session choose its own.
+    // What an agent is for. No verb, wall or reach reads a role, which is why a session may
+    // choose its own.
     (
         "role",
         "say what this session is for, so the crew list can route work to it",
@@ -177,8 +153,7 @@ const VERBS: &[(&str, &str)] = &[
         "verbs",
         "what an instance says it can answer, asked of it rather than assumed",
     ),
-    // Saying things. Both return at once: nothing here holds the turn open, and `ask` differs
-    // from `send` only in the sort it stamps on the message and in what the far end owes back.
+    // Saying things. Nothing here holds the turn open.
     ("send", "put a note in an instance's inbox and carry on"),
     (
         "ask",
@@ -201,8 +176,7 @@ const VERBS: &[(&str, &str)] = &[
         "adopt",
         "ask an instance to become this session's parent -- a person there has to accept",
     ),
-    // Asking for something. The difference between these and `send` is what the far end does
-    // when it arrives, which is why they are verbs rather than a wording choice.
+    // Asking for something. What separates these from `send` is what the far end does on arrival.
     (
         "attention",
         "tell an instance you need it — the one message allowed to interrupt a turn",
@@ -216,8 +190,7 @@ const VERBS: &[(&str, &str)] = &[
         "handoff",
         "give a piece of work to an instance: it is theirs now, not copied",
     ),
-    // Not treading on each other. A file per claim, and advisory: melchior records one, it does
-    // not enforce it — nothing here knows what the work is.
+    // Not treading on each other. A file per claim, advisory and never enforced.
     (
         "claim",
         "record a piece of work as this session's, naming it in `about`, so others can see it \
@@ -228,9 +201,7 @@ const VERBS: &[(&str, &str)] = &[
         "let a claimed piece of work go, naming it in `about` exactly as `claim` did",
     ),
     ("claims", "what every instance has said it is working on"),
-    // Reading what came back. The inbox and nothing else: a `history` verb sat here, fell
-    // through to `tell` and sent an empty message, and the store it wanted is balthasar's.
-    // Growing a second one here is the dependency this family exists to prevent.
+    // Reading what came back: the inbox and nothing else. A conversation store is balthasar's.
     (
         "inbox",
         "what has been sent to this session and not yet acted on",
@@ -242,28 +213,19 @@ const VERBS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Which verbs need an instance named, and which do not.
-///
-/// A table rather than a condition per verb, because the third one written by hand disagreed
-/// with the schema and the model was told `whoami` needed a `who`.
+/// Which verbs need an instance named, and which do not. A table rather than a condition per verb,
+/// so it cannot disagree with the schema.
 const ALONE: &[&str] = &[
     "help", "whoami", "list", "crew", "inbox", "claims", "claim", "release", "announce", "trouble",
     "reply", "role", "task",
 ];
 
-/// Which verbs name a role, and what goes wrong when one does not.
-///
-/// A table for the same reason [`ALONE`] and [`SPEAKS`] are. `assign` without a name is a parent
-/// telling a child it is for something and not saying what, which reaches the far end as a
-/// refusal the model has to guess its way out of.
+/// Which verbs name a role, refused here rather than at the far end.
 const NAMES_A_ROLE: &[&str] = &["role", "assign"];
 
-/// Which verbs need something said.
-///
-/// This is also the list charged against what a session may send in a window — see
-/// [`doing::perform`] — because it is exactly the list of verbs that put something in somebody
-/// else's inbox. `claim` is no longer on it: a claim is a file the crew reads, not a message
-/// anybody is sent.
+/// Which verbs need something said. Also the list charged against what a session may send in a
+/// window — see [`doing::perform`] — because it is exactly the verbs that put something in
+/// somebody else's inbox. `claim` is not one: a claim is a file, not a message.
 const SPEAKS: &[&str] = &[
     "send",
     "ask",
@@ -275,10 +237,6 @@ const SPEAKS: &[&str] = &[
 ];
 
 /// Which verbs quote something by id, and what that id is.
-///
-/// A table for the same reason [`ALONE`] and [`SPEAKS`] are. `release` was in none of them, so
-/// it named nothing and said nothing: it reached the far end as a `release` with an empty body,
-/// which tells whoever reads it that something was let go but not what.
 const QUOTES: &[(&str, &str)] = &[
     ("reply", "the id of the message being answered"),
     ("claim", "a name for the piece of work being taken"),
@@ -286,11 +244,8 @@ const QUOTES: &[(&str, &str)] = &[
     ("task", "the handle `ask` gave back"),
 ];
 
-/// Answer one call.
-///
-/// `standing` is what the host knows about this session: its name, who started it, what it
-/// started, and what has arrived. Handed in rather than reached for, so this stays a function
-/// of its arguments and the host keeps the state.
+/// Answer one call. `standing` is what the host knows about this session, handed in rather than
+/// reached for, so this stays a function of its arguments.
 #[must_use]
 pub fn answer(arguments: &Value, standing: &Standing) -> Answer {
     let verb = arguments.get("verb").and_then(Value::as_str).unwrap_or("");
@@ -304,8 +259,6 @@ pub fn answer(arguments: &Value, standing: &Standing) -> Answer {
             "`{verb}` is not one of {TOOL}'s verbs. Call it with `verb: \"help\"`."
         ));
     }
-    // What a verb needs is a table, not a condition per verb: the third one written by hand
-    // disagreed with the schema and told the model `whoami` wanted a `who`.
     let said = arguments.get("message").and_then(Value::as_str);
     if SPEAKS.contains(&verb) && said.is_none_or(str::is_empty) {
         return Answer::refused(format!("`{verb}` needs `message` — what to say."));
@@ -337,9 +290,7 @@ pub fn answer(arguments: &Value, standing: &Standing) -> Answer {
         "list" => Answer::said(saying::list(standing)),
         "crew" => Answer::said(saying::crew(standing)),
         "inbox" => Answer::said(saying::inbox(standing)),
-        // Answered without a `who`, because the message being quoted already says who to answer.
-        // Asking for both would have a model look up something it just handed over, and the two
-        // could disagree — an answer addressed to somebody who never asked.
+        // No `who`: the message being quoted already says who to answer.
         "reply" => match answering(arguments, standing) {
             Ok(who) => match doing::decide(verb, &who, arguments, standing) {
                 Ok(wanted) => doing::perform(&wanted, standing),
@@ -347,11 +298,9 @@ pub fn answer(arguments: &Value, standing: &Standing) -> Answer {
             },
             Err(refused) => refused,
         },
-        // Aimed at this session and nowhere else, so it takes no `who`: the verb for saying what
-        // *somebody else* is for is `assign`, and it is a different verb because it needs a
-        // different relation. It still goes through the socket rather than writing the note here
-        // — the session holds the answer every other agent reads, and a tool process that wrote
-        // it directly would be a second writer with no reason to agree.
+        // Aimed at this session, so it takes no `who`; `assign` is the one for somebody else. It
+        // still goes over the socket rather than writing the note here, which would be a second
+        // writer of what the session holds.
         "role" => {
             let me = standing.identity().id;
             match doing::decide(verb, &me, arguments, standing) {
@@ -359,28 +308,22 @@ pub fn answer(arguments: &Value, standing: &Standing) -> Answer {
                 Err(refused) => refused,
             }
         }
-        // One decision, many peers, and each of them meets the same wall a `send` would. Fanning
-        // out is not a way round a refusal.
+        // One decision, many peers, each meeting the same wall a `send` would.
         "announce" | "trouble" => fanning::fanned(verb, arguments, standing),
-        // Files, not messages. The record is how the rest of the crew finds out, so nothing is
-        // sent and nothing is dialled — see [`crate::directory::claims`].
+        // Files, not messages: nothing is sent and nothing is dialled.
         "claim" => claiming::take(arguments, standing),
         "release" => claiming::let_go(arguments, standing),
         "claims" => claiming::held(standing),
-        // Derived, never stored. A task table would need a reaper and would be wrong between
-        // reaps, and the one thing a coordinator must not be told is that a dead agent is busy.
+        // Derived, never stored.
         "task" => tasking::reported(arguments, standing),
-        // Kept as the floor rather than deleted with the last stub: a verb added to `ALONE` and
-        // not to the dispatch lands here silently, because this is a match arm and not a missing
-        // function. The test below is what notices.
+        // The floor: a verb added to `ALONE` and not to the dispatch lands here silently, because
+        // this is a match arm and not a missing function. The test below is what notices.
         _ if ALONE.contains(&verb) => Answer::said(format!(
             "`{verb}` is understood but not yet carried out: the socket call it makes is \
                  not wired into the turn loop."
         )),
         _ => match arguments.get("who").and_then(Value::as_str) {
-            // Decided first, dialled second. Everything worth refusing is refused before
-            // the round trip, so a model that asked for something it may not have is told
-            // what it may do instead of paying for the answer.
+            // Decided first, dialled second: everything worth refusing is refused before the dial.
             Some(who) => match doing::decide(verb, who, arguments, standing) {
                 Ok(wanted) => doing::perform(&wanted, standing),
                 Err(refused) => refused,
@@ -390,15 +333,9 @@ pub fn answer(arguments: &Value, standing: &Standing) -> Answer {
     }
 }
 
-/// Who a `reply` goes to: whoever sent the message it quotes.
-///
-/// Looked up rather than asked for. A model that has just read its inbox has the id in hand, and
-/// making it also name the sender is an invitation to answer the wrong session — the id is the
-/// authority on who asked, so it is the only thing this takes.
-///
-/// An `about` that names nothing is refused with what the inbox actually holds. It is the likely
-/// mistake: an id invented, or one from a message already acted on, and "no such message" alone
-/// leaves a model with nowhere to go.
+/// Who a `reply` goes to: whoever sent the message it quotes, looked up rather than asked for,
+/// because the id is the authority on who asked. An `about` that names nothing is refused with
+/// what the inbox actually holds.
 fn answering(arguments: &Value, standing: &Standing) -> Result<String, Answer> {
     let about = arguments
         .get("about")
@@ -407,9 +344,8 @@ fn answering(arguments: &Value, standing: &Standing) -> Result<String, Answer> {
     if let Some(message) = standing.inbox.iter().find(|held| held.id == about) {
         return Ok(message.from.clone());
     }
-    // Named explicitly, and the id is not one of ours: let it through rather than refuse. A
-    // session may be answering something it was told about out of band, and the wall still has
-    // to be passed before anything is sent.
+    // Named explicitly and the id is not one of ours: a session may be answering something it was
+    // told about out of band, and the wall is still passed before anything is sent.
     if let Some(who) = arguments
         .get("who")
         .and_then(Value::as_str)
@@ -434,7 +370,6 @@ fn answering(arguments: &Value, standing: &Standing) -> Result<String, Answer> {
     )))
 }
 
-/// The tool refuses what it should and asks for what it needs.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,8 +436,7 @@ mod tests {
 
     #[test]
     fn stopping_something_this_session_did_not_start_is_refused_here() {
-        // Refused before the round trip, so the model is told what it may do instead of
-        // spending a turn discovering it.
+        // Refused before the round trip.
         let out = call(json!({"verb": "stop", "who": "beta-nu"}), standing());
         assert!(out.failed);
         assert!(out.said.contains("started"), "{}", out.said);
@@ -510,10 +444,7 @@ mod tests {
 
     #[test]
     fn stopping_something_this_session_started_gets_past_both_gates() {
-        // Two gates, and this proves it clears both: the relation says it is this session's
-        // child, and the secret says this session is the one that started it. What stops it
-        // here is the socket, because nothing is listening in a test — and that failure
-        // arriving *is* the evidence, since a refusal would have come before the dial.
+        // Nothing listens in a test, so reaching the socket is the evidence both gates passed.
         let mut standing = standing();
         standing.forked.push("iota-mu".to_owned());
         standing
@@ -530,9 +461,7 @@ mod tests {
 
     #[test]
     fn a_child_is_what_this_session_started_and_not_what_a_name_looks_like() {
-        // The authority comes from what this session remembers doing, never from the far end's
-        // description of itself. A child that declined to leave its note beside its socket
-        // would otherwise have made itself unstoppable by forgetting who its parent was.
+        // The authority is what this session remembers doing, never the far end's own account.
         let mut standing = standing();
         standing.forked.push("iota-mu".to_owned());
         let child = Identity {
@@ -598,15 +527,11 @@ mod tests {
 }
 
 /// The wider surface: what each verb needs, and what it means when it lands.
-///
-/// Split from this file under THE RULE, which caps a file at 800 lines.
 #[cfg(test)]
 #[path = "verbs/surface.rs"]
 mod surface;
 
 /// `reply` finds who to answer from the message it quotes.
-///
-/// Split from this file under THE RULE, which caps a file at 800 lines.
 #[cfg(test)]
 #[path = "verbs/replying.rs"]
 mod replying;

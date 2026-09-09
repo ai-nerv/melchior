@@ -1,24 +1,11 @@
-//! Saying one thing to the whole run.
+//! Saying one thing to the whole run. Split from [`super`] under THE RULE, which caps a file at
+//! 800 lines.
 //!
-//! Split from [`super`] under THE RULE, which caps a file at 800 lines.
-//!
-//! # A fan-out is N sends, and every one of them meets the same wall
-//!
-//! This does not have a route of its own. Each recipient goes through
-//! [`super::doing::decide`], which is the same function `send` goes through, so the project wall,
-//! the instance wall and `magi.agent_talk` decide each one exactly as they would decide a message
-//! addressed by hand. A verb that reached everybody at once *because* it reached everybody at
-//! once would be a way round a refusal, and the refusal is the whole design.
-//!
-//! Refusals are collected and reported rather than swallowed. A coordinator that announced to
-//! eight and was heard by three needs to know which three, or it will plan on the eight.
-//!
-//! # It is charged once, because it is one decision
-//!
-//! [`crate::directory::sending::IN_A_WINDOW`] counts sends against a session, and an announce to
-//! a crew of twelve is not twelve sends by that measure — it is one thing a model decided to say.
-//! Charged per recipient it would trip its own cap on the first call, which would make the guard
-//! against a loop a guard against the verb that exists to avoid one.
+//! There is no route of its own: each recipient goes through [`super::doing::decide`], the same
+//! function `send` goes through, so a fan-out is not a way round a refusal, and refusals are
+//! collected and reported rather than swallowed. It is charged against
+//! [`crate::directory::sending::IN_A_WINDOW`] once rather than per recipient, which charged per
+//! recipient would trip its own cap on the first call.
 
 use super::{Answer, Standing, doing};
 use crate::directory::{sending, sessions};
@@ -101,16 +88,14 @@ fn told(verb: &str, me: &policy::Whom, landed: &[String], refused: &[String]) ->
         )
     };
     if !refused.is_empty() {
-        // Named, because a coordinator that announced to eight and was heard by three will plan
-        // on the eight unless it is told which three.
+        // Named: a coordinator heard by three of eight will plan on the eight otherwise.
         said.push_str(&format!(
             " Not delivered to {}: {}.",
             refused.len(),
             refused.join(", ")
         ));
     }
-    // A fan-out that reached nobody is a failure, and a partial one is not: the sentence above
-    // already says which peers to plan around.
+    // A fan-out that reached nobody is a failure; a partial one is not.
     if landed.is_empty() {
         Answer::refused(said)
     } else {
@@ -123,7 +108,6 @@ fn first_line(said: &str) -> &str {
     said.lines().next().unwrap_or(said)
 }
 
-/// One decision reaches many peers, and meets the same wall at each of them.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,18 +115,13 @@ mod tests {
     use crate::identity::Identity;
     use crate::scratch::Project;
 
-    ///
-    /// A guard rather than a name: the line that removed it came after the assertions, so a
-    /// failing test left it behind for good — see [`crate::scratch`].
+    /// A project of its own, removed on drop — see [`crate::scratch`].
     fn alone(name: &str) -> Project {
         Project::new("melchior-fan", name)
     }
 
-    /// Bind a socket, leave the notes beside it, and answer every call with a bare success.
-    ///
-    /// A peer that accepts and answers rather than one that merely exists, because what this file
-    /// decides is who gets reached and what comes back — and a bound socket nobody serves costs
-    /// the caller its whole ten-second patience before saying so.
+    /// Bind a socket, leave the notes beside it, and answer every call with a bare success. It has
+    /// to answer, not merely exist: a bound socket nobody serves costs the caller its patience.
     fn present(
         project: &str,
         id: &str,
@@ -205,8 +184,7 @@ mod tests {
 
     #[test]
     fn an_announce_reaches_this_run_and_stops_at_the_edge_of_it() {
-        // The roster is the run, so a second run's agent in the same project is not on it. That
-        // is requirement 2 restated as a fan-out: an announce is not a broadcast.
+        // The roster is the run, so a second run's agent in the same project is not on it.
         let project = alone("run");
         let _bound = (
             present(&project, "alpha-rho", "alpha-rho", None),
@@ -234,9 +212,7 @@ mod tests {
 
     #[test]
     fn a_peer_the_setting_puts_out_of_reach_is_named_rather_than_quietly_skipped() {
-        // Fanning out is not a way round a refusal: each recipient goes through the same function
-        // `send` does, so `magi.agent_talk` decides each one. And a coordinator that announced to
-        // two and was heard by one will plan on the two unless it is told which.
+        // Fanning out is not a way round a refusal: `magi.agent_talk` decides each recipient.
         let project = alone("wall");
         let _bound = (
             present(&project, "alpha-rho", "alpha-rho", None),

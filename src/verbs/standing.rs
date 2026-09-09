@@ -1,36 +1,25 @@
-//! What the tool knows about the session it is answering for.
+//! What the tool knows about the session it is answering for. Split from [`super`] under THE
+//! RULE, which caps a file at 800 lines.
 //!
-//! Split from [`super`] under THE RULE, which caps a file at 800 lines.
-//!
-//! # The role is dropped here, and that is the safety story
-//!
-//! A session's name is `project/role/id` and only two of those three reach [`crate::policy`].
-//! The role is what a session *says it is for*, it may be set by the session itself — see
-//! [`crate::directory::roles`] — and a session that could pick its own role could pick `main`
-//! and claim a main's reach. So [`Standing::whom`] builds a [`Whom`] out of the project, the id,
-//! the parent note and the run note, and the role goes nowhere near it.
-//!
-//! [`Whom`] has no field for a role, so this is the type rather than a check somebody has to
-//! remember to write. The tests below are what would notice if that stopped being true.
+//! A session's name is `project/role/id` and the role never reaches [`crate::policy`]: it is what
+//! a session says it is for and may be set by the session itself, so one that could pick its own
+//! role could pick `main` and claim a main's reach. [`Whom`] has no field for a role, and the
+//! tests below are what would notice if that stopped being true.
 
 use crate::identity::Identity;
 use crate::policy::{self, Relation, Whom};
 use crate::wire::Message;
 
-/// What the tool needs from the session in order to answer.
-///
-/// Handed in rather than reached for, because a tool runs on the turn thread and the session is
-/// the UI's. What is here is a copy taken when the call started.
+/// What the tool needs from the session in order to answer, as a copy taken when the call started:
+/// a tool runs on the turn thread and the session is the UI's.
 #[derive(Debug, Clone, Default)]
 pub struct Standing {
     /// Who this session is.
     pub me: String,
     /// Who started it, if anybody.
     pub parent: Option<String>,
-    /// The ids of what it started, which is what it may stop.
-    ///
-    /// Ids rather than whole names, because that is what the directory holds: a role is not part
-    /// of an address, so a full name built from one would carry a guess.
+    /// The ids of what it started, which is what it may stop. Ids rather than whole names, because
+    /// that is what the directory holds and a role is not part of an address.
     pub forked: Vec<String>,
     /// The secret handed to each of them at spawn, by id, which a `stop` has to quote back.
     pub minted: std::collections::BTreeMap<String, String>,
@@ -49,17 +38,12 @@ impl Standing {
         })
     }
 
-    /// Where this session sits in the tree.
-    ///
-    /// Project and id, and no role: what a session is *for* has no bearing on what it may reach.
-    /// A session that could pick its own role could pick `main` and claim a main's reach, so
-    /// the relation is worked out from the spawn tree and nothing else.
+    /// Where this session sits in the tree: project and id, and no role. The run comes off the
+    /// note on disk rather than out of this struct, because a tool process is spawned per call and
+    /// the note is the one copy every other agent reads.
     #[must_use]
     pub fn whom(&self) -> Whom {
         let me = self.identity();
-        // The run comes off the note rather than out of this struct: a tool process is spawned
-        // per call and the note is the one copy every other agent reads, so reading it here is
-        // what keeps this session's idea of its run and everybody else's the same one.
         let session = crate::directory::sessions::session_of(&me);
         Whom {
             project: me.project,
@@ -69,22 +53,15 @@ impl Standing {
         }
     }
 
-    /// How `them` stands to this session.
-    ///
-    /// What this session *started* comes first and is not up for discussion. The rest is read
-    /// off the project directory, never from what the far end says about itself — a session
-    /// that could describe its own place in the tree could describe itself as somebody's child.
-    /// A child that declined to leave its note beside its socket would otherwise have made
-    /// itself unstoppable by forgetting who its parent was.
+    /// How `them` stands to this session. What this session started comes first; the rest is read
+    /// off the project directory, never from what the far end says about itself.
     #[must_use]
     pub fn stands(&self, them: &Identity) -> Relation {
         let me = self.whom();
         if me.project != them.project {
             return Relation::Elsewhere;
         }
-        // By id. What this session started is a list of ids, because that is what the directory
-        // holds — a role is not on disk under that name, and matching whole names would have
-        // missed a child that called itself something this session did not expect.
+        // By id: matching whole names would miss a child that renamed itself.
         if self.forked.contains(&them.id) {
             return Relation::Child;
         }
@@ -92,7 +69,6 @@ impl Standing {
     }
 }
 
-/// The role reaches nothing that decides anything.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,8 +86,6 @@ mod tests {
 
     #[test]
     fn a_session_that_calls_itself_main_does_not_stand_where_a_main_stands() {
-        // The attack the whole invariant exists for. `iota-mu` is somebody's subagent; if the
-        // role reached policy it could sign itself `magi/main/iota-mu` and be one.
         let honest = wearing("scratch").whom();
         let claiming = wearing("main").whom();
         assert_eq!(honest, claiming, "the role reached the place that decides");
@@ -123,8 +97,6 @@ mod tests {
 
     #[test]
     fn no_role_changes_a_relation_or_a_permission_at_any_setting() {
-        // Exhaustive over what a role could possibly buy: every relation, every reach, every
-        // setting. If a role ever reaches `between` or `may_at`, one of these pairs parts.
         let them = Whom {
             project: "magi".to_owned(),
             id: "beta-nu".to_owned(),
@@ -163,10 +135,6 @@ mod tests {
 
     #[test]
     fn the_module_that_decides_never_reads_a_role() {
-        // The structural half, and the one that would catch a change this file cannot see: a
-        // `Whom` has no role to read, so the only way one reaches `between` or `may_at` is if
-        // somebody adds a field or reaches for a note from inside `policy`. Either shows up as
-        // the word appearing in code rather than in prose.
         let source = include_str!("../policy.rs");
         let code: String = source
             .lines()
@@ -183,8 +151,6 @@ mod tests {
 
     #[test]
     fn what_this_session_started_is_still_matched_by_id_rather_than_by_name() {
-        // The other side of dropping the role: `forked` holds ids, so a child that renamed
-        // itself is still this session's child and still stoppable.
         let mut standing = wearing("main");
         standing.forked.push("zeta-pi".to_owned());
         let renamed = Identity {

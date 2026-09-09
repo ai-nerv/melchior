@@ -1,14 +1,9 @@
-//! Working out what a verb means, and then doing it.
+//! Working out what a verb means, and then doing it. Split from [`super`] because the two halves
+//! fail differently: deciding is pure and testable without binding anything, and doing it is a
+//! socket.
 //!
-//! Split from [`super`] because the two halves fail differently. Deciding is pure — a name that
-//! does not parse, a verb that needs a `message`, a wall this session is on the wrong side of —
-//! and every one of those is worth a test that binds nothing. Doing it is a socket, and what
-//! goes wrong there is that nobody is listening.
-//!
-//! The order matters. Everything decidable is decided *before* anything is dialled, so a model
-//! that asked for something it may not have gets told what it may do instead of spending the
-//! round trip finding out. The far end checks again — a caller is not to be trusted with its own
-//! permissions — but by then the turn has already been paid for.
+//! Everything decidable is decided before anything is dialled, so a refusal costs no round trip.
+//! The far end checks again — a caller is not to be trusted with its own permissions.
 
 use super::Answer;
 use super::{NAMES_A_ROLE, SPEAKS, Standing, TOOL, VERBS, tasking};
@@ -34,19 +29,15 @@ pub struct Wanted {
     pub about: Option<String>,
     /// What to call the role, for `role` and `assign`. The sentence is in `message`.
     pub role: Option<String>,
-    /// How many times this piece of work has been handed on, for `handoff`.
-    ///
-    /// Worked out here and carried on the frame, because no session can see a cycle from inside
-    /// it — see [`crate::directory::sending::HOPS`].
+    /// How many times this piece of work has been handed on, for `handoff`. Carried on the frame,
+    /// because no session can see a cycle from inside it — see [`crate::directory::sending::HOPS`].
     pub hops: u32,
     /// The secret the far end was started with, for the one verb that has to prove itself.
     pub token: Option<String>,
 }
 
-/// What sort of message a verb sends.
-///
-/// The verb *is* the sort, for everything but `send` — which takes one, because "put this in
-/// their inbox" is the general case and the others are it with a meaning attached.
+/// What sort of message a verb sends. The verb is the sort for everything but `send`, which takes
+/// one.
 fn sorted(verb: &str, arguments: &Value) -> Sort {
     match verb {
         "ask" => Sort::Question,
@@ -54,9 +45,7 @@ fn sorted(verb: &str, arguments: &Value) -> Sort {
         "attention" => Sort::Attention,
         "trouble" => Sort::Trouble,
         "handoff" => Sort::Handoff,
-        // The same sort a note has, and that is the difference between it and `trouble`: one is
-        // read when the far end next looks, the other reaches somebody mid-turn. A fan-out that
-        // interrupted a whole run for a status update would be a fan-out nobody leaves on.
+        // A note's sort, which is what separates it from `trouble`: it does not interrupt a turn.
         "announce" => Sort::Note,
         _ => arguments
             .get("sort")
@@ -66,9 +55,8 @@ fn sorted(verb: &str, arguments: &Value) -> Sort {
     }
 }
 
-/// Everything decidable about a verb aimed at one instance.
-///
-/// `Err` is the refusal to hand back; `Ok` is a call worth making.
+/// Everything decidable about a verb aimed at one instance. `Err` is the refusal to hand back;
+/// `Ok` is a call worth making.
 pub fn decide(
     verb: &str,
     who: &str,
@@ -94,11 +82,8 @@ pub fn decide(
     let me = standing.whom();
     let whole = address.against(&standing.identity());
     let relation = standing.stands(&whole);
-    // **The same relation `stop` needs, and none of the proof.** Saying what a subagent is for is
-    // not ending its life: a role grants nothing, so the secret that makes `stop` refusable would
-    // be guarding a word — and demanding it would say the word mattered more than it does.
-    // Refused with its own sentence rather than through the ladder, whose Stop refusal talks
-    // about ending sessions and would send a model looking for a token it does not need.
+    // The same relation `stop` needs and none of the proof, refused with its own sentence: the
+    // ladder's Stop refusal would send a model looking for a token `assign` does not need.
     if verb == "assign" && relation != policy::Relation::Child {
         return Err(Answer::refused(format!(
             "this session did not start `{}`, so what it is for is not this session's to say. \
@@ -120,18 +105,15 @@ pub fn decide(
     if !policy::may(&me, relation, reach) {
         return Err(Answer::refused(policy::refusal(&me, relation, reach)));
     }
-    // Bounded before the dial, like everything else here, and for the plainest of the reasons: a
-    // message the far end will refuse for its length has still cost a round trip by the time it
-    // says so, and the model reads the refusal a turn later than it could have.
+    // Bounded before the dial, so an over-long message costs no round trip to be refused.
     if let Some(said) = arguments.get("message").and_then(Value::as_str)
         && !NAMES_A_ROLE.contains(&verb)
         && let Err(why) = sending::sized(said)
     {
         return Err(Answer::refused(why));
     }
-    // **The count comes off what arrived and goes onto what leaves.** A handoff cycle is invisible
-    // from inside any one session — each of A, B and C sees one arrival and one departure — so
-    // the only place the ring can be counted is on the work itself.
+    // The count comes off what arrived and goes onto what leaves: a handoff cycle is invisible
+    // from inside any one session, so the ring can only be counted on the work itself.
     let hops = if verb == "handoff" {
         let deep = sending::hopped(&standing.inbox);
         if let Some(why) = sending::too_far(deep) {
@@ -141,12 +123,9 @@ pub fn decide(
     } else {
         0
     };
-    // By verb rather than by reach, so that a second verb rated `Stop` one day cannot pick a
-    // secret up on the way past. One line sends one, and it can be read.
+    // By verb rather than by reach, so a second verb rated `Stop` one day cannot pick a secret up.
     let token = if verb == "stop" {
-        // Held only for what this session started. Refused here rather than at the far end,
-        // where the answer would be "that is not the secret" — true, and no help at all to a
-        // model that never had one.
+        // Refused here rather than at the far end, whose answer would be "that is not the secret".
         let Some(secret) = standing.minted.get(&whole.id).cloned() else {
             return Err(Answer::refused(format!(
                 "this session did not start `{}`, so it holds nothing that could stop it",
@@ -178,16 +157,10 @@ pub fn decide(
     })
 }
 
-/// Make the call, having first charged it against what this session may send.
-///
-/// **Counted here rather than in [`decide`]**, and it is the one gate that is not pure: the record
-/// is a file, because `melchior tool` is one process per call and nothing it counted in memory
-/// would survive the exit. It is still before the socket opens, which is the property that
-/// matters — a refusal a model reads without paying for a round trip.
-///
-/// Only the verbs that put something in an inbox are charged. Asking a peer what it is doing is
-/// not a message, and rating it as one would have a coordinator run out of window reading its own
-/// crew.
+/// Make the call, having first charged it against what this session may send. Counted here rather
+/// than in [`decide`] because the record is a file: `melchior tool` is one process per call, so
+/// nothing counted in memory would survive the exit. Only the verbs that put something in an inbox
+/// are charged.
 pub fn perform(wanted: &Wanted, standing: &Standing) -> Answer {
     if SPEAKS.contains(&wanted.verb.as_str())
         && let Err(why) = sending::allow(
@@ -205,17 +178,13 @@ pub fn perform(wanted: &Wanted, standing: &Standing) -> Answer {
     carried(wanted, standing)
 }
 
-/// The same, already charged.
-///
-/// What a fan-out calls, because an announce to a crew of twelve is one thing a model decided to
-/// say rather than twelve: charged per recipient it would trip its own cap on the first call.
+/// The same, already charged. What a fan-out calls, since an announce is charged once rather than
+/// once per recipient.
 pub(super) fn carried(wanted: &Wanted, standing: &Standing) -> Answer {
     let me = standing.identity();
     let mut held = match crate::directory::dial(&wanted.who, &me) {
         Ok(held) => held,
-        // The common failure, and worth its own sentence: a socket file outlives the process
-        // that made it, so a name found in the directory is not a promise that anything is
-        // behind it. "nothing is listening" is actionable; "connection refused" is not.
+        // A socket file outlives its process, so a name in the directory is not a promise.
         Err(why) => {
             return Answer::refused(format!(
                 "nothing is listening as `{}` ({why}). Use `list` to see who is actually there.",
@@ -230,8 +199,7 @@ pub(super) fn carried(wanted: &Wanted, standing: &Standing) -> Answer {
         }
     };
     if !reply.ok {
-        // The far end's own words. It knows things this side does not — that it was never
-        // started by anybody, that the secret was wrong — and repeating them beats a summary.
+        // The far end's own words, which know things this side does not.
         return Answer::refused(format!(
             "`{}` refused: {}{}",
             wanted.who.full(),
@@ -253,8 +221,7 @@ fn said(held: &mut asking::Held, wanted: &Wanted) -> std::io::Result<Reply> {
             Vec::new(),
             wanted.token.as_deref().unwrap_or_default(),
         ),
-        // Both are the same call: an agent naming itself, and its parent naming it. What differs
-        // is who may make it, and that was settled above and is settled again at the far end.
+        // Both are the same call; what differs is who may make it, settled above and far end.
         "role" | "assign" => held.call(
             "role",
             vec![
@@ -262,17 +229,14 @@ fn said(held: &mut asking::Held, wanted: &Wanted) -> std::io::Result<Reply> {
                 serde_json::json!(wanted.message),
             ],
         ),
-        // The reason travels with it: somebody is about to be asked to take responsibility for
-        // a session, and "why" is the whole of what they have to go on.
+        // The reason travels with it: it is all the far end has to decide on.
         "adopt" => held.call(
             "adopt",
             vec![serde_json::json!(
                 wanted.message.clone().unwrap_or_default()
             )],
         ),
-        // Everything else is a message. The sort is what makes them different verbs rather than
-        // a wording choice: `attention` and `note` travel identically and mean entirely
-        // different things to whoever reads them.
+        // Everything else is a message, and the sort is what makes them different verbs.
         _ => held.call(
             "tell",
             vec![
@@ -289,26 +253,21 @@ fn said(held: &mut asking::Held, wanted: &Wanted) -> std::io::Result<Reply> {
 fn landed(wanted: &Wanted, reply: &Reply) -> String {
     let who = wanted.who.full();
     match wanted.verb.as_str() {
-        // A report is whatever came back, verbatim. The model asked a question about another
-        // session; summarising the answer here would be this file deciding what mattered.
+        // A report is whatever came back, verbatim.
         "about" | "status" | "verbs" => reply
             .result
             .first()
             .map_or_else(|| "nothing".to_owned(), ToString::to_string),
         "stop" => format!("`{who}` was told to stop."),
-        // Said plainly, because the tempting reading is the wrong one. A role is what `crew`
-        // shows a coordinator so it can pick somebody; it is not an instruction, and nothing
-        // about what this session or that one may do has changed.
+        // A role is what `crew` shows a coordinator; it is not an instruction and grants nothing.
         "role" | "assign" => format!(
             "`{}` is now `{}`. That is what `crew` will show; it grants nothing and changes \
              nothing about what may be reached.",
             wanted.who.id,
             wanted.role.as_deref().unwrap_or_default()
         ),
-        // A handle and a state, because "it is in their inbox" is a fact with no follow-up. The
-        // handle is the id the far end minted for the message, which is also the id it will quote
-        // in `about` when it answers — so `task` can say where this got to without anything
-        // being written down anywhere.
+        // The handle is the id the far end minted for the message, which is also the id it quotes
+        // in `about` when it answers, so `task` can report on it without anything being stored.
         "ask" => reply
             .result
             .first()
@@ -327,9 +286,7 @@ fn landed(wanted: &Wanted, reply: &Reply) -> String {
         "attention" | "trouble" => {
             format!("`{who}` has it, marked so it can interrupt whatever they are doing.")
         }
-        // Said carefully, because the model must not carry on as though it now had a parent.
-        // Nothing has changed yet and nothing may change: a person has to say yes first, and
-        // the answer arrives later as a message.
+        // Nothing has changed yet: a person has to accept, and the answer arrives later.
         "adopt" => format!(
             "Asked `{who}` to take this session on. Nothing has changed yet — somebody there \
              has to accept, and their answer will arrive in this session's inbox."
@@ -346,7 +303,6 @@ fn name_of(sort: Sort) -> String {
         .unwrap_or_else(|| "note".to_owned())
 }
 
-/// Deciding is settled before anything is dialled.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,8 +319,6 @@ mod tests {
 
     #[test]
     fn a_verb_is_decided_without_anything_listening() {
-        // The whole reason deciding and doing are separate functions. Every refusal worth
-        // testing is decidable, and a test that has to bind a socket is one nobody writes.
         let wanted = decide(
             "send",
             "beta-nu",
@@ -400,8 +354,6 @@ mod tests {
 
     #[test]
     fn a_handoff_carries_one_more_hop_than_the_deepest_that_arrived() {
-        // The count has to ride the message because no session can see a ring: A hands to B, B to
-        // C, C back to A, and each of the three sees one arrival and one departure.
         let mut standing = standing();
         let fresh = decide(
             "handoff",
@@ -437,9 +389,6 @@ mod tests {
 
     #[test]
     fn a_handoff_that_has_come_back_round_is_refused_before_the_dial() {
-        // Risk 6. MAST measures step repetition at 15.7% and unaware-of-termination at 12.4%, and
-        // a cycle looks like both from inside. What stops it is the number, and the number is
-        // refused here rather than at whoever it would have been handed to next.
         let mut standing = standing();
         let mut arrived =
             crate::wire::Message::sent("magi/main/gamma-xi", "yours now", Sort::Handoff, None);
@@ -501,8 +450,6 @@ mod tests {
 
     #[test]
     fn stopping_something_with_no_secret_is_refused_before_the_round_trip() {
-        // The far end would say "that is not the secret", which is true and no help at all to a
-        // model that never had one.
         let mut standing = standing();
         standing.forked.push("iota-mu".to_owned());
         let refused = decide("stop", "iota-mu", &serde_json::json!({}), &standing)
@@ -524,8 +471,6 @@ mod tests {
 
     #[test]
     fn no_other_verb_ever_carries_a_secret() {
-        // One line that sends one, so it can be read. A verb picking one up by accident is how
-        // a secret ends up somewhere it was never meant to go.
         let mut standing = standing();
         standing
             .minted
@@ -558,8 +503,6 @@ mod tests {
 
     #[test]
     fn nothing_listening_says_so_and_says_what_to_do_about_it() {
-        // A socket file outlives the process that made it, so a name in the directory is not a
-        // promise that anything is behind it.
         let wanted = decide(
             "status",
             "nobody-nowhere",

@@ -1,20 +1,8 @@
-//! Saying what this session is working on, so two agents do not do it twice.
+//! Saying what this session is working on, so two agents do not do it twice. Split from [`super`]
+//! under THE RULE, which caps a file at 800 lines.
 //!
-//! Split from [`super`] under THE RULE, which caps a file at 800 lines.
-//!
-//! # Advisory, and said so out loud
-//!
-//! A claim stops nothing. There is no lock on the work itself — melchior does not know what the
-//! work *is* — so what a claim buys is that the next agent to consider the same piece of it can
-//! find out, before starting, that somebody is already on it. That is worth having and it is not
-//! mutual exclusion, and every answer here says which of the two it is: a model told "claimed"
-//! that read it as "reserved" would carry on regardless the first time it disagreed.
-//!
-//! # No message goes anywhere
-//!
-//! `claim` used to need somebody to tell. It does not: the file *is* how the crew finds out, and
-//! `claims` is how they ask. Sending a note to every agent in the run every time somebody picked
-//! up a task would spend a turn of everybody's attention on a fact none of them needed yet.
+//! A claim is advisory and locks nothing, so every answer here says so out loud. Nothing is sent
+//! to anybody: the record is how the crew finds out and `claims` is how they ask.
 
 use super::{Answer, Standing};
 use crate::directory::claims;
@@ -46,12 +34,9 @@ pub fn let_go(arguments: &serde_json::Value, standing: &Standing) -> Answer {
     }
 }
 
-/// What everybody has said they are on.
-///
-/// The whole project rather than the run, and the difference matters: two runs in one checkout
-/// edit the same files, so a roster-shaped answer would show a coordinator a piece of work as
-/// free while another run's agent had it open. [`crate::directory::sessions::crew`] answers who
-/// is on this job; this answers what is being touched.
+/// What everybody has said they are on, across the whole project rather than the run: two runs in
+/// one checkout edit the same files. [`crate::directory::sessions::crew`] answers who is on this
+/// job; this answers what is being touched.
 pub fn held(standing: &Standing) -> Answer {
     let me = standing.identity();
     let held = claims::all(&me.project);
@@ -95,7 +80,6 @@ fn about(arguments: &serde_json::Value) -> &str {
         .unwrap_or_default()
 }
 
-/// A claim is recorded, read and let go, and none of it is a lock.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,10 +87,8 @@ mod tests {
     use crate::identity::Identity;
     use crate::scratch::Project;
 
-    /// A project of its own, with a socket, so the holder is one that answers.
-    ///
-    /// A guard rather than a name: the line that removed it came after the assertions, so a
-    /// failing test left it behind for good — see [`crate::scratch`].
+    /// A project of its own, with a socket, so the holder is one that answers. The listener is
+    /// returned as a guard so a failing test does not leave it bound — see [`crate::scratch`].
     fn alone(name: &str) -> (Project, std::os::unix::net::UnixListener) {
         let project = Project::new("melchior-claiming", name);
         let me = Identity {
@@ -138,8 +120,6 @@ mod tests {
         let listed = held(&standing);
         assert!(listed.said.contains("src/parser.rs"), "{}", listed.said);
         assert!(listed.said.contains("alpha-rho"), "{}", listed.said);
-        // Said out loud, because a model that read "claimed" as "reserved" would carry on the
-        // first time it disagreed with the record.
         assert!(listed.said.contains("not locks"), "{}", listed.said);
 
         let gone = let_go(&serde_json::json!({"about": "src/parser.rs"}), &standing);
@@ -149,8 +129,6 @@ mod tests {
 
     #[test]
     fn a_claim_somebody_else_holds_is_refused_by_name() {
-        // The whole point of the record: the answer says who to ask, because "no" on its own
-        // sends a model back to try the same thing with a different word.
         let (project, _bound) = alone("taken");
         let other = socket(&project, "beta-nu");
         let _theirs = std::os::unix::net::UnixListener::bind(&other).expect("bind");
