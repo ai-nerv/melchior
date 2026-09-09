@@ -26,9 +26,12 @@
 //! told about a cousin it will then be refused spends the turn planning around a wall it was
 //! never going to get through; see [`crate::policy`] for where the walls are.
 
+mod claiming;
 pub mod doing;
+mod fanning;
 pub mod saying;
 mod standing;
+pub mod tasking;
 
 pub use standing::Standing;
 
@@ -106,13 +109,14 @@ pub fn parameters() -> Value {
             "message": {
                 "type": "string",
                 "description": "what to say. Needed by send, ask, reply, announce, \
-                                attention, trouble, handoff and claim.",
+                                attention, trouble and handoff.",
             },
             "about": {
                 "type": "string",
-                "description": "the id of the message being answered, or of the work \
-                                being let go. Required by `reply` and `release`; `inbox` \
-                                lists the ids.",
+                "description": "what is being named: the id of the message being answered \
+                                (`reply` — `inbox` lists them), the piece of work being taken \
+                                or let go (`claim`, `release`), or the handle `ask` gave back \
+                                (`task`).",
             },
             "role": {
                 "type": "string",
@@ -185,7 +189,14 @@ const VERBS: &[(&str, &str)] = &[
         "reply",
         "answer a question that was asked of this session, quoting its id",
     ),
-    ("announce", "send the same note to every instance listening"),
+    (
+        "announce",
+        "put the same note in the inbox of everyone else in this session's run",
+    ),
+    (
+        "task",
+        "where something this session asked for has got to, by the handle `ask` gave back",
+    ),
     (
         "adopt",
         "ask an instance to become this session's parent -- a person there has to accept",
@@ -198,20 +209,23 @@ const VERBS: &[(&str, &str)] = &[
     ),
     (
         "trouble",
-        "report that something is wrong and this session cannot go on",
+        "tell everyone else in this session's run that something is wrong and this session \
+         cannot go on — it interrupts them",
     ),
     (
         "handoff",
         "give a piece of work to an instance: it is theirs now, not copied",
     ),
-    // Not treading on each other. Advisory: magi records a claim, it does not enforce one.
+    // Not treading on each other. A file per claim, and advisory: melchior records one, it does
+    // not enforce it — nothing here knows what the work is.
     (
         "claim",
-        "say this session is taking a piece of work, so others leave it alone",
+        "record a piece of work as this session's, naming it in `about`, so others can see it \
+         is taken before they start it",
     ),
     (
         "release",
-        "let a claimed piece of work go, naming it by the id that claimed it",
+        "let a claimed piece of work go, naming it in `about` exactly as `claim` did",
     ),
     ("claims", "what every instance has said it is working on"),
     // Reading what came back. The inbox and nothing else: a `history` verb sat here, fell
@@ -233,7 +247,8 @@ const VERBS: &[(&str, &str)] = &[
 /// A table rather than a condition per verb, because the third one written by hand disagreed
 /// with the schema and the model was told `whoami` needed a `who`.
 const ALONE: &[&str] = &[
-    "help", "whoami", "list", "crew", "inbox", "claims", "announce", "trouble", "reply", "role",
+    "help", "whoami", "list", "crew", "inbox", "claims", "claim", "release", "announce", "trouble",
+    "reply", "role", "task",
 ];
 
 /// Which verbs name a role, and what goes wrong when one does not.
@@ -244,6 +259,11 @@ const ALONE: &[&str] = &[
 const NAMES_A_ROLE: &[&str] = &["role", "assign"];
 
 /// Which verbs need something said.
+///
+/// This is also the list charged against what a session may send in a window — see
+/// [`doing::perform`] — because it is exactly the list of verbs that put something in somebody
+/// else's inbox. `claim` is no longer on it: a claim is a file the crew reads, not a message
+/// anybody is sent.
 const SPEAKS: &[&str] = &[
     "send",
     "ask",
@@ -252,7 +272,6 @@ const SPEAKS: &[&str] = &[
     "attention",
     "trouble",
     "handoff",
-    "claim",
 ];
 
 /// Which verbs quote something by id, and what that id is.
@@ -262,7 +281,9 @@ const SPEAKS: &[&str] = &[
 /// which tells whoever reads it that something was let go but not what.
 const QUOTES: &[(&str, &str)] = &[
     ("reply", "the id of the message being answered"),
-    ("release", "the id of the work being let go"),
+    ("claim", "a name for the piece of work being taken"),
+    ("release", "the name the work was claimed under"),
+    ("task", "the handle `ask` gave back"),
 ];
 
 /// Answer one call.
@@ -338,6 +359,20 @@ pub fn answer(arguments: &Value, standing: &Standing) -> Answer {
                 Err(refused) => refused,
             }
         }
+        // One decision, many peers, and each of them meets the same wall a `send` would. Fanning
+        // out is not a way round a refusal.
+        "announce" | "trouble" => fanning::fanned(verb, arguments, standing),
+        // Files, not messages. The record is how the rest of the crew finds out, so nothing is
+        // sent and nothing is dialled — see [`crate::directory::claims`].
+        "claim" => claiming::take(arguments, standing),
+        "release" => claiming::let_go(arguments, standing),
+        "claims" => claiming::held(standing),
+        // Derived, never stored. A task table would need a reaper and would be wrong between
+        // reaps, and the one thing a coordinator must not be told is that a dead agent is busy.
+        "task" => tasking::reported(arguments, standing),
+        // Kept as the floor rather than deleted with the last stub: a verb added to `ALONE` and
+        // not to the dispatch lands here silently, because this is a match arm and not a missing
+        // function. The test below is what notices.
         _ if ALONE.contains(&verb) => Answer::said(format!(
             "`{verb}` is understood but not yet carried out: the socket call it makes is \
                  not wired into the turn loop."
@@ -562,162 +597,12 @@ mod tests {
     }
 }
 
-/// This session's own name and place.
 /// The wider surface: what each verb needs, and what it means when it lands.
+///
+/// Split from this file under THE RULE, which caps a file at 800 lines.
 #[cfg(test)]
-mod surface_tests {
-    use super::*;
-    use crate::wire::{Message, Sort};
-
-    fn standing() -> Standing {
-        Standing {
-            me: "magi/main/alpha-rho".to_owned(),
-            parent: None,
-            forked: Vec::new(),
-            minted: std::collections::BTreeMap::new(),
-            inbox: Vec::new(),
-        }
-    }
-
-    fn call(arguments: Value, standing: Standing) -> Answer {
-        answer(&arguments, &standing)
-    }
-
-    #[test]
-    fn every_verb_either_needs_an_instance_or_is_listed_as_not_needing_one() {
-        // The table and the dispatch drift the moment either is edited, and the drift shows up
-        // as the model being told `whoami` wants a `who`.
-        for (verb, _) in VERBS {
-            let out = call(
-                json!({"verb": verb, "message": "x", "about": "y", "role": "z"}),
-                standing(),
-            );
-            let wants_who = out.failed && out.said.contains("needs `who`");
-            assert_eq!(
-                wants_who,
-                !ALONE.contains(verb),
-                "{verb}: needs an instance = {wants_who}, listed as alone = {}",
-                ALONE.contains(verb)
-            );
-        }
-    }
-
-    #[test]
-    fn crew_is_answered_rather_than_falling_into_the_not_yet_wired_arm() {
-        // Everything in `ALONE` that is still a stub answers "understood but not yet carried
-        // out", and a verb added to that table and not to the dispatch joins them silently —
-        // it is a match arm, not a missing function, so nothing fails to compile.
-        let out = call(json!({"verb": "crew"}), standing());
-        assert!(!out.failed, "{}", out.said);
-        assert!(!out.said.contains("not yet carried out"), "{}", out.said);
-    }
-
-    #[test]
-    fn a_verb_that_says_something_refuses_to_say_nothing() {
-        for verb in SPEAKS {
-            let out = call(json!({"verb": verb, "who": "gamma"}), standing());
-            assert!(out.failed, "{verb} sent an empty message");
-            assert!(out.said.contains("message"), "{verb}: {}", out.said);
-        }
-    }
-
-    #[test]
-    fn a_verb_that_quotes_an_id_refuses_to_quote_nothing() {
-        // `release` was in none of the three tables, so nothing asked it for anything: it went
-        // out as a `release` with an empty body, telling the far end that something had been
-        // let go and not what.
-        for (verb, _) in QUOTES {
-            let out = call(
-                json!({"verb": verb, "who": "gamma", "message": "x"}),
-                standing(),
-            );
-            assert!(out.failed, "{verb} quoted nothing");
-            assert!(out.said.contains("about"), "{verb}: {}", out.said);
-        }
-    }
-
-    #[test]
-    fn a_reply_has_to_say_what_it_is_answering() {
-        // Without it the far end has an answer and no idea to what, which is worse than no
-        // answer: it reads as an unprompted assertion.
-        let out = call(json!({"verb": "reply", "message": "yes"}), standing());
-        assert!(out.failed);
-        assert!(out.said.contains("about"), "{}", out.said);
-        assert!(out.said.contains("inbox"), "and where to find the id");
-    }
-
-    #[test]
-    fn a_root_session_is_told_it_has_nobody_to_escalate_to() {
-        // A subagent that does not know it is one will not raise `attention` at a parent it
-        // does not know it has. A root that thinks it has one will wait for an answer forever.
-        let said = call(json!({"verb": "whoami"}), standing()).said;
-        assert!(said.contains("root session"), "{said}");
-
-        let mut child = standing();
-        child.parent = Some("magi/main/root".to_owned());
-        let said = call(json!({"verb": "whoami"}), child).said;
-        assert!(said.contains("magi/main/root"), "{said}");
-        assert!(said.contains("attention"), "and what to do with it: {said}");
-    }
-
-    #[test]
-    fn whoami_says_what_it_may_stop() {
-        let mut standing = standing();
-        standing.forked.push("magi/main/gamma".to_owned());
-        let said = call(json!({"verb": "whoami"}), standing).said;
-        assert!(said.contains("magi/main/gamma"), "{said}");
-        assert!(said.contains("may stop"), "{said}");
-    }
-
-    #[test]
-    fn only_a_cry_for_help_interrupts() {
-        // An inbox that interrupts for every note is an inbox nobody leaves switched on.
-        for sort in [Sort::Attention, Sort::Trouble] {
-            assert!(sort.interrupts(), "{sort:?} should reach a busy session");
-        }
-        for sort in [Sort::Note, Sort::Question, Sort::Answer, Sort::Claim] {
-            assert!(!sort.interrupts(), "{sort:?} should wait");
-        }
-    }
-
-    #[test]
-    fn the_inbox_marks_what_is_urgent_and_what_is_owed_an_answer() {
-        let mut standing = standing();
-        standing.inbox.push(Message::new("magi/main/beta", "fyi"));
-        standing.inbox.push(Message::sent(
-            "magi/main/gamma",
-            "which parser?",
-            Sort::Question,
-            None,
-        ));
-        standing.inbox.push(Message::sent(
-            "magi/main/delta",
-            "I am stuck",
-            Sort::Attention,
-            None,
-        ));
-        let said = call(json!({"verb": "inbox"}), standing).said;
-        assert!(
-            said.contains("! `magi/main/delta`"),
-            "urgent unmarked: {said}"
-        );
-        assert!(
-            said.contains("`reply`"),
-            "no way back to the question: {said}"
-        );
-        assert!(said.contains("[question]"), "sorts are not shown: {said}");
-    }
-
-    #[test]
-    fn a_message_can_be_answered_by_the_id_the_inbox_showed() {
-        // The id has to survive the round trip, or `reply` quotes something nobody has.
-        let message = Message::sent("magi/main/gamma", "which parser?", Sort::Question, None);
-        let text = serde_json::to_string(&message).expect("encodes");
-        let back: Message = serde_json::from_str(&text).expect("decodes");
-        assert_eq!(back.id, message.id);
-        assert_eq!(back.sort, Sort::Question);
-    }
-}
+#[path = "verbs/surface.rs"]
+mod surface;
 
 /// `reply` finds who to answer from the message it quotes.
 ///

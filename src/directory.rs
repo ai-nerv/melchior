@@ -10,9 +10,17 @@
 //!     iota-mu.parent       <- "alpha-rho": who started it
 //!     iota-mu.session      <- "alpha-rho": which run it belongs to
 //!     iota-mu.role         <- "reviewer", and a line saying what that means
+//!     iota-mu.sent         <- what it has sent lately, so a loop runs out of window
+//!     .claims/             <- one file per piece of work somebody has taken
+//!       the-parser
 //!   other-project/
 //!     beta-nu
 //! ```
+//!
+//! Every name beside a socket carries a dot, and the claims directory begins with one. That is
+//! not tidiness: [`listening`] keeps the entries with no dot in them and *dials each as a socket*,
+//! so anything here that read as an id would be offered to a model as an agent and then swept as
+//! a corpse when the dial failed.
 //!
 //! A project directory, and inside it a socket per session named by its id. No role in the
 //! path, because a role is not part of a name — see [`crate::identity`]. Sessions in different
@@ -35,7 +43,9 @@
 //! secret handed to the session in [`TOKEN`] when it was started, which only whoever started it
 //! ever held. A session nobody started holds none, so nothing can stop it.
 
+pub mod claims;
 pub mod roles;
+pub mod sending;
 pub mod sessions;
 
 use crate::identity::Identity;
@@ -338,6 +348,8 @@ pub fn forget(me: &Identity) {
     let _ = std::fs::remove_file(kin_at(me));
     sessions::ended(me);
     roles::ended(me);
+    sending::ended(me);
+    claims::forget_in(&me.project, &me.id);
 }
 
 /// Record that `them` now answers to `parent`.
@@ -505,6 +517,10 @@ fn forget_id(project: &str, id: &str) {
     let _ = std::fs::remove_file(home(project).join(format!("{}.parent", safe(id))));
     sessions::forget_in(project, id);
     roles::forget_in(project, id);
+    sending::forget_in(project, id);
+    // And what it had taken. A process that died did not get to let go of its work, and a claim
+    // nobody can be asked about is a piece of work nobody will ever do again.
+    claims::forget_in(project, id);
 }
 
 /// Last one out turns off the lights: drop the project's directory if nothing is left in it.
@@ -513,6 +529,10 @@ fn forget_id(project: &str, id: &str) {
 /// listing, and no race against a session binding as this one leaves. Without it a machine
 /// collects an empty directory per project, which is how the runtime directory filled up.
 pub fn leave(project: &str) {
+    // The claims directory first, and by the same test: `remove_dir` refuses one that still holds
+    // a claim, so a run somebody is still working in keeps its directory. Without this the empty
+    // one left inside would keep the project's alive for good.
+    claims::leave(project);
     let _ = std::fs::remove_dir(home(project));
 }
 
@@ -687,91 +707,8 @@ mod tests {
 }
 
 /// A note written by a consenting parent is one every reader agrees with.
+///
+/// Split from this file under THE RULE, which caps a file at 800 lines.
 #[cfg(test)]
-mod adopting {
-    use super::*;
-
-    /// A project of its own, so these do not read each other's directory.
-    fn alone(name: &str) -> String {
-        let project = format!("melchior-adopt-{}-{name}", std::process::id());
-        let _ = std::fs::remove_dir_all(home(&project));
-        project
-    }
-
-    fn id(project: &str, id: &str) -> Identity {
-        Identity {
-            project: project.to_owned(),
-            role: "main".to_owned(),
-            id: id.to_owned(),
-        }
-    }
-
-    #[test]
-    fn the_adopted_session_reads_as_the_adopters_child() {
-        // The bug this is here for: the note was written as a full name and every reader
-        // compares it against a bare id, so the child read as a *cousin* — and the session that
-        // had just accepted it was refused for reaching another instance's subagent.
-        let project = alone("child");
-        let parent = id(&project, "beta-omicron");
-        let child = id(&project, "psi-eta");
-        std::fs::create_dir_all(home(&project)).expect("mkdir");
-
-        adopted(&child, &parent.id);
-
-        let theirs = whom(&project, &child.id);
-        let mine = whom(&project, &parent.id);
-        assert_eq!(
-            policy::between(&mine, &theirs),
-            policy::Relation::Child,
-            "the adopter does not see a child"
-        );
-        assert_eq!(
-            policy::between(&theirs, &mine),
-            policy::Relation::Parent,
-            "the adopted does not see a parent"
-        );
-        let _ = std::fs::remove_dir_all(home(&project));
-    }
-
-    #[test]
-    fn and_shows_up_as_one_of_the_adopters_children() {
-        // The other reader of the same note, and it compares the same way.
-        let project = alone("listed");
-        let parent = id(&project, "beta-omicron");
-        std::fs::create_dir_all(home(&project)).expect("mkdir");
-        adopted(&id(&project, "psi-eta"), &parent.id);
-        // `children` only counts sessions that are listening, so this asserts the note is read
-        // rather than that the pair is live.
-        assert_eq!(
-            whom(&project, "psi-eta").parent.as_deref(),
-            Some("beta-omicron")
-        );
-        let _ = std::fs::remove_dir_all(home(&project));
-    }
-
-    #[test]
-    fn a_session_reads_its_own_parent_off_the_note_rather_than_its_environment() {
-        // Being adopted happens from outside: no variable can be set on a running process. Read
-        // from the environment alone, an adopted session went on calling itself a main while
-        // everybody else saw a child — and the rule against a second parent tests exactly that.
-        let project = alone("mine");
-        let child = id(&project, "psi-eta");
-        std::fs::create_dir_all(home(&project)).expect("mkdir");
-        assert_eq!(parent_of(&child), None, "it starts with nobody");
-        adopted(&child, "beta-omicron");
-        assert_eq!(parent_of(&child).as_deref(), Some("beta-omicron"));
-        let _ = std::fs::remove_dir_all(home(&project));
-    }
-    #[test]
-    fn dialling_a_name_nobody_is_listening_under_is_an_error() {
-        // The half that used to live on `Held::to`: a name resolves to a path, and a path with
-        // nothing behind it is an error rather than a wait. A socket file outlives the process
-        // that made it, so this is the ordinary answer for a session that ended.
-        let missing = Identity {
-            project: "no-such-project-here".to_owned(),
-            role: "main".to_owned(),
-            id: "nobody-nowhere".to_owned(),
-        };
-        assert!(dial(&missing, &missing).is_err());
-    }
-}
+#[path = "directory/adopting.rs"]
+mod adopting;

@@ -414,7 +414,10 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                         text: message.text.clone(),
                         about: message.about.clone(),
                     });
-                    inbox.push(message);
+                    // Bounded, so a handoff that has come back round runs out of somewhere to go.
+                    // The hop count in the frame is the guard that counts; this is the one that
+                    // holds when the count is wrong.
+                    melchior::answering::keeping::kept(&mut inbox, message);
                     about_tx.send_modify(|about| about.inbox.clone_from(&inbox));
                 }
                 // Held here until the person answers. Kept rather than answered on the spot,

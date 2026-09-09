@@ -11,9 +11,9 @@
 //! permissions — but by then the turn has already been paid for.
 
 use super::Answer;
-use super::{NAMES_A_ROLE, SPEAKS, Standing, TOOL, VERBS};
+use super::{NAMES_A_ROLE, SPEAKS, Standing, TOOL, VERBS, tasking};
 use crate::asking;
-use crate::directory::Address;
+use crate::directory::{Address, sending};
 use crate::policy;
 use crate::policy::Reach;
 use crate::wire::{Reply, Sort};
@@ -34,6 +34,11 @@ pub struct Wanted {
     pub about: Option<String>,
     /// What to call the role, for `role` and `assign`. The sentence is in `message`.
     pub role: Option<String>,
+    /// How many times this piece of work has been handed on, for `handoff`.
+    ///
+    /// Worked out here and carried on the frame, because no session can see a cycle from inside
+    /// it — see [`crate::directory::sending::HOPS`].
+    pub hops: u32,
     /// The secret the far end was started with, for the one verb that has to prove itself.
     pub token: Option<String>,
 }
@@ -49,8 +54,10 @@ fn sorted(verb: &str, arguments: &Value) -> Sort {
         "attention" => Sort::Attention,
         "trouble" => Sort::Trouble,
         "handoff" => Sort::Handoff,
-        "claim" => Sort::Claim,
-        "release" => Sort::Release,
+        // The same sort a note has, and that is the difference between it and `trouble`: one is
+        // read when the far end next looks, the other reaches somebody mid-turn. A fan-out that
+        // interrupted a whole run for a status update would be a fan-out nobody leaves on.
+        "announce" => Sort::Note,
         _ => arguments
             .get("sort")
             .and_then(Value::as_str)
@@ -113,6 +120,27 @@ pub fn decide(
     if !policy::may(&me, relation, reach) {
         return Err(Answer::refused(policy::refusal(&me, relation, reach)));
     }
+    // Bounded before the dial, like everything else here, and for the plainest of the reasons: a
+    // message the far end will refuse for its length has still cost a round trip by the time it
+    // says so, and the model reads the refusal a turn later than it could have.
+    if let Some(said) = arguments.get("message").and_then(Value::as_str)
+        && !NAMES_A_ROLE.contains(&verb)
+        && let Err(why) = sending::sized(said)
+    {
+        return Err(Answer::refused(why));
+    }
+    // **The count comes off what arrived and goes onto what leaves.** A handoff cycle is invisible
+    // from inside any one session — each of A, B and C sees one arrival and one departure — so
+    // the only place the ring can be counted is on the work itself.
+    let hops = if verb == "handoff" {
+        let deep = sending::hopped(&standing.inbox);
+        if let Some(why) = sending::too_far(deep) {
+            return Err(Answer::refused(why));
+        }
+        deep
+    } else {
+        0
+    };
     // By verb rather than by reach, so that a second verb rated `Stop` one day cannot pick a
     // secret up on the way past. One line sends one, and it can be read.
     let token = if verb == "stop" {
@@ -145,12 +173,43 @@ pub fn decide(
             .get("role")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
+        hops,
         token,
     })
 }
 
-/// Make the call, and say what came back.
+/// Make the call, having first charged it against what this session may send.
+///
+/// **Counted here rather than in [`decide`]**, and it is the one gate that is not pure: the record
+/// is a file, because `melchior tool` is one process per call and nothing it counted in memory
+/// would survive the exit. It is still before the socket opens, which is the property that
+/// matters — a refusal a model reads without paying for a round trip.
+///
+/// Only the verbs that put something in an inbox are charged. Asking a peer what it is doing is
+/// not a message, and rating it as one would have a coordinator run out of window reading its own
+/// crew.
 pub fn perform(wanted: &Wanted, standing: &Standing) -> Answer {
+    if SPEAKS.contains(&wanted.verb.as_str())
+        && let Err(why) = sending::allow(
+            &standing.identity(),
+            &format!(
+                "{}\u{0}{}\u{0}{}",
+                wanted.verb,
+                wanted.who.id,
+                wanted.message.as_deref().unwrap_or_default()
+            ),
+        )
+    {
+        return Answer::refused(why);
+    }
+    carried(wanted, standing)
+}
+
+/// The same, already charged.
+///
+/// What a fan-out calls, because an announce to a crew of twelve is one thing a model decided to
+/// say rather than twelve: charged per recipient it would trip its own cap on the first call.
+pub(super) fn carried(wanted: &Wanted, standing: &Standing) -> Answer {
     let me = standing.identity();
     let mut held = match crate::directory::dial(&wanted.who, &me) {
         Ok(held) => held,
@@ -174,9 +233,10 @@ pub fn perform(wanted: &Wanted, standing: &Standing) -> Answer {
         // The far end's own words. It knows things this side does not — that it was never
         // started by anybody, that the secret was wrong — and repeating them beats a summary.
         return Answer::refused(format!(
-            "`{}` refused: {}",
+            "`{}` refused: {}{}",
             wanted.who.full(),
-            reply.error.unwrap_or_else(|| "no reason given".to_owned())
+            reply.error.unwrap_or_else(|| "no reason given".to_owned()),
+            tasking::rejected(&wanted.verb)
         ));
     }
     Answer::said(landed(wanted, &reply))
@@ -219,6 +279,7 @@ fn said(held: &mut asking::Held, wanted: &Wanted) -> std::io::Result<Reply> {
                 serde_json::json!(wanted.message.clone().unwrap_or_default()),
                 serde_json::json!(name_of(wanted.sort)),
                 serde_json::json!(wanted.about),
+                serde_json::json!(wanted.hops),
             ],
         ),
     }
@@ -244,12 +305,25 @@ fn landed(wanted: &Wanted, reply: &Reply) -> String {
             wanted.who.id,
             wanted.role.as_deref().unwrap_or_default()
         ),
-        // Said rather than assumed. `send` returning silently reads as though nothing happened,
-        // and the one thing worth knowing is that it is in their inbox and not yet read.
-        "ask" => format!(
-            "The question is in `{who}`'s inbox. Its answer will arrive in yours; \
-             it will not interrupt this turn."
-        ),
+        // A handle and a state, because "it is in their inbox" is a fact with no follow-up. The
+        // handle is the id the far end minted for the message, which is also the id it will quote
+        // in `about` when it answers — so `task` can say where this got to without anything
+        // being written down anywhere.
+        "ask" => reply
+            .result
+            .first()
+            .and_then(|said| said.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .map_or_else(
+                || {
+                    format!(
+                        "The question is in `{who}`'s inbox. It answered without naming the \
+                         message, so there is no handle to ask after — its answer will still \
+                         arrive in this session's inbox."
+                    )
+                },
+                |id| tasking::submitted(&wanted.who, id),
+            ),
         "attention" | "trouble" => {
             format!("`{who}` has it, marked so it can interrupt whatever they are doing.")
         }
@@ -310,8 +384,8 @@ mod tests {
             ("attention", Sort::Attention),
             ("trouble", Sort::Trouble),
             ("handoff", Sort::Handoff),
-            ("claim", Sort::Claim),
-            ("release", Sort::Release),
+            // A fan-out that interrupted a whole run for a status update is one nobody leaves on.
+            ("announce", Sort::Note),
         ] {
             let wanted = decide(
                 verb,
@@ -325,19 +399,84 @@ mod tests {
     }
 
     #[test]
-    fn a_release_carries_the_id_of_what_it_lets_go() {
-        // It carried nothing at all: `release` needed neither a `message` nor an `about`, so
-        // the frame it sent was a `release` sort with an empty body, and the far end could not
-        // tell which of a session's claims had been dropped.
-        let wanted = decide(
-            "release",
+    fn a_handoff_carries_one_more_hop_than_the_deepest_that_arrived() {
+        // The count has to ride the message because no session can see a ring: A hands to B, B to
+        // C, C back to A, and each of the three sees one arrival and one departure.
+        let mut standing = standing();
+        let fresh = decide(
+            "handoff",
             "beta-nu",
-            &serde_json::json!({"about": "magi-main-alpha-rho-18f2c"}),
-            &standing(),
+            &serde_json::json!({"message": "yours now"}),
+            &standing,
         )
         .expect("decided");
-        assert_eq!(wanted.sort, Sort::Release);
-        assert_eq!(wanted.about.as_deref(), Some("magi-main-alpha-rho-18f2c"));
+        assert_eq!(fresh.hops, 1, "a first handoff started somewhere else");
+
+        let mut handed =
+            crate::wire::Message::sent("magi/main/gamma-xi", "yours now", Sort::Handoff, None);
+        handed.hops = 4;
+        standing.inbox.push(handed);
+        let on = decide(
+            "handoff",
+            "beta-nu",
+            &serde_json::json!({"message": "yours now"}),
+            &standing,
+        )
+        .expect("decided");
+        assert_eq!(on.hops, 5);
+        // And nothing else carries one, so a note cannot age a chain it was never part of.
+        let note = decide(
+            "send",
+            "beta-nu",
+            &serde_json::json!({"message": "fyi"}),
+            &standing,
+        )
+        .expect("decided");
+        assert_eq!(note.hops, 0);
+    }
+
+    #[test]
+    fn a_handoff_that_has_come_back_round_is_refused_before_the_dial() {
+        // Risk 6. MAST measures step repetition at 15.7% and unaware-of-termination at 12.4%, and
+        // a cycle looks like both from inside. What stops it is the number, and the number is
+        // refused here rather than at whoever it would have been handed to next.
+        let mut standing = standing();
+        let mut arrived =
+            crate::wire::Message::sent("magi/main/gamma-xi", "yours now", Sort::Handoff, None);
+        arrived.hops = crate::directory::sending::HOPS;
+        standing.inbox.push(arrived);
+        let refused = decide(
+            "handoff",
+            "beta-nu",
+            &serde_json::json!({"message": "yours now"}),
+            &standing,
+        )
+        .expect_err("a ring closed");
+        assert!(refused.failed);
+        assert!(refused.said.contains("cycle"), "{}", refused.said);
+        assert!(
+            refused.said.contains("trouble"),
+            "and no way out of it: {}",
+            refused.said
+        );
+    }
+
+    #[test]
+    fn a_message_longer_than_the_cap_never_reaches_a_socket() {
+        let refused = decide(
+            "send",
+            "beta-nu",
+            &serde_json::json!({"message": "z".repeat(crate::directory::sending::AT_MOST + 1)}),
+            &standing(),
+        )
+        .expect_err("an uncapped message");
+        assert!(
+            refused
+                .said
+                .contains(&crate::directory::sending::AT_MOST.to_string()),
+            "{}",
+            refused.said
+        );
     }
 
     #[test]

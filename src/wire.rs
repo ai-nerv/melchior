@@ -346,8 +346,30 @@ pub struct Message {
     /// The message this one is about, for an answer or a release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub about: Option<String>,
+    /// How many times this piece of work has been handed on, for a [`Sort::Handoff`].
+    ///
+    /// **It rides the message because nothing else can see a cycle.** A hands work to B, B to C,
+    /// C back to A: every one of the three sees one handoff arrive and one leave, and a count
+    /// each of them kept locally would start at zero on every pass. Carried here, the ring closes
+    /// on a number instead of on a machine.
+    ///
+    /// A sender that lied about it would only be lying to itself — the refusal is at the sender —
+    /// which is why the bounded inbox is the other half of the guard rather than a nicety.
+    ///
+    /// Zero for everything else, and defaulted on the way in so a message from a peer built
+    /// before this existed reads as a fresh handoff rather than failing to parse.
+    #[serde(default, skip_serializing_if = "is_first")]
+    pub hops: u32,
     /// When, in milliseconds since the epoch.
     pub at: u64,
+}
+
+/// Whether a hop count is the one a message that was never handed on carries.
+///
+/// Serde needs a predicate to leave the field off the wire, and leaving it off is what keeps a
+/// note looking like a note to anything reading these by eye.
+fn is_first(hops: &u32) -> bool {
+    *hops == 0
 }
 
 impl Message {
@@ -373,8 +395,18 @@ impl Message {
             sort,
             text: text.to_owned(),
             about,
+            hops: 0,
             at,
         }
+    }
+
+    /// The same, having been handed on this many times.
+    ///
+    /// Separate from [`Message::sent`] so the one place a hop count is set is one line that can
+    /// be read, and so every other caller keeps writing a message that was never handed on.
+    #[must_use]
+    pub fn carried(self, hops: u32) -> Self {
+        Self { hops, ..self }
     }
 }
 
@@ -471,6 +503,32 @@ mod tests {
                 "{name} does not belong on a socket"
             );
         }
+    }
+
+    #[test]
+    fn a_hop_count_survives_the_wire_and_a_note_does_not_carry_one() {
+        // The half of the cycle guard that is not code: a count that did not travel would reset
+        // at every hop, and a ring of three would each see one arrival and one departure.
+        let handed =
+            Message::sent("magi/main/beta-nu", "yours now", Sort::Handoff, None).carried(3);
+        let text = serde_json::to_string(&handed).expect("encodes");
+        assert_eq!(
+            serde_json::from_str::<Message>(&text)
+                .expect("decodes")
+                .hops,
+            3
+        );
+        // And a peer built before this existed sends no field at all, which reads as a first hop
+        // rather than as a parse failure.
+        let older = r#"{"id":"x","from":"magi/main/beta-nu","sort":"handoff","text":"y","at":1}"#;
+        assert_eq!(
+            serde_json::from_str::<Message>(older)
+                .expect("decodes")
+                .hops,
+            0
+        );
+        let note = serde_json::to_value(Message::new("magi/main/beta-nu", "fyi")).expect("encodes");
+        assert!(note.get("hops").is_none(), "{note}");
     }
 
     #[test]
