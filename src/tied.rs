@@ -36,6 +36,16 @@
 /// not an ask. Comparing against pid 1 is the tempting version and is wrong — a magi that is
 /// itself pid 1 in a container would spawn a melchior that exits before it does anything.
 ///
+/// **The "parent" the kernel watches is a thread, not a process.** `PR_SET_PDEATHSIG` fires when
+/// the thread that created this process exits, which is the standing footgun: a program that
+/// spawns from a short-lived worker gets the signal while it is still alive. It is not one here.
+/// Both callers reach this from `fn main`, before any runtime exists, and neither runtime melchior
+/// builds is multi-threaded — `rt-multi-thread` is not in the feature graph at all — so the thread
+/// this is set from is the one that lives as long as the process. What melchior cannot rule out is
+/// the other end: a magi that spawned it from a thread of its own would send this signal by that
+/// thread exiting, and there is nothing on this side that could tell that apart from a person
+/// typing `kill`.
+///
 /// **A person at a terminal gets the same thing and should.** Run by hand the parent is the
 /// shell that is already waiting for it, so this changes nothing about a foreground job; what it
 /// rules out is an `ask` deliberately detached to outlive the shell that started it, which is the
