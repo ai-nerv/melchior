@@ -5,12 +5,8 @@ use crate::mind::provider::compat::Compat;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// A wire protocol.
-///
-/// Not a vendor. This is the axis Pi got right and Tau did not: a provider is an identity and
-/// an api is a protocol, and they are many-to-many. The surprises are the point — Fireworks,
-/// GitHub Copilot, MiniMax and Vercel all speak Anthropic's Messages API, and OpenAI itself
-/// speaks Responses rather than the Completions dialect twenty other vendors copied.
+/// A wire protocol, not a vendor: the two are many-to-many. Fireworks, GitHub Copilot, MiniMax and
+/// Vercel all speak Anthropic's Messages API, and OpenAI itself speaks Responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Api {
@@ -76,9 +72,7 @@ impl Api {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Modality {
-    /// Text prompts.
     Text,
-    /// Image parts in user messages.
     Image,
 }
 
@@ -87,12 +81,8 @@ pub enum Modality {
 pub struct Model {
     /// Id sent on the wire.
     pub id: String,
-    /// Name shown to a person.
     pub name: String,
-    /// Which provider offers it.
-    ///
-    /// Filled in from the provider when a declaration omits it, which every declaration does:
-    /// repeating the provider id on each of its own models is noise that can disagree.
+    /// Which provider offers it, filled in from the provider when a declaration omits it.
     #[serde(default)]
     pub provider: String,
     /// Which protocol it speaks. Filled in from the provider for the same reason.
@@ -111,16 +101,11 @@ pub struct Model {
     /// Dollars per million tokens.
     #[serde(default)]
     pub cost: Cost,
-    /// How this model names each thinking level, and which it cannot do.
-    ///
-    /// A missing key takes the provider default; an explicit `None` marks the level
-    /// unsupported, which is different from unmapped and has to stay tellable apart.
+    /// How this model names each thinking level. A missing key takes the provider default; an
+    /// explicit `None` marks the level unsupported, which is different from unmapped.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub thinking: BTreeMap<ThinkingLevel, Option<String>>,
-    /// Per-model overrides for its protocol's quirks.
-    ///
-    /// Absent means "whatever the base URL implies", which is what keeps a new provider to one
-    /// table row. Present means someone found a case detection got wrong.
+    /// Per-model overrides for its protocol's quirks; absent means "whatever the base URL implies".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<Compat>,
 }
@@ -134,7 +119,6 @@ pub fn default_input() -> Vec<Modality> {
 }
 
 impl Model {
-    /// Whether this model accepts images.
     #[must_use]
     pub fn accepts_images(&self) -> bool {
         self.input.contains(&Modality::Image)
@@ -175,8 +159,6 @@ mod tests {
 
     #[test]
     fn every_api_deserializes_from_the_name_it_prints() {
-        // The two spellings are written by hand in different places; a drift between them
-        // would make a catalog file reject a name the same binary prints back at the user.
         for api in Api::all() {
             let quoted = format!("\"{}\"", api.as_str());
             let parsed: Api = serde_json::from_str(&quoted)

@@ -1,18 +1,7 @@
-//! Asking a provider what it offers, and remembering the answer.
-//!
-//! A catalog written by hand goes stale the day it is written. OpenRouter alone offers upwards
-//! of four hundred models; `config/providers.lua` listed six, and the six were a generation
-//! behind — which reads from the inside as the provider being broken rather than the list being
-//! old.
-//!
-//! **A fetch never touches the configuration.** `providers.lua` is a file somebody wrote and may
-//! edit; a program that rewrites it turns every hand-made choice into something that survives
-//! until the next refresh. What is fetched goes to a cache under `$XDG_CACHE_HOME/melchior/models/`,
-//! which nobody edits and anybody may delete.
-//!
-//! **The cache is the source at load time.** Reading a file is fast and cannot fail because a
-//! network is down; a fetch happens when the cache is missing or older than [`FRESH`], and its
-//! failure leaves whatever the cache last held.
+//! Asking a provider what it offers, and remembering the answer. A fetch never writes back to
+//! `providers.lua`; what it finds goes to a cache under `$XDG_CACHE_HOME/melchior/models/`. That
+//! cache is what load time reads, and a fetch happens only when it is missing or older than
+//! [`FRESH`], its failure leaving whatever the cache last held.
 
 use crate::mind::provider::endpoint::Provider;
 use crate::mind::provider::model::Model;
@@ -22,22 +11,16 @@ use std::time::{Duration, SystemTime};
 /// How long a fetched catalog is used before it is asked for again.
 pub const FRESH: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// How long a fetch may take before the cache — even a stale one — is preferred.
-///
-/// Short on purpose. This runs while somebody is waiting for a prompt, and a catalog that is a
-/// day out of date is worth far less than a start that does not hang.
+/// How long a fetch may take before the cache — even a stale one — is preferred. This runs while
+/// somebody is waiting for a prompt.
 const PATIENCE: Duration = Duration::from_secs(5);
 
-/// What a model is assumed to hold when the provider does not say.
-///
-/// Wrong for some, and wrong in the safe direction: a window declared smaller than it is costs
-/// an early compaction, and one declared larger costs a refused request mid-turn.
+/// What a model is assumed to hold when the provider does not say: an underestimate, which costs
+/// an early compaction, where an overestimate costs a refused request mid-turn.
 const ASSUMED_WINDOW: u64 = 128_000;
 
-/// Fill in the models of every provider that asked to be discovered.
-///
-/// Providers that declare their models are left alone. A provider that declares neither models
-/// nor discovery keeps its empty list, which is what it asked for.
+/// Fill in the models of every provider that asked to be discovered; one that declares its own
+/// models, or neither models nor discovery, is left as it is.
 pub fn discover(providers: &mut [Provider]) {
     for provider in providers.iter_mut() {
         if !provider.discover {
@@ -57,8 +40,7 @@ pub fn discover(providers: &mut [Provider]) {
                         write_cache(&provider.id, &models);
                         Some(models)
                     }
-                    // The network is down, or the key is wrong, or the endpoint is not there.
-                    // Yesterday's answer beats no answer.
+                    // A failed fetch falls back to a stale cache.
                     _ => cached(&provider.id).map(|held| held.models),
                 }
             });
@@ -86,8 +68,7 @@ fn cache_path(id: &str) -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-    // Named by the provider id, which a config controls, so it is confined to a single path
-    // segment rather than trusted as one.
+    // The provider id comes from a config, so it is flattened to a single path segment.
     let safe: String = id
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '-' })
@@ -133,11 +114,9 @@ fn key_for(provider: &Provider) -> Option<String> {
     vars.iter().find_map(|name| std::env::var(name).ok())
 }
 
-/// Ask `<base>/models` what there is.
-///
-/// On a thread with a runtime of its own, because this is called from `config::load`, which is
-/// synchronous and is reached both from an async daemon and from a plain command. Building a
-/// runtime inside a running one panics; building one on a fresh thread cannot.
+/// Ask `<base>/models` what there is, on a thread with a runtime of its own: the synchronous
+/// caller is reached from an async daemon too, and building a runtime inside a running one
+/// panics.
 fn fetch(base: &str, key: Option<&str>) -> Option<Vec<Model>> {
     let url = format!("{}/models", base.trim_end_matches('/'));
     let key = key.map(ToOwned::to_owned);
@@ -161,13 +140,9 @@ fn fetch(base: &str, key: Option<&str>) -> Option<Vec<Model>> {
     .flatten()
 }
 
-/// Read an OpenAI-shaped `/models` answer into models.
-///
-/// The shape every provider in this catalog speaks is `{"data": [...]}`. What is *in* an entry
-/// varies: OpenRouter carries context, pricing and capabilities; a local Ollama carries an id
-/// and little else. Everything but the id is optional, and an absent field takes a default
-/// rather than dropping the model — a model you cannot see is worse than one whose price melchior
-/// does not know.
+/// Read an OpenAI-shaped `{"data": [...]}` answer into models. What an entry carries varies by
+/// provider, so everything but the id is optional and an absent field takes a default rather
+/// than dropping the model.
 #[must_use]
 pub fn parse(body: &serde_json::Value) -> Vec<Model> {
     let Some(entries) = body.get("data").and_then(|d| d.as_array()) else {
@@ -226,10 +201,8 @@ fn reasons(entry: &serde_json::Value) -> bool {
         })
 }
 
-/// Price per million tokens, from a per-token price given as a string.
-///
-/// OpenRouter quotes dollars per token, as a decimal string, and quotes `"0"` for a free model.
-/// A price melchior cannot read is no price rather than a wrong one.
+/// Price per million tokens, from the dollars-per-token decimal string providers quote; an
+/// unreadable price is no price rather than a wrong one.
 fn cost(entry: &serde_json::Value) -> crate::mind::model::Cost {
     let Some(pricing) = entry.get("pricing") else {
         return crate::mind::model::Cost::default();
@@ -293,8 +266,6 @@ mod tests {
 
     #[test]
     fn a_price_per_token_becomes_a_price_per_million() {
-        // OpenRouter quotes dollars per token as a decimal string. A catalog that showed those
-        // numbers unchanged would say a model costs five millionths of a cent.
         let model = &parse(&rich())[0];
         assert!(
             (model.cost.input - 5.0).abs() < 1e-9,
@@ -310,7 +281,6 @@ mod tests {
 
     #[test]
     fn a_bare_entry_is_kept_rather_than_dropped() {
-        // A model you cannot see is worse than one whose price melchior does not know.
         let found = parse(&bare());
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "qwen3:8b");
@@ -336,7 +306,6 @@ mod tests {
 
     #[test]
     fn a_provider_id_cannot_escape_the_cache_directory() {
-        // The id comes from a config file, and a config file is a program somebody wrote.
         let path = cache_path("../../etc/passwd").expect("a path");
         assert!(
             path.ends_with("------etc-passwd.json"),
@@ -347,8 +316,6 @@ mod tests {
 
     #[test]
     fn a_declared_catalog_is_never_asked_about() {
-        // A provider that lists its models is taken at its word: discovery is opt-in, and a
-        // fetch behind somebody's back is a start that hangs when the network is down.
         let mut providers = vec![crate::mind::provider::endpoint::Provider {
             id: "fixed".into(),
             name: "Fixed".into(),

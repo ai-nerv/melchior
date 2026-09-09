@@ -1,11 +1,6 @@
-//! A wire protocol, described in Lua.
-//!
-//! The only implementation of [`Adapter`] there is. `magi-provider` owns the contract and moves
-//! the bytes; every protocol — Anthropic's Messages, OpenAI's Completions, the eight others —
-//! is a table of functions in `lua/apis/*.lua`, registered like anything else.
-//!
-//! A protocol is a description. Describing one should not need a rebuild, and a person with a
-//! private endpoint that speaks something slightly different should be able to say so.
+//! A wire protocol, described in Lua: the only implementation of [`Adapter`] there is. The
+//! transport moves the bytes, and every protocol is a table of functions in `lua/apis/*.lua`,
+//! registered like anything else, so describing one needs no rebuild.
 
 use crate::mind::lua::engine::Engine;
 use crate::mind::model::Context;
@@ -16,20 +11,14 @@ use std::cell::RefCell;
 
 /// One registered protocol, driven through the VM.
 pub struct LuaAdapter {
-    /// The VM holding the description.
-    ///
-    /// Shared with the tools that run in it: one thread, one VM, and a protocol and a tool
-    /// that disagreed about which one they were in would be a bug nobody could see.
+    /// The VM holding the description, shared with the tools that run in it: one thread, one VM.
     engine: std::rc::Rc<RefCell<Engine>>,
     /// Which protocol, by the name it registered under.
     name: String,
 }
 
 impl LuaAdapter {
-    /// Take ownership of an engine and speak `name` through it.
-    ///
-    /// # Errors
-    /// When nothing registered under that name.
+    /// Speak `name` through an engine somebody else holds.
     pub fn from_shared(
         engine: std::rc::Rc<std::cell::RefCell<Engine>>,
         name: &str,
@@ -52,9 +41,6 @@ impl LuaAdapter {
     }
 
     /// Take ownership of an engine and speak `name` through it.
-    ///
-    /// # Errors
-    /// When nothing registered under that name.
     pub fn new(mut engine: Engine, name: &str) -> Result<Self, String> {
         let known = engine.apis();
         if !known.iter().any(|a| a == name) {
@@ -78,12 +64,9 @@ impl LuaAdapter {
     }
 }
 
-/// The model as a protocol description should see it.
-///
-/// Its `compat` is replaced by the fully resolved dialect, so a description reads
-/// `compat.thinking_format` and never `compat.thinking_format or "openai"`. Every default
-/// lives in `crate::mind::provider::compat::Resolved` and nowhere else — ten descriptions each
-/// carrying their own copy is ten places for one of them to fall behind.
+/// The model as a protocol description sees it, its `compat` replaced by the fully resolved
+/// dialect so that every default lives in `crate::mind::provider::compat::Resolved` alone and a
+/// description never writes `compat.thinking_format or "openai"`.
 fn described(model: &Model) -> serde_json::Value {
     let mut value = serde_json::to_value(model).unwrap_or_default();
     if let Some(object) = value.as_object_mut() {
@@ -96,12 +79,9 @@ fn described(model: &Model) -> serde_json::Value {
     value
 }
 
-/// The options as this model can actually take them.
-///
-/// `thinking` is settled here rather than in a description: the catalog can say a model cannot
-/// do a level at all, which is not the same as having no opinion about it — and in Lua a key
-/// with no value and no key at all are indistinguishable, so the difference cannot survive the
-/// crossing. Ten descriptions each re-deriving it would be ten chances to lose it.
+/// The options as this model can actually take them. `thinking` is settled here rather than in a
+/// description because Lua cannot tell a key with no value from an absent key, and the catalog's
+/// "cannot do this level" and "no opinion" are different answers.
 fn asked(model: &Model, options: &Options) -> serde_json::Value {
     let mut value = serde_json::to_value(options).unwrap_or_default();
     let Some(object) = value.as_object_mut() else {
@@ -118,10 +98,8 @@ fn asked(model: &Model, options: &Options) -> serde_json::Value {
     value
 }
 
-/// What to ask this model for, or nothing.
-///
-/// Nothing when it does not reason — a model sent `reasoning_effort` that has none answers 400,
-/// and the request that fails is the one somebody just typed.
+/// What to ask this model for, or nothing when it does not reason: one sent `reasoning_effort`
+/// that has none answers 400.
 fn effective_thinking(model: &Model, options: &Options) -> Option<String> {
     if !model.reasoning {
         return None;
@@ -133,9 +111,9 @@ fn effective_thinking(model: &Model, options: &Options) -> Option<String> {
     match model.thinking.get(&level) {
         // Named: this model calls that level something else.
         Some(Some(name)) => Some(name.clone()),
-        // Present and empty: it cannot do this level. Asking anyway is a refusal.
+        // Present and empty: it cannot do this level, and asking anyway is a refusal.
         Some(None) => None,
-        // Unmapped, which is the ordinary case: the provider's own word for it.
+        // Unmapped: the provider's own word for it.
         None => serde_json::to_value(level)
             .ok()
             .and_then(|v| v.as_str().map(str::to_owned)),
@@ -156,8 +134,7 @@ impl Adapter for LuaAdapter {
     }
 
     fn headers(&self, key: Option<&str>) -> Vec<(String, String)> {
-        // Content type is set here rather than in every protocol: all ten post JSON, and a
-        // description that had to say so would be repeating the transport's own decision.
+        // Content type is set here rather than in every protocol, since all of them post JSON.
         let mut out = vec![("content-type".to_owned(), "application/json".to_owned())];
         let Some(fields) = self
             .call("headers", &[serde_json::json!(key)])
@@ -197,8 +174,7 @@ impl Adapter for LuaAdapter {
             return Vec::new();
         };
 
-        // The protocol hands back what it wants remembered and what the caller should be told.
-        // Remembering is the adapter's business; this only carries it between events.
+        // The protocol hands back what it wants remembered between events, and the deltas.
         if let Some(scratch) = answer.get("scratch") {
             state.scratch = scratch.clone();
         }
@@ -216,10 +192,8 @@ impl Adapter for LuaAdapter {
     }
 }
 
-/// One delta, as a protocol described it.
-///
-/// An unrecognised kind is dropped rather than fatal: a protocol may learn to report something
-/// this build has no vocabulary for, and losing that is better than losing the turn.
+/// One delta, as a protocol described it. An unrecognised kind is dropped rather than fatal, so
+/// a protocol reporting something this build has no word for does not lose the turn.
 fn delta_from_json(value: &serde_json::Value) -> Option<Delta> {
     let text = |key: &str| {
         value
@@ -243,11 +217,8 @@ fn delta_from_json(value: &serde_json::Value) -> Option<Delta> {
     })
 }
 
-/// An engine with the protocols in `path` registered.
-///
-/// A path, not a compiled-in copy. A protocol description is configuration: it changes without
-/// the binary changing, and a binary that carries one is a binary you have to rebuild to fix a
-/// wire format.
+/// An engine with these protocol descriptions registered. They are read as configuration rather
+/// than compiled in, so fixing a wire format is not a rebuild.
 pub fn engine_with(sources: &[(String, String)]) -> Result<Engine, crate::mind::lua::LuaError> {
     let mut engine = Engine::new();
     for (name, source) in sources {
@@ -256,11 +227,8 @@ pub fn engine_with(sources: &[(String, String)]) -> Result<Engine, crate::mind::
     Ok(engine)
 }
 
-/// Protocols magi knows of but does not speak, and why.
-///
-/// Named rather than simply absent. A model that appears in the catalog and then does nothing
-/// is worse than one that says what is missing — and a gap with a stated reason is a task,
-/// while a gap without one is a mystery.
+/// Protocols magi knows of but does not speak, and why; named rather than simply absent, so a
+/// model in the catalog that does nothing can say what is missing.
 pub const UNSPOKEN: &[(&str, &str)] = &[(
     "bedrock-converse-stream",
     "Bedrock frames its stream as binary AWS eventstream records rather than server-sent \
@@ -277,14 +245,8 @@ pub fn why_unspoken(api: &str) -> Option<&'static str> {
         .map(|(_, why)| *why)
 }
 
-/// The protocol descriptions in the checkout, read at run time. **For tests.**
-///
-/// The product reads its configuration from the config directory and carries no copy. A test
-/// still needs a real protocol to drive, so this is the one place that knows where the tree is —
-/// and it is a helper, not a path anything shipped depends on.
-///
-/// # Errors
-/// When the checkout's `config/apis.lua` cannot be read.
+/// The protocol descriptions in the checkout, read at run time. For tests only: the product
+/// reads its configuration from the config directory and carries no copy.
 pub fn shipped_apis() -> Result<Vec<(String, String)>, crate::mind::lua::LuaError> {
     const PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/config/apis.lua");
     let source =
@@ -295,10 +257,7 @@ pub fn shipped_apis() -> Result<Vec<(String, String)>, crate::mind::lua::LuaErro
     Ok(vec![("apis".to_owned(), source)])
 }
 
-/// An engine with those protocols registered. **For tests.**
-///
-/// # Errors
-/// When the descriptions cannot be read or do not load.
+/// An engine with those protocols registered. For tests.
 pub fn engine_with_builtins() -> Result<Engine, crate::mind::lua::LuaError> {
     engine_with(&shipped_apis()?)
 }
@@ -342,8 +301,6 @@ mod thinking_tests {
 
     #[test]
     fn a_model_that_does_not_reason_is_never_asked_to() {
-        // Sent `reasoning_effort` it answers 400, and the request that fails is the one
-        // somebody just typed.
         let asked = asked(
             &model(false, BTreeMap::new()),
             &wanting(ThinkingLevel::High),
@@ -367,8 +324,6 @@ mod thinking_tests {
 
     #[test]
     fn a_level_the_model_refuses_is_not_asked_for() {
-        // Present with no value means "cannot do this one", which has to stay tellable apart
-        // from "no opinion" — and in Lua it cannot, which is why this is settled here.
         let mut map = BTreeMap::new();
         map.insert(ThinkingLevel::Max, None);
         let asked = asked(&model(true, map), &wanting(ThinkingLevel::Max));

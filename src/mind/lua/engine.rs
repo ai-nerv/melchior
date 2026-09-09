@@ -14,12 +14,8 @@ pub struct Config {
     pub settings: serde_json::Map<String, serde_json::Value>,
     /// Everything handed to a registrar, keyed by registrar then by identity.
     pub registered: Registered,
-    /// Files `magi.load` asked for, in the order it asked.
-    ///
-    /// Collected rather than run on the spot: running a chunk from inside a chunk is
-    /// re-entrancy the VM does not offer, and a queue the host drains gives the same ordering
-    /// with none of it. A file already asked for is not queued twice, so a diamond of loads
-    /// terminates.
+    /// Files `magi.load` asked for, in the order it asked. Queued rather than run on the spot,
+    /// since the VM offers no re-entrancy, and never queued twice, so a diamond terminates.
     pub loads: Vec<String>,
 }
 
@@ -42,11 +38,7 @@ impl Config {
         self.get(name).and_then(serde_json::Value::as_bool)
     }
 
-    /// A setting as a number.
-    ///
-    /// Lua has one number type, so `2` and `2.0` are the same value written twice and both have
-    /// to answer here — a config that says `2` and gets nothing would be right to call that a
-    /// bug in magi.
+    /// A setting as a number. Lua has one number type, so `2` and `2.0` both answer here.
     #[must_use]
     pub fn number(&self, name: &str) -> Option<f64> {
         self.get(name).and_then(serde_json::Value::as_f64)
@@ -69,11 +61,8 @@ impl Config {
     }
 }
 
-/// Declarations handed to registrars.
-///
-/// Keyed by `(registrar, identity)` so re-registering replaces rather than appends — the map
-/// form of rule 2. A config that loops over a directory of machines and declares one provider
-/// per file is then idempotent, which matters because configs get re-read.
+/// Declarations handed to registrars, keyed by `(registrar, identity)` so that re-registering
+/// replaces rather than appends and a re-read config is idempotent.
 #[derive(Debug, Default, Clone)]
 pub struct Registered {
     entries: std::collections::HashMap<(String, String), serde_json::Value>,
@@ -123,10 +112,7 @@ impl Engine {
         self.config.borrow().clone()
     }
 
-    /// Run one config file.
-    ///
-    /// Load-time raises are fatal and name the file: a config that did not finish has not said
-    /// what it wanted, and applying half of it is worse than refusing.
+    /// Run one config file. A load-time raise is fatal and names the file.
     pub fn run_file(&mut self, path: &Path) -> Result<(), LuaError> {
         let source = std::fs::read_to_string(path).map_err(|source| LuaError::Io {
             file: path.display().to_string(),
@@ -156,11 +142,8 @@ impl Engine {
             })
     }
 
-    /// Install the `magi` global and its registrars.
-    ///
-    /// Settings are plain fields on the table, read back after the config runs rather than
-    /// intercepted as they are written: a config may assign, read and re-assign its own
-    /// settings, and only the value it finished with is the one it meant.
+    /// Install the `magi` global and its registrars. Settings are plain fields on the table,
+    /// harvested after every file has run rather than intercepted as they are written.
     fn install(&mut self) {
         let config = Rc::clone(&self.config);
         self.lua.enter(|ctx| {
@@ -192,8 +175,8 @@ impl Engine {
                 melchior.set(ctx, *registrar, callback).ok();
             }
 
-            // The one way a config reaches another file. There is no auto-discovery behind it:
-            // `init.lua` is the entry point, and what it does not name does not run.
+            // The one way a config reaches another file: `init.lua` is the entry point, and what
+            // it does not name does not run.
             {
                 let held = Rc::clone(&config);
                 let load = Callback::from_fn(&ctx, move |ctx, _exec, mut stack| {
@@ -212,35 +195,25 @@ impl Engine {
                 melchior.set(ctx, "load", load).ok();
             }
 
-            // Made here rather than left to the config, so `magi.ui.accent = 1` works without a
-            // config having to write `magi.ui = {}` first. It is a plain settings table — nothing
-            // registers into it — and it harvests as a nested object like any other, so a config
-            // may also replace it wholesale.
+            // A plain settings table made here, so `magi.ui.accent = 1` needs no `magi.ui = {}`
+            // first.
             melchior.set(ctx, "ui", Table::new(&ctx)).ok();
-            // The socket primitive, so the family's client stubs run unchanged in this VM and
-            // melchior can dial its siblings. Named twice: `melchior.stream` for a client that
-            // knows this host, `__stream` for one that does not.
+            // The socket primitive, named twice: `melchior.stream` for a client that knows this
+            // host, `__stream` for one that does not.
             let stream = crate::mind::lua::stream::table(ctx);
             melchior.set(ctx, "stream", stream).ok();
             ctx.set_global("__stream", stream);
-            // The lister a sibling's client prefers over shelling out.
             let fs = crate::mind::lua::fs::table(ctx);
             melchior.set(ctx, "fs", fs).ok();
-            // Every protocol description reads JSON payloads; lending one parser beats each
-            // of them carrying its own.
             let json = crate::mind::lua::json::table(ctx);
             melchior.set(ctx, "json", json).ok();
 
-            // Protocols are registered differently from everything else: what they carry is
-            // functions, and a function cannot be described as data. The VM keeps them under
-            // `__melchior_apis` and Rust keeps only their names.
+            // Protocols carry functions, which cannot be described as data, so the VM keeps them
+            // and Rust keeps only their names.
             let apis = Table::new(&ctx);
             ctx.set_global(APIS, apis);
-            // **And lent back, so a protocol can be built out of one that already exists.** The
-            // registry was write-only from Lua: a file wanting `openai-completions` with one
-            // event handled differently had to copy the whole dialect, which is exactly the fork
-            // that layering was added to stop. The same table, so registering through either
-            // reaches the other.
+            // The same table lent back, so a protocol can be built out of one that already
+            // exists and registering through either reaches the other.
             melchior.set(ctx, "apis", apis).ok();
             let api = Callback::from_fn(&ctx, move |ctx, _exec, mut stack| {
                 let (name, spec): (Value, Value) = stack.consume(ctx)?;
@@ -255,11 +228,9 @@ impl Engine {
             });
             melchior.set(ctx, "api", api).ok();
 
-            // The path of the binary that is running, so a config can name a peer magi ships
-            // without hoping the right `magi` is on PATH. It is a multi-call binary: its own
-            // peers are the same executable under another name, and `command = "magi"` finds
-            // whichever copy the shell happens to see -- an older install, or none at all,
-            // and the failure arrives as a broken pipe with nothing to read.
+            // The path of the running binary. It is multi-call, so its peers are this same
+            // executable under another name, and `command = "magi"` would find whatever is on
+            // PATH instead.
             if let Ok(exe) = std::env::current_exe() {
                 let path = luna::String::from_slice(&ctx, exe.as_os_str().as_encoded_bytes());
                 melchior.set(ctx, "self", path).ok();
@@ -269,10 +240,8 @@ impl Engine {
         });
     }
 
-    /// Read the settings the config assigned, and forget the module.
-    ///
-    /// Called once after every file has run. Settings live as fields so a config can read its
-    /// own back; harvesting them here is what keeps that true without a write barrier.
+    /// Read the settings the config assigned, and forget the module. Called once after every
+    /// file has run.
     pub fn harvest(&mut self) {
         let config = Rc::clone(&self.config);
         self.lua.enter(|ctx| {
@@ -283,8 +252,8 @@ impl Engine {
             for (key, value) in melchior.iter(ctx) {
                 let Value::String(name) = key else { continue };
                 let name = String::from_utf8_lossy(name.as_bytes()).into_owned();
-                // A registrar is a function and cannot be described; skipping it is what makes
-                // "every other field is a setting" work without a list to keep in step.
+                // A registrar is a function and cannot be described, so it is skipped and every
+                // other field is a setting.
                 if let Some(json) = json_from_lua(ctx, value, 0) {
                     held.settings.insert(name, json);
                 }
@@ -293,12 +262,8 @@ impl Engine {
     }
 }
 
-/// The registrars the `magi` module offers.
-///
-/// Named for the thing being described, never for when it happens. Adding one here is the only
-/// way a config gains a new kind of declaration, which keeps the surface enumerable.
-/// The registrars a config may call. `provider` is the catalog; the rest are a harness's and
-/// were left behind with it.
+/// The registrars a config may call; adding one here is the only way a config gains a new kind
+/// of declaration.
 const REGISTRARS: &[&str] = &["provider"];
 
 /// Raise a message into Lua, so `pcall` in a config sees a string.
@@ -309,10 +274,8 @@ fn raise<'gc>(ctx: luna::Context<'gc>, message: &str) -> luna::Error<'gc> {
     )))
 }
 
-/// Where registered protocol descriptions live inside the VM.
-///
-/// A Lua table rather than a Rust map, because what is registered is *functions*, and a
-/// function cannot cross the boundary. The VM keeps them; Rust keeps only their names.
+/// Where registered protocol descriptions live inside the VM, as a Lua table because what is
+/// registered is functions, which cannot cross the boundary.
 const APIS: &str = "__melchior_apis";
 
 impl Engine {
@@ -333,12 +296,9 @@ impl Engine {
         out
     }
 
-    /// Call one function of a registered protocol.
-    ///
-    /// Arguments go in as JSON and the answer comes back as JSON, so the collector lifetime
-    /// never leaves this crate. `None` means the protocol, the function, or the call itself did
-    /// not produce a value — all of which the caller treats the same way: the protocol cannot
-    /// answer, so the turn fails rather than proceeding on a guess.
+    /// Call one function of a registered protocol, in and out as JSON so the collector lifetime
+    /// never leaves this crate. `None` covers a missing protocol, a missing function and a call
+    /// that produced nothing alike.
     pub fn call_api(
         &mut self,
         api: &str,

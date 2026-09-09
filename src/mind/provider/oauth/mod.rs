@@ -1,14 +1,6 @@
-//! Signing in to a subscription, rather than exporting a key.
-//!
-//! An API key is a string a person can put in their environment. A subscription is not: the
-//! only way to hold one is a token you were given, that expires, and that has to be renewed
-//! without asking again. That is the whole of the difference, and the whole of why this exists.
-//!
-//! **What is stored, and where.** `$XDG_DATA_HOME/magi/credentials.json`, mode `0600`, one
-//! entry per provider. Not the system keyring: a keyring is a second daemon, a second failure
-//! mode and a second thing to explain, and a file only the user can read is what every other
-//! tool on the machine already uses for the same job. Never the journal — a transcript is
-//! meant to be readable, copyable and shareable, which is exactly what a token must not be.
+//! Signing in to a subscription rather than exporting a key. Tokens are stored in
+//! `$XDG_DATA_HOME/magi/credentials.json` at mode `0600`, one entry per provider, and never in
+//! the journal, which is meant to be readable and shareable.
 
 mod flow;
 
@@ -23,21 +15,15 @@ use std::path::PathBuf;
 pub struct Tokens {
     /// Sent as a bearer token.
     pub access: String,
-    /// Exchanged for a new access token when that one expires.
-    ///
-    /// Optional because not every provider issues one. Without it, an expiry means signing in
-    /// again, which is worse but is the provider's choice rather than ours.
+    /// Exchanged for a new access token; absent for the providers that issue none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh: Option<String>,
     /// Unix seconds after which `access` is no longer accepted.
     pub expires_at: u64,
 }
 
-/// How long before the stated expiry a token is treated as already expired.
-///
-/// A token that expires while the request carrying it is in flight fails as a 401, and the
-/// turn is lost for a reason that had nothing to do with the conversation. Renewing early
-/// costs one extra exchange and removes the race.
+/// How long before the stated expiry a token is treated as already expired, so that one does not
+/// expire while the request carrying it is in flight.
 const EARLY: u64 = 60;
 
 impl Tokens {
@@ -48,7 +34,6 @@ impl Tokens {
     }
 }
 
-/// Every provider a person has signed in to.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Store {
     /// Keyed by provider id, which is what a config and a model name already use.
@@ -57,19 +42,13 @@ pub struct Store {
 }
 
 impl Store {
-    /// Read the store, or an empty one if there is none.
-    ///
-    /// A missing file is the normal case and not an error. A *corrupt* one is returned as an
-    /// error rather than silently replaced: overwriting it would sign the user out of
-    /// everything to recover from what may be a bad disk.
+    /// Read the store, or an empty one if there is none. A corrupt file is an error rather than
+    /// silently replaced, since overwriting it signs the user out of everything.
     pub fn load() -> Result<Self, Error> {
         Self::load_from(&path())
     }
 
     /// Read a store from a named file.
-    ///
-    /// Named rather than assumed, so the location is an argument and not a global read at
-    /// depth. Tests use it; so would a second profile, if there is ever one.
     pub fn load_from(path: &std::path::Path) -> Result<Self, Error> {
         match std::fs::read_to_string(path) {
             Ok(source) => serde_json::from_str(&source).map_err(|e| Error::Corrupt {
@@ -82,9 +61,6 @@ impl Store {
     }
 
     /// Write the store back, readable only by its owner.
-    ///
-    /// The mode is set before the content is written, not after: a token that is briefly
-    /// world-readable has been readable, and nothing later takes that back.
     pub fn save(&self) -> Result<(), Error> {
         self.save_to(&path())
     }
@@ -107,13 +83,11 @@ impl Store {
         Ok(())
     }
 
-    /// The tokens for one provider.
     #[must_use]
     pub fn get(&self, provider: &str) -> Option<&Tokens> {
         self.providers.get(provider)
     }
 
-    /// Record a sign-in.
     pub fn put(&mut self, provider: &str, tokens: Tokens) {
         self.providers.insert(provider.to_owned(), tokens);
     }
@@ -124,11 +98,7 @@ impl Store {
     }
 }
 
-/// Where credentials live.
-///
-/// Beside the sessions rather than in the config directory: this is state the tool produced,
-/// not configuration a person wrote, and a config directory people copy between machines is
-/// the last place a token should be.
+/// Where credentials live, beside the sessions rather than in a config directory people copy.
 #[must_use]
 pub fn path() -> PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
@@ -149,31 +119,22 @@ pub fn now() -> u64 {
 /// Anything that can go wrong holding a credential.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// The store could not be read or written.
     #[error("credentials: {0}")]
     Io(#[from] std::io::Error),
 
-    /// The store is not valid JSON.
-    ///
-    /// Reported rather than repaired: replacing it signs the user out of everything, which is
-    /// a heavy answer to what may be a disk that needs looking at.
+    /// The store is not valid JSON; reported rather than repaired.
     #[error("{path} is not readable as credentials ({detail}); move it aside to start again")]
     Corrupt {
-        /// Where the unreadable file is.
         path: PathBuf,
-        /// What the parser objected to.
         detail: String,
     },
 
-    /// The store could not be serialised.
     #[error("credentials: {0}")]
     Encode(#[from] serde_json::Error),
 
-    /// The provider refused.
     #[error("{0}")]
     Refused(String),
 
-    /// There is nothing stored for this provider.
     #[error("not signed in to {0}; run `magi auth login {0}`")]
     NotSignedIn(String),
 
@@ -196,8 +157,6 @@ mod tests {
 
     #[test]
     fn a_token_is_stale_before_it_actually_expires() {
-        // Otherwise it can expire while the request carrying it is in flight, and the turn is
-        // lost for a reason that had nothing to do with the conversation.
         assert!(tokens(1000).is_stale(1000 - EARLY));
         assert!(!tokens(1000).is_stale(1000 - EARLY - 1));
     }
@@ -209,7 +168,6 @@ mod tests {
 
     #[test]
     fn credentials_live_beside_the_sessions_not_the_config() {
-        // A config directory is the sort of thing people copy between machines.
         let path = path();
         assert!(
             path.ends_with("magi/credentials.json"),

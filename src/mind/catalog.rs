@@ -1,11 +1,7 @@
-//! What melchior can talk to, read out of Lua.
-//!
-//! `providers.lua` says which endpoints exist and what they serve; `apis.lua` says how each is
-//! spoken to. Both are descriptions rather than code melchior ships, which is the whole point of
-//! there being a VM here: a protocol nobody anticipated is a file, not a release.
-//!
-//! Nothing in here resolves a credential. Whether a provider is *ready* is answered by looking
-//! for the variable it names, never by reading it: a card crosses a socket and a key must not.
+//! What melchior can talk to, read out of Lua: `providers.lua` says which endpoints exist and
+//! what they serve, `apis.lua` says how each is spoken to. Nothing in here resolves a
+//! credential — whether a provider is ready is answered by looking for the variable it names and
+//! never by reading it, because a card crosses a socket and a key must not.
 
 use crate::mind::lua::LuaError;
 use crate::mind::lua::engine::Engine;
@@ -29,31 +25,16 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    /// Read the configuration and register what it declares.
-    ///
-    /// # Errors
-    /// When a file will not compile or raises while running. Fatal on purpose: a description
-    /// that does not load has not expressed an intention, and guessing at one is worse than
-    /// stopping.
+    /// Read the configuration and register what it declares. A shipped file that will not
+    /// compile or raises is fatal.
     pub fn load(dir: &Path) -> Result<Self, LuaError> {
         let mut engine = Engine::new();
         // Protocols first: a provider may name one, and a name that resolves to nothing should
         // be a refusal rather than an ordering accident.
         for (name, builtin) in [("apis.lua", APIS), ("providers.lua", PROVIDERS)] {
-            // **The shipped copy always runs, and a person's file runs over the top of it.**
-            //
-            // This used to be a choice between them: a file on disk meant the built-in did not
-            // run at all. So adding one wire protocol meant copying all eight hundred lines of
-            // `apis.lua` and owning every later fix to any of them forever — the cost of a
-            // ten-line contribution was the whole file, which is the surest way to have no
-            // contributions. magi loads additively and balthasar loads additively; this was the
-            // one program in the family that did not, and it was the program whose whole subject
-            // is protocols.
-            //
-            // Layering is safe because the registrar replaces on `(registrar, id)`: a file
-            // declaring `openai-completions` means it and gets it, and a file declaring something
-            // new adds one. Replacement stayed possible; only *accidental* replacement of the
-            // other eight hundred lines stopped.
+            // The shipped copy always runs and a person's file runs over the top of it. The
+            // registrar replaces on `(registrar, id)`, so a file naming a shipped protocol still
+            // means it and one naming something new only adds.
             engine.run(builtin, name)?;
 
             let path = dir.join(name);
@@ -62,13 +43,9 @@ impl Catalog {
             }
         }
 
-        // **Then whatever is installed, discovered rather than named.** After the shipped files
-        // and the config's own copies of them, so a machine that has never used this behaves
-        // exactly as it did; before the coordinator's, which still wins.
-        //
-        // A file that raises costs itself and nothing else: it is somebody else's package, and
-        // refusing to start over it would make installing one a risk rather than a try. The two
-        // shipped files above are fatal for the opposite reason -- they are melchior's own.
+        // Then whatever is installed, discovered rather than named: after the shipped files and
+        // the config's own copies of them, before the coordinator's. One of these that raises
+        // costs itself and nothing else, since it is somebody else's package.
         let known =
             crate::mind::acknowledged::recorded(&crate::mind::acknowledged::manifest_in(dir));
         for (path, trust) in
@@ -77,9 +54,7 @@ impl Catalog {
             let Ok(source) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            // **A package runs when you have said it may, and not before.** Your own files run
-            // on sight; this is for what arrived under `site/pack/` by being fetched, and can
-            // change under you between one run and the next.
+            // A fetched package runs only once acknowledged; your own files run on sight.
             if trust.needs_acknowledging()
                 && !crate::mind::acknowledged::cleared(&known, &path, &source)
             {
@@ -98,9 +73,8 @@ impl Catalog {
             }
         }
 
-        // Last, and over the top. What a coordinator said outranks what is on disk: magi is
-        // deciding, and a file that quietly won would be the disagreement this exists to end.
-        // Nothing there is the ordinary case of a melchior nobody is coordinating.
+        // Last and over the top: what a coordinator said outranks what is on disk. Nothing there
+        // is the ordinary case of a melchior nobody is coordinating.
         if let Ok(given) = std::fs::read_to_string(crate::mind::setup::given()) {
             engine.run(&given, "given")?;
         }
@@ -112,18 +86,15 @@ impl Catalog {
             .filter_map(|(name, value)| assemble(name, value))
             .collect();
         drop(config);
-        // Ask the providers that asked to be asked. A hand-written list is stale the day it is
-        // written, and openrouter alone offers four hundred models.
+        // Ask the providers that asked to be asked.
         let mut providers = providers;
         crate::mind::discovering::discover(&mut providers);
         Ok(Self { providers, engine })
     }
 
-    /// Where the configuration lives.
-    ///
-    /// `$MELCHIOR_CONFIG` first, so a test or a second install names its own; then
-    /// `$XDG_CONFIG_HOME/melchior`. Nothing there is not an error: the binary carries a copy of
-    /// both files, so melchior works on a machine that has never been configured.
+    /// Where the configuration lives: `$MELCHIOR_CONFIG` first, so a test or a second install
+    /// names its own, then `$XDG_CONFIG_HOME/melchior`. Nothing there is not an error, since the
+    /// binary carries a copy of both files.
     #[must_use]
     pub fn dir() -> PathBuf {
         if let Some(named) = std::env::var_os("MELCHIOR_CONFIG").filter(|v| !v.is_empty()) {
@@ -132,9 +103,8 @@ impl Catalog {
         let base = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
-        // No relative fallback. `config` resolved against the working directory, so melchior
-        // run from a sibling's checkout read that sibling's files. Nothing there means the copy
-        // in the binary.
+        // No relative fallback: a `config` resolved against the working directory would make
+        // melchior read a sibling checkout's files.
         base.map_or_else(
             || PathBuf::from("/nonexistent"),
             |base| base.join("melchior"),
@@ -166,11 +136,8 @@ impl Catalog {
     }
 }
 
-/// One declaration, as a `Provider`.
-///
-/// The registrar keys by name and the value does not repeat it, so the id is put back here. Each
-/// model is told which provider it belongs to and which interface it is spoken over for the same
-/// reason: a config says those once, at the top, and a `Model` carries them.
+/// One declaration, as a `Provider`. The registrar keys by name and the value does not repeat
+/// it, so the id, the owning provider and the interface are put back onto each model here.
 fn assemble(name: &str, value: &serde_json::Value) -> Option<Provider> {
     let mut value = value.clone();
     let object = value.as_object_mut()?;
@@ -185,8 +152,8 @@ fn assemble(name: &str, value: &serde_json::Value) -> Option<Provider> {
                 "provider".into(),
                 serde_json::Value::String(name.to_owned()),
             );
-            // A model may name its own interface -- one provider can serve several -- and takes
-            // the provider's only when it does not.
+            // A model may name its own interface, one provider serving several, and takes the
+            // provider's only when it does not.
             if !model.contains_key("api")
                 && let Some(api) = api.clone()
             {
@@ -197,26 +164,21 @@ fn assemble(name: &str, value: &serde_json::Value) -> Option<Provider> {
     serde_json::from_value(value).ok()
 }
 
-/// One model, described without naming a secret.
-///
-/// `needs` is the *first* variable a key-authenticated provider would accept. Vendors rename
-/// them and people keep old ones exported, so several are tried; naming all of them in a card
-/// would be a wall of text where a person wants one line.
+/// One model, described without naming a secret. `needs` is the first of the several variables
+/// a key-authenticated provider would accept, not all of them.
 fn card(provider: &Provider, model: &Model) -> Card {
     let needs = match &provider.auth {
         Auth::ApiKey { vars } => vars.first().cloned(),
         _ => None,
     };
-    // Ready when nothing is wanted, or when one of the names it would accept is set to
-    // something. A variable exported as empty is how a shell says "unset" often enough that
-    // treating it as configured produces a 401 nobody can explain.
+    // Ready when nothing is wanted, or when one accepted name is set to something non-empty: an
+    // empty variable is how a shell says unset, and treating it as configured yields a 401.
     let ready = match &provider.auth {
         Auth::ApiKey { vars } => vars
             .iter()
             .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty())),
         Auth::None => true,
-        // OAuth and the cloud signatures cannot be answered by looking at the environment, and
-        // guessing "ready" would offer a model that fails on the first call.
+        // OAuth and the cloud signatures cannot be answered from the environment.
         _ => false,
     };
     Card {
@@ -286,10 +248,6 @@ mod tests {
 }
 
 /// What the shipped catalog must be true of, whoever edits it.
-///
-/// These came across with the catalog itself. They were magi's while magi held the providers,
-/// and they assert about the same file — a description that says nothing useful is a model
-/// nobody can reach, and the failure shows up as "no such model" a long way from the cause.
 #[cfg(test)]
 mod shape {
     use super::*;
@@ -309,8 +267,6 @@ mod shape {
 
     #[test]
     fn a_provider_either_lists_its_models_or_asks_for_them() {
-        // Neither is a provider that offers nothing, which reads from the outside as the
-        // provider being broken rather than the declaration being empty.
         for provider in &shipped().providers {
             assert!(
                 !provider.models.is_empty() || provider.discover,
@@ -322,8 +278,6 @@ mod shape {
 
     #[test]
     fn every_model_is_stamped_with_its_provider_and_an_interface() {
-        // A config says these once at the top; a `Model` carries them. Assembling them wrongly
-        // is how a model ends up spoken to over the wrong protocol.
         let catalog = shipped();
         for provider in &catalog.providers {
             for model in &provider.models {
@@ -376,8 +330,6 @@ mod shape {
 
     #[test]
     fn a_config_may_declare_providers_in_a_loop() {
-        // The point of the config being Lua. A provider declared in a loop is the same table as
-        // one written out by hand.
         let dir = crate::scratch::Scratch::new("melchior-loop", "one");
         std::fs::write(
             dir.join("providers.lua"),
@@ -419,9 +371,7 @@ mod layering_tests {
 
     #[test]
     fn a_persons_file_adds_to_the_shipped_protocols_rather_than_replacing_them() {
-        // **The cost of a ten-line contribution used to be eight hundred lines.** A file on disk
-        // meant the built-in did not run, so adding one protocol meant forking every other one
-        // and owning their fixes forever. Both are here now, and the shipped ones still work.
+        // A person's file adds to the shipped protocols rather than replacing them.
         let dir = holding(
             "apis.lua",
             r#"melchior.api("mine-own", { chat = function(ask) return ask end })"#,
@@ -442,9 +392,8 @@ mod layering_tests {
 
     #[test]
     fn a_persons_file_may_still_replace_one_by_name() {
-        // Layering is not weaker than replacing: the registrar replaces on `(registrar, id)`, so
-        // a file naming a shipped protocol still means it. What stopped is replacing the other
-        // eight hundred lines by accident.
+        // The registrar replaces on `(registrar, id)`, so a file naming a shipped protocol still
+        // replaces that one.
         let dir = holding(
             "apis.lua",
             r#"melchior.api("openai-completions", { chat = function() return "mine" end })"#,
@@ -469,8 +418,7 @@ mod discovery_tests {
 
     #[test]
     fn a_file_dropped_in_plugin_declares_a_protocol_without_touching_anything_shipped() {
-        // P3 made a ten-line contribution ten lines instead of eight hundred. This is where it
-        // goes: a file of its own, in a directory, that nothing else has to name.
+        // A protocol may arrive as a file of its own in a directory that nothing else names.
         let dir = Scratch::new("melchior-disc", "dropped");
         std::fs::create_dir_all(dir.join("plugin")).expect("mkdir");
         std::fs::write(

@@ -1,8 +1,5 @@
-//! The mind: which models there are, and asking one a question.
-//!
-//! melchior owns this and magi does not. A harness brokers — it gathers context, hands over an
-//! `Ask` and writes down what comes back — while the protocols, the credentials and the HTTP
-//! live here.
+//! The mind: which models there are, and asking one a question. The protocols, the credentials
+//! and the HTTP live here; a harness only hands over an `Ask` and writes down what comes back.
 
 pub mod acknowledged;
 pub mod catalog;

@@ -1,9 +1,4 @@
 //! Why a request failed, and whether trying again can help.
-//!
-//! An enum built from status codes and typed bodies. Never from matching provider prose: Pi
-//! classifies with ~35 regex alternates and had to re-prefix Bedrock's errors so they would
-//! match, which couples every adapter to a regex in another package through nothing but
-//! convention.
 
 use std::time::Duration;
 
@@ -27,11 +22,7 @@ pub enum RetryClass {
 }
 
 impl RetryClass {
-    /// Classify an HTTP status.
-    ///
-    /// 400 stays [`Invalid`](Self::Invalid) rather than being sniffed for an overflow message:
-    /// the caller knows the token count it sent and can decide that far more reliably than a
-    /// substring can.
+    /// Classify an HTTP status alone; 400 stays [`Invalid`](Self::Invalid) until a body says more.
     #[must_use]
     pub const fn of_status(status: u16) -> Self {
         match status {
@@ -44,16 +35,8 @@ impl RetryClass {
         }
     }
 
-    /// The class of a failure, from its status *and* what the provider said about it.
-    ///
-    /// The message is not decoration here. A context-window overflow arrives as an ordinary
-    /// 400: the status says only that the request was rejected, and nothing but the body
-    /// distinguishes "your request is malformed" — which retrying cannot fix — from "your
-    /// request was too long", which compacting can. Classified on status alone, `Overflow` is
-    /// a variant nothing ever produces and the conversation simply stops.
-    ///
-    /// Matched on phrases rather than on a per-vendor error code because the codes disagree
-    /// and the phrases do not: every one of them says the length was the problem.
+    /// The class of a failure, from its status and what the provider said: a context-window
+    /// overflow arrives as an ordinary 400, and only the body tells it from a malformed request.
     #[must_use]
     pub fn of(status: u16, message: &str) -> Self {
         let class = Self::of_status(status);
@@ -93,25 +76,17 @@ pub(crate) const BASE: Duration = Duration::from_secs(10);
 /// The most any single wait will be.
 const CEILING: Duration = Duration::from_secs(600);
 
-/// How long to wait before attempt `attempt`, counting from 1.
-///
-/// Fibonacci from ten seconds, jittered by a hash of the request rather than by a random
-/// number, so a retry schedule reproduces exactly in a test. Tau does the same, and it is the
-/// difference between a backoff you can assert on and one you can only observe.
+/// How long to wait before attempt `attempt`, counting from 1. Fibonacci from ten seconds, jittered
+/// by a hash of the request rather than a random number, so a retry schedule reproduces in a test.
 #[must_use]
 pub fn backoff(attempt: u32, seed: u64) -> Duration {
     backoff_from(BASE, attempt, seed)
 }
 
 /// The same, from a stated first delay.
-///
-/// The base is a parameter so a caller can hold the policy rather than inherit it. Tests are
-/// the caller that needs this: four attempts at the real base is a minute of a test suite
-/// spent proving arithmetic that has its own tests already.
 #[must_use]
 pub fn backoff_from(base_delay: Duration, attempt: u32, seed: u64) -> Duration {
-    // 1, 2, 3, 5, 8 — from (1, 2) rather than (1, 1), so consecutive attempts never share a
-    // multiplier and each wait is strictly longer than the last.
+    // 1, 2, 3, 5, 8 — from (1, 2), not (1, 1), so each wait is strictly longer than the last.
     let (mut a, mut b) = (1_u64, 2_u64);
     for _ in 1..attempt.max(1) {
         (a, b) = (b, a.saturating_add(b));
@@ -119,8 +94,7 @@ pub fn backoff_from(base_delay: Duration, attempt: u32, seed: u64) -> Duration {
     let base = base_delay.saturating_mul(u32::try_from(a).unwrap_or(u32::MAX));
     let capped = base.min(CEILING);
 
-    // Jitter spreads a thundering herd across the last sixth of the window; the ceiling stays
-    // a ceiling because the jitter is subtracted, never added.
+    // Jitter is subtracted, never added, so the ceiling stays a ceiling.
     let span = capped.as_millis() as u64 / 6;
     let offset = if span == 0 { 0 } else { seed % span };
     capped.saturating_sub(Duration::from_millis(offset))
@@ -162,8 +136,6 @@ mod tests {
 
     #[test]
     fn a_four_hundred_about_length_is_an_overflow() {
-        // The whole reason `Overflow` was a variant nothing produced: providers send an
-        // ordinary 400 and put the actual problem in the body.
         for said in [
             "This model's maximum context length is 8192 tokens",
             "context_length_exceeded",
@@ -176,8 +148,6 @@ mod tests {
 
     #[test]
     fn an_ordinary_four_hundred_is_still_invalid() {
-        // Compacting would not help, and retrying a malformed request forever is worse than
-        // reporting it.
         assert_eq!(
             RetryClass::of(400, "unknown field `temperatur`"),
             RetryClass::Invalid
@@ -186,8 +156,6 @@ mod tests {
 
     #[test]
     fn a_status_that_speaks_for_itself_is_not_second_guessed() {
-        // A 401 mentioning a context length is still an auth failure; compacting a request
-        // nobody is allowed to make achieves nothing.
         assert_eq!(
             RetryClass::of(401, "context length exceeded"),
             RetryClass::Auth
@@ -197,7 +165,6 @@ mod tests {
 
     #[test]
     fn every_attempt_waits_longer_than_the_last() {
-        // Across seeds, not one: jitter must never let a later attempt fire sooner.
         for request in ["a", "b", "c", "d"] {
             for attempt in 1..9 {
                 let earlier = backoff(attempt, seed(request, attempt));

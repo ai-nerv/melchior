@@ -1,13 +1,6 @@
-//! The sign-in itself: proof key, browser, callback, exchange.
-//!
-//! Authorization code with PKCE, because magi is a program on your machine and not a server:
-//! it cannot keep a client secret, and a public client without a proof key can have its
-//! callback intercepted by anything else on the machine that registered the same URL scheme.
-//! The proof key is what makes the intercepted code useless.
-//!
-//! The callback comes back to `127.0.0.1` on a port the operating system chooses. Loopback
-//! rather than a custom URL scheme: nothing else can claim it, it needs no registration, and
-//! the port being unpredictable is one more thing an interceptor would have to guess.
+//! The sign-in itself: proof key, browser, callback, exchange. Authorization code with PKCE,
+//! because a program on your machine cannot keep a client secret and the proof key is what makes
+//! an intercepted code useless. The callback returns to `127.0.0.1` on a port the OS chooses.
 
 use base64::Engine;
 use serde::Deserialize;
@@ -23,12 +16,7 @@ pub struct Pkce {
 }
 
 impl Pkce {
-    /// Generate a fresh pair.
-    ///
-    /// # Errors
-    ///
-    /// If the system has no randomness to give, which is not a case to paper over: a
-    /// predictable verifier is no verifier.
+    /// Generate a fresh pair; fails only when the system has no randomness to give.
     pub fn generate() -> Result<Self, super::Error> {
         let mut bytes = [0_u8; 32];
         std::io::Read::read_exact(&mut std::fs::File::open("/dev/urandom")?, &mut bytes)?;
@@ -70,10 +58,7 @@ pub fn authorize_url(
     format!("{endpoint}{separator}{query}")
 }
 
-/// Percent-encode everything that is not unreserved.
-///
-/// Written out rather than pulled in: the unreserved set is four lines of RFC 3986 and the
-/// alternative is a dependency whose whole job is those four lines.
+/// Percent-encode everything outside RFC 3986's unreserved set.
 fn encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
@@ -90,22 +75,13 @@ fn encode(value: &str) -> String {
 /// What the browser came back with.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Callback {
-    /// The authorization code, to be exchanged.
     pub code: String,
     /// The value the request was started with, which must match.
     pub state: String,
 }
 
-/// Wait on `listener` for the browser's redirect, and answer it.
-///
-/// Blocking and single-shot: there is exactly one sign-in in flight and nothing else should be
-/// talking to this port. The reply is a page rather than a bare status because the person is
-/// looking at a browser window and deserves to be told they can close it.
-///
-/// # Errors
-///
-/// If the connection fails, or the request carries an error instead of a code — which is what
-/// arrives when somebody clicks "deny".
+/// Wait on `listener` for the browser's redirect, and answer it. Blocking and single-shot; an
+/// `error` parameter in place of a code is what arrives when somebody clicks "deny".
 pub fn listen_for_code(listener: &std::net::TcpListener) -> Result<Callback, super::Error> {
     use std::io::{BufRead, BufReader, Write};
 
@@ -201,19 +177,9 @@ struct Granted {
 }
 
 /// How long a token is assumed to last when the provider does not say.
-///
-/// Short on purpose: guessing long means using a dead token and losing a turn, and guessing
-/// short costs one refresh.
 const ASSUMED_LIFETIME: u64 = 3600;
 
-/// Turn an authorization code, or a refresh token, into tokens.
-///
-/// One function for both because they are the same request with a different grant, and two
-/// would be two places for the parsing of one reply to drift.
-///
-/// # Errors
-///
-/// If the endpoint cannot be reached, or refuses.
+/// Turn an authorization code, or a refresh token, into tokens: the same request, another grant.
 pub async fn exchange(
     http: &reqwest::Client,
     token_url: &str,
