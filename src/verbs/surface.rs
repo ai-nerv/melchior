@@ -3,6 +3,7 @@
 //! Split from [`super`] under THE RULE, which caps a file at 800 lines.
 
 use super::*;
+use crate::scratch::Project;
 use crate::wire::{Message, Sort};
 
 fn standing() -> Standing {
@@ -22,22 +23,24 @@ fn call(arguments: Value, standing: Standing) -> Answer {
 /// A project of its own, because the verbs that need no instance now *do* things — `claim`
 /// writes a file and `announce` reaches a run — and a test run against `magi` would reach
 /// whatever the person at this machine has open.
-fn nowhere() -> (String, Standing) {
-    let project = format!("melchior-surface-{}", std::process::id());
-    (
-        project.clone(),
-        Standing {
-            me: format!("{project}/main/alpha-rho"),
-            ..standing()
-        },
-    )
+///
+/// One project each, and a guard around it. The two callers shared a single name and removed it
+/// on their last line, so whichever finished first tore down the directory the other was still
+/// writing in — and neither removed anything at all when it failed.
+fn nowhere() -> (Project, Standing) {
+    let project = Project::new("melchior-surface", "alone");
+    let standing = Standing {
+        me: format!("{project}/main/alpha-rho"),
+        ..standing()
+    };
+    (project, standing)
 }
 
 #[test]
 fn every_verb_either_needs_an_instance_or_is_listed_as_not_needing_one() {
     // The table and the dispatch drift the moment either is edited, and the drift shows up
     // as the model being told `whoami` wants a `who`.
-    let (project, standing) = nowhere();
+    let (_project, standing) = nowhere();
     for (verb, _) in VERBS {
         let out = call(
             json!({"verb": verb, "message": "x", "about": "y", "role": "z"}),
@@ -51,7 +54,6 @@ fn every_verb_either_needs_an_instance_or_is_listed_as_not_needing_one() {
             ALONE.contains(verb)
         );
     }
-    let _ = std::fs::remove_dir_all(crate::directory::home(&project));
 }
 
 #[test]
@@ -59,7 +61,7 @@ fn nothing_that_needs_no_instance_is_still_a_stub() {
     // A verb added to `ALONE` and not to the dispatch joins the stubs silently — it is a
     // match arm, not a missing function, so nothing fails to compile and the model is told
     // the verb is "understood but not yet carried out" for as long as nobody tries it.
-    let (project, standing) = nowhere();
+    let (_project, standing) = nowhere();
     for verb in ALONE {
         let out = call(
             json!({"verb": verb, "message": "x", "about": "y", "role": "z"}),
@@ -71,7 +73,6 @@ fn nothing_that_needs_no_instance_is_still_a_stub() {
             out.said
         );
     }
-    let _ = std::fs::remove_dir_all(crate::directory::home(&project));
 }
 
 #[test]

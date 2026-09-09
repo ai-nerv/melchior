@@ -108,14 +108,14 @@ fn setting_your_own_role_takes_no_instance_and_aims_at_this_session() {
 #[cfg(test)]
 mod roster {
     use super::*;
-    use crate::directory::{home, listening_at, roles, sessions};
+    use crate::directory::{listening_at, roles, sessions};
     use crate::identity::Identity;
+    use crate::scratch::Project;
 
-    fn alone(name: &str) -> String {
-        let project = format!("melchior-crew-{}-{name}", std::process::id());
-        let _ = std::fs::remove_dir_all(home(&project));
-        std::fs::create_dir_all(home(&project)).expect("mkdir");
-        project
+    /// A guard rather than a name: the sockets bound below outlived a failing test, because the
+    /// line that removed them came after the assertions — see [`crate::scratch`].
+    fn alone(name: &str) -> Project {
+        Project::new("melchior-crew", name)
     }
 
     /// Bind a socket and leave the three notes beside it, as `announce` would.
@@ -126,7 +126,7 @@ mod roster {
             id: id.to_owned(),
         };
         std::fs::write(sessions::session_at(&me), "alpha-rho").expect("the run");
-        roles::given(project, id, &role);
+        roles::given(project, id, &role).expect("the note");
         std::os::unix::net::UnixListener::bind(listening_at(&me)).expect("bind")
     }
 
@@ -167,7 +167,6 @@ mod roster {
             !said.contains("not recorded"),
             "it still says roles are not recorded: {said}"
         );
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 
     #[test]
@@ -212,6 +211,5 @@ mod roster {
             said.contains("reach an agent by the id"),
             "nor that there is a way round it:\n{said}"
         );
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 }

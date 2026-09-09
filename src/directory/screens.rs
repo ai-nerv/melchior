@@ -66,16 +66,22 @@ fn at(project: &str, id: &str) -> PathBuf {
 /// `--ui` is a session with no screen to offer — `serve` run by hand, or a harness that does not
 /// have one — and a stale note from the id's previous holder would point every peer at a socket
 /// belonging to somebody who has gone. The ids recycle; the notes must not.
-pub fn began(me: &Identity, ui: Option<&Path>) {
+///
+/// # Errors
+/// When the note cannot be written, or when a stale one cannot be taken down. The removal
+/// tolerates a note that was never there — that is the ordinary case, and every other reason a
+/// removal fails leaves peers dialling somebody who has gone.
+pub fn began(me: &Identity, ui: Option<&Path>) -> Result<(), String> {
     let path = ui_at(me);
     let Some(said) = ui.and_then(written) else {
-        let _ = std::fs::remove_file(path);
-        return;
+        return match std::fs::remove_file(&path) {
+            Err(why) if why.kind() != std::io::ErrorKind::NotFound => {
+                Err(format!("{}: {why}", path.display()))
+            }
+            _ => Ok(()),
+        };
     };
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(path, said);
+    super::wrote(&path, &said)
 }
 
 /// The path as it goes in the note, or `None` for one that says nothing.
@@ -127,13 +133,14 @@ pub fn forget_in(project: &str, id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch::Project;
 
     /// A project of its own, so these do not read each other's directory.
-    fn alone(name: &str) -> String {
-        let project = format!("melchior-screen-{}-{name}", std::process::id());
-        let _ = std::fs::remove_dir_all(home(&project));
-        std::fs::create_dir_all(home(&project)).expect("mkdir");
-        project
+    ///
+    /// A guard rather than a name: the line that removed it came after the assertions, so a
+    /// failing test left it behind for good — see [`crate::scratch`].
+    fn alone(name: &str) -> Project {
+        Project::new("melchior-screen", name)
     }
 
     fn id(project: &str, id: &str) -> Identity {
@@ -165,7 +172,8 @@ mod tests {
             &me,
             &super::super::roles::Role::default(),
             Some(Path::new("/run/user/1000/magi/magi/deadbeef.host")),
-        );
+        )
+        .expect("announced");
 
         let listed = super::super::listening(&project);
         assert_eq!(listed, vec!["alpha-rho".to_owned()], "{listed:?}");
@@ -179,7 +187,6 @@ mod tests {
             ui_in(&project, "alpha-rho").is_some(),
             "and the sweep took the note away on its way past"
         );
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 
     #[test]
@@ -202,12 +209,11 @@ mod tests {
         let project = alone("note");
         let me = id(&project, "zeta-pi");
         let ui = PathBuf::from("/run/user/1000/magi/magi/1f4a0b3c.host");
-        began(&me, Some(&ui));
+        began(&me, Some(&ui)).expect("the note");
 
         assert_eq!(ui_in(&project, "zeta-pi").as_ref(), Some(&ui));
         ended(&me);
         assert_eq!(ui_in(&project, "zeta-pi"), None);
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 
     #[test]
@@ -217,12 +223,11 @@ mod tests {
         // somebody who has gone, and that peer would draw it.
         let project = alone("stale");
         let me = id(&project, "zeta-pi");
-        began(&me, Some(Path::new("/run/user/1000/magi/magi/older.host")));
-        began(&me, None);
+        began(&me, Some(Path::new("/run/user/1000/magi/magi/older.host"))).expect("the note");
+        began(&me, None).expect("the note");
         assert_eq!(ui_in(&project, "zeta-pi"), None);
-        began(&me, Some(Path::new("   ")));
+        began(&me, Some(Path::new("   "))).expect("the note");
         assert_eq!(ui_in(&project, "zeta-pi"), None, "blank is nothing said");
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 
     #[test]
@@ -231,11 +236,10 @@ mod tests {
         // names as many sockets as there are readers, and every one of them is missing.
         let project = alone("relative");
         let me = id(&project, "zeta-pi");
-        began(&me, Some(Path::new("magi.host")));
+        began(&me, Some(Path::new("magi.host"))).expect("the note");
         let said = ui_in(&project, "zeta-pi").expect("a note");
         assert!(said.is_absolute(), "{said:?}");
         assert!(said.ends_with("magi.host"), "{said:?}");
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 
     #[test]
@@ -244,9 +248,9 @@ mod tests {
         began(
             &id(&project, "zeta-pi"),
             Some(Path::new("/run/user/1000/magi/magi/gone.host")),
-        );
+        )
+        .expect("the note");
         forget_in(&project, "zeta-pi");
         assert_eq!(ui_in(&project, "zeta-pi"), None);
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 }

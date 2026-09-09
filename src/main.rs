@@ -397,7 +397,15 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         // The note beside the socket, so the tree can be read off the directory: a session that
         // finds this one there can tell whose subagent it is without asking it, and without
         // trusting what it would have said.
-        melchior::directory::announce(&me, &role, ui.as_deref());
+        //
+        // Refused rather than served when a note will not land. This was `let _ = …`, and when
+        // `/tmp` filled the sessions came up as *mains*: no parent, no run, a crew of one, and a
+        // main's reach in `policy` — the failure handed out authority, silently, and read exactly
+        // like a bug in the session model.
+        if let Err(why) = melchior::directory::announce(&me, &role, ui.as_deref()) {
+            eprintln!("melchior serve: {why}");
+            std::process::exit(1);
+        }
         let at = melchior::directory::listening_at(&me);
 
         // Bound *here*, and only then announced. Spawning the accept loop and saying "listening"
@@ -515,8 +523,14 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                 // it. Never said up the pipe: a role changes nothing a harness does, and the
                 // harness that asked for it already knows.
                 Some(role) = named.recv() => {
-                    melchior::directory::roles::given(&me.project, &me.id, &role);
-                    about_tx.send_modify(|about| about.me.role.clone_from(&role.name));
+                    // Said out loud, and the copy this session answers with is left alone. A note
+                    // that did not land leaves every peer routing by the old role while this
+                    // session believes it has the new one — two answers to what an agent is for,
+                    // which is the disagreement the note exists to prevent.
+                    match melchior::directory::roles::given(&me.project, &me.id, &role) {
+                        Ok(()) => about_tx.send_modify(|about| about.me.role.clone_from(&role.name)),
+                        Err(why) => eprintln!("melchior: {} is still {}: {why}", me.id, me.role),
+                    }
                 }
                 // **`None` here is the parent letting go, and it is the whole lifetime rule.**
                 // Matched rather than left to `else`, because a `select!` arm whose pattern
@@ -547,9 +561,17 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                             continue;
                         };
                         let request = pending.remove(at);
+                        // A refusal that a person gave is still a refusal if the note will not
+                        // write — so the acceptance is downgraded rather than reported as one.
+                        // Told below either way, and what it is told has to be true: an adoption
+                        // both sides believe in, over a directory that still calls the child
+                        // somebody's main, is the one outcome nothing later can reconcile.
+                        let mut accept = accept;
                         if accept && let Some(them) = melchior::identity::Identity::read(&request.from)
+                            && let Err(why) = melchior::directory::adopted(&them, &me.id)
                         {
-                            melchior::directory::adopted(&them, &me.id);
+                            eprintln!("melchior: {} was not taken on: {why}", request.from);
+                            accept = false;
                         }
                         // Told either way, and told by us: the asker has been waiting since its
                         // call was answered with "the question has been put", and a silence it

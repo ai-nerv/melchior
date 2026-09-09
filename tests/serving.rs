@@ -4,6 +4,7 @@
 //! real pipe and a real socket, because the two things it has to get right are only true at
 //! that level: what crosses the pipe, and that nothing outlives the parent.
 
+use melchior::scratch::Scratch;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
 
@@ -11,6 +12,12 @@ use std::process::{Child, Command, Stdio};
 struct Serving {
     child: Child,
     out: BufReader<std::process::ChildStdout>,
+    /// The directory it listens in, owned when this session is the one that made it.
+    ///
+    /// **`Some` for exactly one session per directory.** [`Serving::beside`] and
+    /// [`Serving::under`] start a second one in somebody else's, and a guard each would mean the
+    /// first to finish deleting the socket the other is still answering on.
+    own: Option<Scratch>,
     runtime: std::path::PathBuf,
     /// Where it said it was listening, rather than where a test guessed it would be.
     at: std::path::PathBuf,
@@ -20,13 +27,20 @@ struct Serving {
 
 impl Serving {
     /// Start one alone in its own runtime directory.
+    ///
+    /// **Under `$TMPDIR`, through a guard that removes it on the unwind.** This used to name
+    /// `/tmp/melchior-t-<pid>-<name>` outright and remove it on the last line of the test, which
+    /// is wrong twice over: a failing test kept its directory for good, and a literal path is
+    /// one `gate-hermetic` cannot see — the gate runs the suite under a `TMPDIR` of its own and
+    /// looks there, so these two leaked past it on every green run it ever reported.
+    ///
+    /// Short still matters: a unix socket path is capped at `SUN_LEN`, and the gate roots its
+    /// own directory at `/tmp` for that reason.
     fn start(name: &str) -> Self {
-        // Short, because a unix socket path is capped at about a hundred bytes and a temp
-        // directory under a long prefix silently exhausts it.
-        let runtime =
-            std::path::PathBuf::from(format!("/tmp/melchior-t-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&runtime);
-        Self::beside(&runtime, "alpha-rho")
+        let own = Scratch::new("melchior-t", name);
+        let mut serving = Self::beside(&own, "alpha-rho");
+        serving.own = Some(own);
+        serving
     }
 
     /// Start one as a child: with a parent named and a secret handed down.
@@ -58,6 +72,7 @@ impl Serving {
         Self {
             child,
             out,
+            own: None,
             runtime: runtime.to_path_buf(),
             at,
             named,
@@ -92,6 +107,7 @@ impl Serving {
         Self {
             child,
             out,
+            own: None,
             runtime: runtime.to_path_buf(),
             at,
             named,
@@ -155,18 +171,17 @@ impl Serving {
     }
 
     /// Let go of the pipe, and wait.
+    ///
+    /// The directory goes with `self`, on the return and on the panic alike.
     fn let_go(mut self) -> bool {
         drop(self.child.stdin.take());
         for _ in 0..100 {
             if matches!(self.child.try_wait(), Ok(Some(_))) {
-                let left = self.at().exists();
-                let _ = std::fs::remove_dir_all(&self.runtime);
-                return !left;
+                return !self.at().exists();
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let _ = self.child.kill();
-        let _ = std::fs::remove_dir_all(&self.runtime);
         panic!("melchior serve outlived the parent that started it");
     }
 }
@@ -447,7 +462,6 @@ fn a_forked_session_comes_up_as_a_child_and_its_parent_may_end_it() {
 
     let _ = child.child.kill();
     let _ = parent.child.kill();
-    let _ = std::fs::remove_dir_all(&runtime);
 }
 
 /// One hand-written call, framed the way the family frames everything.
@@ -480,17 +494,16 @@ struct Killable {
     /// end of file cannot be what stops it, so the kernel is the only explanation left.
     held: Option<std::process::ChildStdin>,
     served: u32,
-    runtime: std::path::PathBuf,
+    /// Kept for its `Drop`, which removes the directory however the test ends.
+    _runtime: Scratch,
 }
 
 impl Killable {
     fn start(name: &str) -> Self {
-        // Short, for the same reason `Serving::start` is: a unix socket path is capped at about
-        // a hundred bytes and a long prefix silently exhausts it.
-        let runtime =
-            std::path::PathBuf::from(format!("/tmp/melchior-k-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&runtime);
-        std::fs::create_dir_all(&runtime).expect("mkdir");
+        // Under `$TMPDIR`, for the same reason `Serving::start` is: this named
+        // `/tmp/melchior-k-<pid>-<name>` outright, which escapes the isolated root
+        // `gate-hermetic` runs the suite under and so leaked past it unremarked.
+        let runtime = Scratch::new("melchior-k", name);
         let pids = runtime.join("pid");
         let script = format!(
             "exec 3<&0; XDG_RUNTIME_DIR={runtime} {binary} serve --project killed <&3 \
@@ -515,7 +528,7 @@ impl Killable {
             shell,
             held,
             served,
-            runtime,
+            _runtime: runtime,
         }
     }
 
@@ -525,7 +538,9 @@ impl Killable {
         let _ = self.shell.wait();
     }
 
-    /// Leave nothing running and nothing on disk, whatever the assertions are about to do.
+    /// Leave nothing running, whatever the assertions are about to do.
+    ///
+    /// The directory is not this function's job any more: it goes when `self` does.
     fn cleared(mut self) {
         let _ = self.shell.kill();
         let _ = self.shell.wait();
@@ -536,7 +551,6 @@ impl Killable {
             // Already gone is the passing case, and its complaint reads like a failure.
             .stderr(Stdio::null())
             .status();
-        let _ = std::fs::remove_dir_all(&self.runtime);
     }
 }
 

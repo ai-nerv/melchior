@@ -127,14 +127,15 @@ fn first_line(said: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::directory::{home, listening_at, roles, sessions};
+    use crate::directory::{listening_at, roles, sessions};
     use crate::identity::Identity;
+    use crate::scratch::Project;
 
-    fn alone(name: &str) -> String {
-        let project = format!("melchior-fan-{}-{name}", std::process::id());
-        let _ = std::fs::remove_dir_all(home(&project));
-        std::fs::create_dir_all(home(&project)).expect("mkdir");
-        project
+    ///
+    /// A guard rather than a name: the line that removed it came after the assertions, so a
+    /// failing test left it behind for good — see [`crate::scratch`].
+    fn alone(name: &str) -> Project {
+        Project::new("melchior-fan", name)
     }
 
     /// Bind a socket, leave the notes beside it, and answer every call with a bare success.
@@ -155,9 +156,9 @@ mod tests {
         };
         std::fs::write(sessions::session_at(&me), run).expect("the run");
         if let Some(parent) = parent {
-            crate::directory::adopted(&me, parent);
+            crate::directory::adopted(&me, parent).expect("the note");
         }
-        roles::given(project, id, &roles::Role::default());
+        roles::given(project, id, &roles::Role::default()).expect("the note");
         let bound = std::os::unix::net::UnixListener::bind(listening_at(&me)).expect("bind");
         let heard = bound.try_clone().expect("a second handle");
         std::thread::spawn(move || {
@@ -229,7 +230,6 @@ mod tests {
             "it announced to itself: {}",
             said.said
         );
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 
     #[test]
@@ -257,7 +257,6 @@ mod tests {
             "and not which wall: {}",
             said.said
         );
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 
     #[test]
@@ -272,7 +271,6 @@ mod tests {
         assert!(!said.failed, "{}", said.said);
         assert!(said.said.contains("nobody else"), "{}", said.said);
         assert!(said.said.contains("`send`"), "{}", said.said);
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 
     #[test]
@@ -293,6 +291,5 @@ mod tests {
             "{}",
             said.said
         );
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 }

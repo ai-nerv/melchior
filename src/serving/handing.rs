@@ -2,7 +2,7 @@
 //!
 //! Split from [`super`] under THE RULE, which caps a file at 800 lines.
 
-use super::tests::{listening, named, tidy};
+use super::tests::{alone, listening, named};
 use std::time::Duration;
 
 /// One hand-written call, the way anything that is not magi would send it.
@@ -31,7 +31,8 @@ async fn the_client_library_comes_back_over_the_wire() {
     // and useless to one that cannot: a sandboxed VM with no `io.popen` has no way to run
     // it. So a sibling that speaks the framing can fetch the right vocabulary using the
     // wrong one, in code, with nothing written to disk.
-    let them = named("handed", "theta-mu");
+    let it = alone("handed");
+    let them = named(&it, "theta-mu");
     let _bound = listening(&them).await;
     let at = crate::directory::listening_at(&them);
 
@@ -43,7 +44,6 @@ async fn the_client_library_comes_back_over_the_wire() {
     assert_eq!(reply["n"], 1, "one value, in a list");
     let source = reply["result"][0].as_str().expect("source");
     assert_eq!(source, crate::CLIENT, "and it is the file this crate ships");
-    tidy("handed");
 }
 
 #[tokio::test]
@@ -51,7 +51,8 @@ async fn verbs_and_client_are_the_two_a_stranger_may_have() {
     // Everything else is *about this session*, and somebody who will not say who they are
     // has no standing to ask. These two are about the surface: what it speaks, and the
     // library that speaks it. Neither says anything about who is answering.
-    let them = named("stranger", "iota-nu");
+    let it = alone("stranger");
+    let them = named(&it, "iota-nu");
     let _bound = listening(&them).await;
     let at = crate::directory::listening_at(&them);
 
@@ -74,14 +75,14 @@ async fn verbs_and_client_are_the_two_a_stranger_may_have() {
 
     assert!(open.iter().all(|ok| *ok == true), "{open:?}");
     assert!(closed.iter().all(|ok| *ok == false), "{closed:?}");
-    tidy("stranger");
 }
 
 #[tokio::test]
 async fn every_verb_it_lists_is_one_a_client_could_call() {
     // `verbs` promising something nothing answers is worse than not listing it: a client
     // written from that list fails in somebody else's program.
-    let them = named("listed", "kappa-nu");
+    let it = alone("listed");
+    let them = named(&it, "kappa-nu");
     let _bound = listening(&them).await;
     let at = crate::directory::listening_at(&them);
 
@@ -97,5 +98,4 @@ async fn every_verb_it_lists_is_one_a_client_could_call() {
 
     let known: Vec<&str> = crate::wire::VERBS.iter().map(|(verb, _)| *verb).collect();
     assert_eq!(named_verbs, known);
-    tidy("listed");
 }

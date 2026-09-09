@@ -99,16 +99,18 @@ fn about(arguments: &serde_json::Value) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::directory::{home, listening_at, socket};
+    use crate::directory::{listening_at, socket};
     use crate::identity::Identity;
+    use crate::scratch::Project;
 
     /// A project of its own, with a socket, so the holder is one that answers.
-    fn alone(name: &str) -> (String, std::os::unix::net::UnixListener) {
-        let project = format!("melchior-claiming-{}-{name}", std::process::id());
-        let _ = std::fs::remove_dir_all(home(&project));
-        std::fs::create_dir_all(home(&project)).expect("mkdir");
+    ///
+    /// A guard rather than a name: the line that removed it came after the assertions, so a
+    /// failing test left it behind for good — see [`crate::scratch`].
+    fn alone(name: &str) -> (Project, std::os::unix::net::UnixListener) {
+        let project = Project::new("melchior-claiming", name);
         let me = Identity {
-            project: project.clone(),
+            project: project.to_string(),
             role: "main".to_owned(),
             id: "alpha-rho".to_owned(),
         };
@@ -143,7 +145,6 @@ mod tests {
         let gone = let_go(&serde_json::json!({"about": "src/parser.rs"}), &standing);
         assert!(!gone.failed, "{}", gone.said);
         assert!(held(&standing).said.contains("Nothing in"), "still held");
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 
     #[test]
@@ -166,7 +167,6 @@ mod tests {
             "and where to look: {}",
             took.said
         );
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 
     #[test]
@@ -185,6 +185,5 @@ mod tests {
             "one session decided another had stopped working"
         );
         assert!(gone.said.contains("beta-nu"), "{}", gone.said);
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 }

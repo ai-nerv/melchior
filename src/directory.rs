@@ -337,16 +337,41 @@ fn safe(name: &str) -> String {
 /// `ui` is where the harness draws this agent, which melchior cannot work out for itself and
 /// which nothing else in this directory can be asked for — see [`screens`]. `None` for a
 /// session with no screen to offer, and that is what a bare `melchior serve` is.
-pub fn announce(me: &Identity, role: &roles::Role, ui: Option<&Path>) {
-    sessions::began(me);
-    roles::began(me, role);
-    screens::began(me, ui);
-    let Some(parent) = parent() else { return };
-    let path = kin_at(me);
+///
+/// # Errors
+/// When a note cannot be written, naming the path and what the operating system said.
+///
+/// **This used to be `let _ = write(…)` three times over.** When `/tmp` hit its quota, every
+/// session came up as a *main*: no `.parent`, no `.session`, a crew of one, and every relation
+/// in [`policy`] reading "another instance's main" — because the notes those answers are read
+/// off had never been written and nothing anywhere said so. The symptom is indistinguishable
+/// from a genuine bug in the session model, and it was chased as one.
+///
+/// A session that cannot write these is not a session with a cosmetic fault. The `.parent` note
+/// is what makes a subagent a subagent, so a child that could not write one is a main as far as
+/// every peer is concerned, with a main's reach — the failure grants authority. The caller's
+/// business is to refuse to come up rather than to serve under a name it cannot back.
+pub fn announce(me: &Identity, role: &roles::Role, ui: Option<&Path>) -> Result<(), String> {
+    sessions::began(me)?;
+    roles::began(me, role)?;
+    screens::began(me, ui)?;
+    let Some(parent) = parent() else {
+        return Ok(());
+    };
+    wrote(&kin_at(me), &parent)
+}
+
+/// Write one note beside a socket, and say what went wrong if it could not be.
+///
+/// The one place the notes are written, so there is one answer to "why is this session
+/// misdescribed" rather than one per file. The path is in the message because the two ways this
+/// fails — a full filesystem and a runtime directory that is not writable — are told apart by
+/// looking at it.
+pub(crate) fn wrote(path: &Path, said: &str) -> Result<(), String> {
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(dir).map_err(|why| format!("{}: {why}", dir.display()))?;
     }
-    let _ = std::fs::write(path, parent);
+    std::fs::write(path, said).map_err(|why| format!("{}: {why}", path.display()))
 }
 
 /// Take the notes back down.
@@ -373,12 +398,13 @@ pub fn forget(me: &Identity) {
 /// matches nothing. Written that way once, the adopted session read as a *cousin* to the very
 /// session that had just accepted it, which was then refused for reaching another instance's
 /// subagent.
-pub fn adopted(them: &Identity, parent: &str) {
-    let path = kin_at(them);
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(path, parent);
+///
+/// # Errors
+/// When the note cannot be written. Adoption that failed silently is worse than one that was
+/// refused: the person at the keyboard said yes, both sides were told it happened, and the
+/// directory every other agent reads goes on describing the child as somebody's main.
+pub fn adopted(them: &Identity, parent: &str) -> Result<(), String> {
+    wrote(&kin_at(them), parent)
 }
 
 /// Tell whoever asked what was decided.

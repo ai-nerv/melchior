@@ -219,12 +219,14 @@ fn marked(what: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch::Project;
 
     /// A project of its own, with a socket, so the record is actually kept.
-    fn listening(name: &str) -> (String, std::os::unix::net::UnixListener) {
-        let project = format!("melchior-sent-{}-{name}", std::process::id());
-        let _ = std::fs::remove_dir_all(home(&project));
-        std::fs::create_dir_all(home(&project)).expect("mkdir");
+    ///
+    /// A guard rather than a name: the line that removed it came after the assertions, so a
+    /// failing test left the directory and its socket behind for good — see [`crate::scratch`].
+    fn listening(name: &str) -> (Project, std::os::unix::net::UnixListener) {
+        let project = Project::new("melchior-sent", name);
         let bound =
             std::os::unix::net::UnixListener::bind(socket(&project, "alpha-rho")).expect("bind");
         (project, bound)
@@ -250,7 +252,6 @@ mod tests {
         assert!(why.contains("same message"), "{why}");
         // And a different one still goes, so the guard is about repetition and not about volume.
         allow(&me, "send beta-nu the lexer is done").expect("something new");
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 
     #[test]
@@ -263,20 +264,17 @@ mod tests {
         let why = allow(&me, "send beta-nu one too many").expect_err("over it");
         assert!(why.contains(&IN_A_WINDOW.to_string()), "{why}");
         assert!(why.contains("announce"), "and what to do instead: {why}");
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 
     #[test]
     fn nothing_is_recorded_for_a_session_that_is_not_listening() {
         // The note is swept when the session goes, and nothing sweeps a session nothing dials.
-        let project = format!("melchior-sent-{}-absent", std::process::id());
-        let _ = std::fs::remove_dir_all(home(&project));
+        let project = Project::new("melchior-sent", "absent");
         let me = me(&project);
         for _ in 0..IN_A_WINDOW * 2 {
             allow(&me, "send beta-nu the same thing").expect("nothing to record");
         }
         assert!(!sent_at(&project, "alpha-rho").exists());
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 
     #[test]

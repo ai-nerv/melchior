@@ -195,8 +195,11 @@ pub fn role_in(project: &str, id: &str) -> Option<Role> {
 }
 
 /// Leave the note saying what this agent is for.
-pub fn began(me: &Identity, role: &Role) {
-    given(&me.project, &me.id, role);
+///
+/// # Errors
+/// When the note cannot be written.
+pub fn began(me: &Identity, role: &Role) -> Result<(), String> {
+    given(&me.project, &me.id, role)
 }
 
 /// The same, aimed at an agent by id.
@@ -205,12 +208,13 @@ pub fn began(me: &Identity, role: &Role) {
 /// `assign` reaches the child's socket and the child writes its own note, the same way
 /// [`super::adopted`] is written by the side that consented. A note anybody could write is a
 /// note nobody can read.
-pub fn given(project: &str, id: &str, role: &Role) {
+///
+/// # Errors
+/// When the note cannot be written. A role that did not land leaves the agent on the roster as
+/// whatever it was before, which is the one answer a coordinator routes by.
+pub fn given(project: &str, id: &str, role: &Role) -> Result<(), String> {
     let path = home(project).join(format!("{}.role", safe(id)));
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(path, role.written());
+    super::wrote(&path, &role.written())
 }
 
 /// Take the note back down.
@@ -232,13 +236,14 @@ fn cut(said: &str, at: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch::Project;
 
     /// A project of its own, so these do not read each other's directory.
-    fn alone(name: &str) -> String {
-        let project = format!("melchior-role-{}-{name}", std::process::id());
-        let _ = std::fs::remove_dir_all(home(&project));
-        std::fs::create_dir_all(home(&project)).expect("mkdir");
-        project
+    ///
+    /// A guard rather than a name: the line that removed it came after the assertions, so a
+    /// failing test left it behind for good — see [`crate::scratch`].
+    fn alone(name: &str) -> Project {
+        Project::new("melchior-role", name)
     }
 
     fn id(project: &str, id: &str) -> Identity {
@@ -379,7 +384,8 @@ mod tests {
             &project,
             "zeta-pi",
             &Role::new("reviewer", Some("reads diffs")),
-        );
+        )
+        .expect("the note");
 
         let held = role_in(&project, "zeta-pi").expect("a role");
         assert_eq!(held.name, "reviewer");
@@ -388,7 +394,6 @@ mod tests {
 
         ended(&me);
         assert_eq!(role_in(&project, "zeta-pi"), None);
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 
     #[test]
@@ -397,6 +402,5 @@ mod tests {
         // session started before this existed reads as having no role at all.
         let project = alone("absent");
         assert_eq!(role_in(&project, "nobody-nowhere"), None);
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 }

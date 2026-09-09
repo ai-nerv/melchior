@@ -1,4 +1,4 @@
-//! A temporary directory that removes itself.
+//! Directories a test owns, and that go when it does.
 //!
 //! **Every test here used to clean up on its last line.** A `let _ = remove_dir_all(&dir);` after
 //! the assertions runs when the test passes and does not run when it fails: `assert!` unwinds
@@ -8,6 +8,10 @@
 //!
 //! The fix is the one the language already offers: own the directory, and let `Drop` do it. A
 //! guard runs on the unwind as well as on the return, which is the case that was leaking.
+//!
+//! Two of them, because the suite writes to two trees. [`Scratch`] is a directory under
+//! `$TMPDIR`; [`Project`] is one under `$XDG_RUNTIME_DIR/melchior`, where the code under test
+//! keeps sockets and notes and where nothing may point it elsewhere.
 //!
 //! Here rather than in a testkit crate because there is no second crate to put it in: melchior
 //! is one crate. The siblings each carry their own copy of this for the same reason the wire
@@ -120,6 +124,76 @@ impl Drop for Scratch {
     }
 }
 
+/// A project directory under the runtime directory, removed when this is dropped.
+///
+/// [`Scratch`]'s sibling, for the other tree the suite writes to. A test about the *directory* —
+/// who is listening, whose child is whose, what a role note says — cannot use a temporary
+/// directory instead, because the code under test looks under `$XDG_RUNTIME_DIR/melchior` and
+/// nowhere else. So every one of those tests made a project there and removed it on its last
+/// line, with the same hole [`Scratch`] was written for.
+///
+/// That tree is also not `$TMPDIR`, which is the part that made it expensive: `gate-hermetic`
+/// runs the suite under a temporary directory of its own and looks there, so what piled up here
+/// was invisible to the one thing that was supposed to be watching. Around eighteen hundred
+/// directories accumulated, and the suite that failed was magi's — its `resume_live` gives up
+/// once this directory is full enough — which cost most of a day to attribute.
+#[derive(Debug)]
+pub struct Project {
+    name: String,
+}
+
+impl Project {
+    /// A project nothing else is in, named after `prefix` and `name`.
+    ///
+    /// # Panics
+    /// If the directory cannot be created, which is a broken machine rather than a failed test.
+    #[must_use]
+    pub fn new(prefix: &str, name: &str) -> Self {
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let it = Self {
+            name: format!("{prefix}-{}-{n}-{name}", std::process::id()),
+        };
+        // Removed first for the same reason a scratch is: a pid comes round again, and a run
+        // that was killed rather than unwound left its sockets behind under that name.
+        let _ = std::fs::remove_dir_all(it.home());
+        std::fs::create_dir_all(it.home()).expect("a project directory");
+        it
+    }
+
+    /// The directory this project's sockets and notes live in.
+    #[must_use]
+    pub fn home(&self) -> PathBuf {
+        crate::directory::home(&self.name)
+    }
+}
+
+impl std::ops::Deref for Project {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.name
+    }
+}
+
+impl AsRef<str> for Project {
+    fn as_ref(&self) -> &str {
+        &self.name
+    }
+}
+
+/// So a test can write `format!("{it}/main/alpha-rho")`, which is how a full name is spelled.
+impl std::fmt::Display for Project {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str(&self.name)
+    }
+}
+
+impl Drop for Project {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(self.home());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Scratch;
@@ -162,5 +236,41 @@ mod tests {
         let path = Scratch::new("melchior-scratch", "leaked").leak();
         assert!(path.exists());
         let _ = std::fs::remove_dir_all(&path);
+    }
+}
+
+#[cfg(test)]
+mod projects {
+    use super::Project;
+
+    #[test]
+    fn a_project_removes_its_directory_when_a_test_panics() {
+        // The case the trailing `remove_dir_all(home(&project))` never covered, and the one that
+        // filled the runtime directory.
+        let home = std::panic::catch_unwind(|| {
+            let it = Project::new("melchior-project", "panicked");
+            let home = it.home();
+            std::fs::write(it.home().join("alpha-rho"), "x").expect("write");
+            std::panic::panic_any(home);
+        })
+        .expect_err("the closure panics");
+        let home = home.downcast::<std::path::PathBuf>().expect("the path");
+        assert!(!home.exists(), "{}", home.display());
+    }
+
+    #[test]
+    fn two_projects_of_one_name_do_not_share_a_directory() {
+        let a = Project::new("melchior-project", "same");
+        let b = Project::new("melchior-project", "same");
+        assert_ne!(a.home(), b.home());
+        assert!(a.home().exists() && b.home().exists());
+    }
+
+    #[test]
+    fn a_project_is_under_the_runtime_directory_the_code_reads() {
+        // Not `$TMPDIR`. A guard that tidied a temporary directory would leave the tree that
+        // actually fills up untouched, and read as a fix.
+        let it = Project::new("melchior-project", "where");
+        assert_eq!(it.home(), crate::directory::home(&it));
     }
 }

@@ -77,13 +77,13 @@ fn read(path: &std::path::Path) -> Option<String> {
 /// having no parent is what makes a root, so absence says it; being its own run is something a
 /// root *is*, and a missing note would leave every reader to guess it — see
 /// [`Whom::session_root`](crate::policy::Whom::session_root) for what that guess costs.
-pub fn began(me: &Identity) {
+///
+/// # Errors
+/// When the note cannot be written. A session with no run note is on nobody's roster including
+/// its own, and balthasar has nothing to file its transcript under.
+pub fn began(me: &Identity) -> Result<(), String> {
     let run = inherited().unwrap_or_else(|| minted(&me.id, since_epoch()));
-    let path = session_at(me);
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(path, run);
+    super::wrote(&session_at(me), &run)
 }
 
 /// A run name that no later run can be handed.
@@ -138,13 +138,14 @@ pub fn crew(me: &Whom) -> Vec<Whom> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch::Project;
 
     /// A project of its own, so these do not read each other's directory.
-    fn alone(name: &str) -> String {
-        let project = format!("melchior-session-{}-{name}", std::process::id());
-        let _ = std::fs::remove_dir_all(home(&project));
-        std::fs::create_dir_all(home(&project)).expect("mkdir");
-        project
+    ///
+    /// A guard rather than a name: the line that removed it came after the assertions, so a
+    /// failing test left it behind for good — see [`crate::scratch`].
+    fn alone(name: &str) -> Project {
+        Project::new("melchior-session", name)
     }
 
     fn id(project: &str, id: &str) -> Identity {
@@ -162,11 +163,11 @@ mod tests {
         // Through `announce`, because that is the wiring worth testing: the note is written
         // where the socket is announced, and a session that bound without writing it would be
         // on nobody's roster including its own.
-        super::super::announce(&root, &crate::directory::roles::Role::default(), None);
+        super::super::announce(&root, &crate::directory::roles::Role::default(), None)
+            .expect("announced");
         let run = session_of(&root).expect("the note");
         assert!(run.starts_with("alpha-rho-"), "{run}");
         assert_eq!(session_in(&project, "alpha-rho"), Some(run));
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 
     #[test]
@@ -193,7 +194,7 @@ mod tests {
         let child = id(&project, "psi-eta");
         std::fs::write(session_at(&child), "alpha-rho").expect("the note");
 
-        super::super::adopted(&child, "beta-nu");
+        super::super::adopted(&child, "beta-nu").expect("the note");
 
         assert_eq!(
             whom(&project, "psi-eta").parent.as_deref(),
@@ -205,7 +206,6 @@ mod tests {
             Some("alpha-rho"),
             "adoption rewrote the run, and everything filed under the old one is now orphaned"
         );
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 
     #[test]
@@ -252,6 +252,5 @@ mod tests {
             !held.contains(&"beta-nu".to_owned()),
             "another run's agent is on the roster: {held:?}"
         );
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 }

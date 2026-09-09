@@ -8,7 +8,7 @@
 //! handed a name down. A harness that spawned a child got a *main*: no parent, outside every
 //! wall the policy draws, and unstoppable by the thing that started it.
 
-use super::tests::{listening, named, tidy};
+use super::tests::{alone, listening, named};
 use std::time::Duration;
 
 /// One hand-written call carrying a `from`, so the policy can place the caller.
@@ -42,7 +42,8 @@ fn asked_as(at: &std::path::Path, verb: &str, from: &str) -> serde_json::Value {
 /// thing that started it.
 #[tokio::test]
 async fn a_session_names_a_child_and_keeps_the_secret_it_minted() {
-    let me = named("minting", "alpha-nu");
+    let it = alone("minting");
+    let me = named(&it, "alpha-nu");
     let _bound = listening(&me).await;
     let at = crate::directory::listening_at(&me);
     let full = me.full();
@@ -79,7 +80,6 @@ async fn a_session_names_a_child_and_keeps_the_secret_it_minted() {
         .await
         .expect("the thread finished");
     assert_eq!(held["result"][0][&id], token, "{held}");
-    tidy("minting");
 }
 
 /// A run is handed down, not started afresh at every hop.
@@ -90,7 +90,8 @@ async fn a_session_names_a_child_and_keeps_the_secret_it_minted() {
 /// which is what everybody else reads too.
 #[tokio::test]
 async fn a_child_inherits_the_run_rather_than_starting_one() {
-    let me = named("minting-run", "delta-rho");
+    let it = alone("minting-run");
+    let me = named(&it, "delta-rho");
     let _bound = listening(&me).await;
     let at = crate::directory::listening_at(&me);
     std::fs::write(crate::directory::sessions::session_at(&me), "alpha-rho").expect("the note");
@@ -106,22 +107,21 @@ async fn a_child_inherits_the_run_rather_than_starting_one() {
         "alpha-rho",
         "the child was handed a run of its own: {reply}"
     );
-    tidy("minting-run");
 }
 
 /// A secret is not something a sibling may read.
 #[tokio::test]
 async fn what_was_minted_is_refused_to_anybody_who_could_not_stop_this() {
-    let me = named("minting-wall", "beta-rho");
+    let it = alone("minting-wall");
+    let me = named(&it, "beta-rho");
     let _bound = listening(&me).await;
     let at = crate::directory::listening_at(&me);
 
     // A main in the same project: it may ask this session things and tell it things, and it
     // may not end it — so it may not hold what would let it.
-    let stranger = named("minting-wall", "gamma-pi").full();
+    let stranger = named(&it, "gamma-pi").full();
     let reply = tokio::task::spawn_blocking(move || asked_as(&at, "minted", &stranger))
         .await
         .expect("the thread finished");
     assert_eq!(reply["ok"], false, "a sibling reads no secrets: {reply}");
-    tidy("minting-wall");
 }

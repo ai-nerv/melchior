@@ -275,29 +275,31 @@ mod tests {
     use super::*;
     use crate::asking::Held;
     use crate::identity::Identity;
+    use crate::scratch::Project;
     use crate::wire::Sort;
     use std::time::Duration;
 
-    /// A project nothing else is using.
+    /// A project nothing else is using, held for as long as the test is.
     ///
-    /// The runtime directory is shared with whatever magi sessions the person has open, and the whole
-    /// point of a project directory is that one project cannot see another's.
-    /// One per test, because they run at once and each clears up after itself. Sharing a
-    // project directory made every test tear down the sockets the others were using.
-    fn project(tag: &str) -> String {
-        format!("magi-test-{}-{tag}", std::process::id())
+    /// The runtime directory is shared with whatever magi sessions the person has open, and the
+    /// whole point of a project directory is that one project cannot see another's. One per test,
+    /// because they run at once: sharing a project directory made every test tear down the
+    /// sockets the others were using.
+    ///
+    /// A guard rather than a name, and named for melchior rather than for magi. It used to be
+    /// `magi-test-<pid>-<tag>`, removed on the last line of each test — so a failing test left
+    /// its directory and its sockets in `$XDG_RUNTIME_DIR/melchior` for good, under a name that
+    /// sent whoever eventually looked to the wrong repository.
+    pub(super) fn alone(tag: &str) -> Project {
+        Project::new("melchior-serve", tag)
     }
 
-    pub(super) fn named(tag: &str, id: &str) -> Identity {
+    pub(super) fn named(it: &Project, id: &str) -> Identity {
         Identity {
-            project: project(tag),
+            project: it.to_string(),
             role: "main".to_owned(),
             id: id.to_owned(),
         }
-    }
-
-    pub(super) fn tidy(tag: &str) {
-        let _ = std::fs::remove_dir_all(crate::directory::home(&project(tag)));
     }
 
     /// What a bound session hands back, held for as long as the test needs it.
@@ -366,8 +368,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_message_sent_by_one_instance_arrives_at_another() {
-        let them = named("arrives", "beta-nu");
-        let me = named("arrives", "alpha-rho");
+        let it = alone("arrives");
+        let them = named(&it, "beta-nu");
+        let me = named(&it, "alpha-rho");
         let mut bound = listening(&them).await;
 
         // From a blocking thread, because that is where it happens for real: the client half is
@@ -399,7 +402,6 @@ mod tests {
         assert_eq!(message.from, me.full());
         assert_eq!(message.sort, Sort::Attention);
         assert!(message.sort.interrupts());
-        tidy("arrives");
     }
 
     #[tokio::test]
@@ -407,8 +409,9 @@ mod tests {
         // The family's guidance names this one: a client that holds a connection is the obvious
         // way to write one, and against a server that closes after replying it dies on its
         // *second* call with a broken pipe.
-        let them = named("held", "gamma-xi");
-        let me = named("held", "delta-pi");
+        let it = alone("held");
+        let them = named(&it, "gamma-xi");
+        let me = named(&it, "delta-pi");
         let _bound = listening(&them).await;
 
         let (they, i) = (them.clone(), me.clone());
@@ -427,7 +430,6 @@ mod tests {
             assert_eq!(reply.n, reply.result.len(), "call {at}");
         }
         assert_eq!(answers[1].result[0]["id"], them.id);
-        tidy("held");
     }
 
     #[tokio::test]
@@ -435,8 +437,9 @@ mod tests {
         // Two gates stand between a caller and a stop, and this is the outer one: nobody
         // started this session, so no relation makes the caller its parent and the secret is
         // never even looked at.
-        let them = named("wall", "epsilon-tau");
-        let me = named("wall", "zeta-nu");
+        let it = alone("wall");
+        let them = named(&it, "epsilon-tau");
+        let me = named(&it, "zeta-nu");
         let _bound = listening(&them).await;
 
         let (they, i) = (them.clone(), me.clone());
@@ -454,7 +457,6 @@ mod tests {
             why.contains("only the session that started one may stop it"),
             "it did not say why: {why}"
         );
-        tidy("wall");
     }
 
     #[tokio::test]
@@ -463,8 +465,9 @@ mod tests {
         // runs as one user, so any process here can connect calling itself the parent — and the
         // directory, which is what decides relations, will agree with it. What it cannot do is
         // produce the secret that session was started with.
-        let them = named("secret", "iota-mu");
-        let me = named("secret", "kappa-rho");
+        let it = alone("secret");
+        let them = named(&it, "iota-mu");
+        let me = named(&it, "kappa-rho");
         let mut about = About {
             me: them.clone(),
             parent: Some(me.id.clone()),
@@ -476,8 +479,6 @@ mod tests {
         };
         // The note a child leaves beside its socket, so the far end reads the caller as its
         // parent rather than as a stranger. Written by hand here; a session writes its own.
-        std::fs::create_dir_all(crate::directory::home(&project("secret")))
-            .expect("a project directory");
         std::fs::write(crate::directory::kin_at(&them), &me.id).expect("the note");
 
         let (about_tx, about_rx) = tokio::sync::watch::channel(about.clone());
@@ -537,14 +538,14 @@ mod tests {
                 .expect("the session was told")
                 .is_some()
         );
-        tidy("secret");
     }
 
     #[tokio::test]
     async fn a_sibling_tool_speaking_the_family_shape_is_understood() {
         // Hand-written frames, the way anything that is not magi would send them. This is the
         // test the encoding bug would have failed, and the only one that could have.
-        let them = named("sibling", "theta-mu");
+        let it = alone("sibling");
+        let them = named(&it, "theta-mu");
         let _bound = listening(&them).await;
         let at = crate::directory::listening_at(&them);
 
@@ -578,7 +579,6 @@ mod tests {
         assert!(asked[0]["result"].is_array(), "and in the family's shape");
         // Everything else is about this session, and a stranger has no standing to ask.
         assert_eq!(asked[1]["ok"], false, "status must not: {}", asked[1]);
-        tidy("sibling");
     }
 }
 
@@ -600,7 +600,7 @@ mod minting;
 /// Hanging up is not a mistake; a bad frame is.
 #[cfg(test)]
 mod parting {
-    use super::tests::{listening, named, tidy};
+    use super::tests::{alone, listening, named};
     use std::io::{Read, Write};
     use std::time::Duration;
 
@@ -634,7 +634,8 @@ mod parting {
         // Found with `socat`, and findable no other way: magi's own client holds its connection
         // and reads exactly one reply per call, so it never saw the second frame. A sibling
         // parsing until EOF chokes on it, and what it chokes on says something untrue.
-        let them = named("parting", "mu-rho");
+        let it = alone("parting");
+        let them = named(&it, "mu-rho");
         let _bound = listening(&them).await;
         let at = crate::directory::listening_at(&them);
 
@@ -650,14 +651,14 @@ mod parting {
             "a second frame followed the answer: {}",
             String::from_utf8_lossy(&back[said + 4..])
         );
-        tidy("parting");
     }
 
     #[tokio::test]
     async fn a_frame_that_is_actually_broken_is_still_answered() {
         // The other half of the rule. A refusal a caller can read beats a dropped connection:
         // "expected value at line 1" says what to fix where "connection reset" does not.
-        let them = named("broken", "nu-rho");
+        let it = alone("broken");
+        let them = named(&it, "nu-rho");
         let _bound = listening(&them).await;
         let at = crate::directory::listening_at(&them);
 
@@ -675,7 +676,8 @@ mod parting {
     async fn a_caller_that_says_nothing_at_all_is_not_answered() {
         // Connecting and hanging up is what a liveness check does — see `asking::answers`. It
         // should cost the session a closed connection and nothing else.
-        let them = named("silent", "xi-rho");
+        let it = alone("silent");
+        let them = named(&it, "xi-rho");
         let _bound = listening(&them).await;
         let at = crate::directory::listening_at(&them);
 
@@ -684,6 +686,5 @@ mod parting {
             .expect("the thread finished");
 
         assert!(back.is_empty(), "{}", String::from_utf8_lossy(&back));
-        tidy("silent");
     }
 }

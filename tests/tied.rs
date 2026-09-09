@@ -15,6 +15,7 @@
 //! leak rather than an approximation of it: a real melchior in exactly this state is holding a
 //! connection open to somebody's API and streaming nothing to nobody.
 
+use melchior::scratch::Scratch;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -59,13 +60,14 @@ fn hanging(told: std::sync::mpsc::Sender<()>) -> u16 {
 struct Magi {
     shell: Child,
     asked: u32,
-    dir: std::path::PathBuf,
+    /// Kept for its `Drop`: the config, the ask and the pid file go with it, including when
+    /// `starting` itself gives up half way through.
+    _dir: Scratch,
 }
 
 impl Magi {
     fn starting(port: u16) -> Self {
-        let dir = std::env::temp_dir().join(format!("melchior-tied-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = Scratch::new("melchior-tied", "ask");
         std::fs::create_dir_all(dir.join("cfg")).expect("mkdir");
         // Added to the shipped catalog rather than replacing it: the config directory layers.
         std::fs::write(
@@ -107,7 +109,11 @@ impl Magi {
             .spawn()
             .expect("start the magi");
         let asked = read_pid(&pids).expect("the magi said which melchior it started");
-        Self { shell, asked, dir }
+        Self {
+            shell,
+            asked,
+            _dir: dir,
+        }
     }
 
     /// End the magi the way a crash would: with nothing running inside it.
@@ -116,7 +122,9 @@ impl Magi {
         let _ = self.shell.wait();
     }
 
-    /// Leave nothing running and nothing on disk, whatever the assertions are about to do.
+    /// Leave nothing running, whatever the assertions are about to do.
+    ///
+    /// The directory is not this function's job any more: it goes when `self` does.
     fn cleared(mut self) {
         self.killed();
         let _ = Command::new("kill")
@@ -125,7 +133,6 @@ impl Magi {
             // Already gone is the passing case, and its complaint reads like a failure.
             .stderr(Stdio::null())
             .status();
-        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 

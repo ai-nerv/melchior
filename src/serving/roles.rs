@@ -14,21 +14,23 @@
 
 use super::placed;
 use crate::answering::About;
-use crate::directory::{home, kin_at};
+use crate::directory::kin_at;
 use crate::identity::Identity;
 use crate::policy::{self, Relation, Whom};
+use crate::scratch::Project;
 
 /// A project of its own, holding one agent that is somebody's child.
 ///
 /// `beta-nu` is `gamma-xi`'s subagent, and the directory is the only place that says so — which
 /// is the whole point: the caller signs its own name, and the note is what answers back.
-fn alone(name: &str) -> String {
-    let project = format!("melchior-placed-{}-{name}", std::process::id());
-    let _ = std::fs::remove_dir_all(home(&project));
-    std::fs::create_dir_all(home(&project)).expect("mkdir");
+///
+/// A guard rather than a name: removing the directory on the last line of each test left it
+/// behind whenever one of them failed — see [`crate::scratch`].
+fn alone(name: &str) -> Project {
+    let project = Project::new("melchior-placed", name);
     std::fs::write(
         kin_at(&Identity {
-            project: project.clone(),
+            project: project.to_string(),
             role: "main".to_owned(),
             id: "beta-nu".to_owned(),
         }),
@@ -83,7 +85,6 @@ fn the_role_a_caller_signs_with_is_dropped_before_anything_is_decided() {
             "`{signed}` was placed somewhere the directory does not put it"
         );
     }
-    let _ = std::fs::remove_dir_all(home(&project));
 }
 
 #[test]
@@ -113,7 +114,6 @@ fn calling_yourself_main_does_not_make_you_one() {
         ),
         "and the reach that goes with it"
     );
-    let _ = std::fs::remove_dir_all(home(&project));
 }
 
 #[test]
@@ -125,5 +125,4 @@ fn a_name_from_another_project_is_a_stranger_whatever_it_calls_itself() {
         Relation::Elsewhere
     );
     assert_eq!(across.session, None, "another project's run is not read");
-    let _ = std::fs::remove_dir_all(home(&project));
 }

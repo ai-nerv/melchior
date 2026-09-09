@@ -3,12 +3,14 @@
 //! Split from [`super`] under THE RULE, which caps a file at 800 lines.
 
 use super::*;
+use crate::scratch::Project;
 
 /// A project of its own, so these do not read each other's directory.
-fn alone(name: &str) -> String {
-    let project = format!("melchior-adopt-{}-{name}", std::process::id());
-    let _ = std::fs::remove_dir_all(home(&project));
-    project
+///
+/// A guard rather than a name: these used to remove the directory on their last line, which a
+/// failing assertion unwinds straight past — see [`crate::scratch`].
+fn alone(name: &str) -> Project {
+    Project::new("melchior-adopt", name)
 }
 
 fn id(project: &str, id: &str) -> Identity {
@@ -27,9 +29,8 @@ fn the_adopted_session_reads_as_the_adopters_child() {
     let project = alone("child");
     let parent = id(&project, "beta-omicron");
     let child = id(&project, "psi-eta");
-    std::fs::create_dir_all(home(&project)).expect("mkdir");
 
-    adopted(&child, &parent.id);
+    adopted(&child, &parent.id).expect("the note");
 
     let theirs = whom(&project, &child.id);
     let mine = whom(&project, &parent.id);
@@ -43,7 +44,6 @@ fn the_adopted_session_reads_as_the_adopters_child() {
         policy::Relation::Parent,
         "the adopted does not see a parent"
     );
-    let _ = std::fs::remove_dir_all(home(&project));
 }
 
 #[test]
@@ -51,15 +51,13 @@ fn and_shows_up_as_one_of_the_adopters_children() {
     // The other reader of the same note, and it compares the same way.
     let project = alone("listed");
     let parent = id(&project, "beta-omicron");
-    std::fs::create_dir_all(home(&project)).expect("mkdir");
-    adopted(&id(&project, "psi-eta"), &parent.id);
+    adopted(&id(&project, "psi-eta"), &parent.id).expect("the note");
     // `children` only counts sessions that are listening, so this asserts the note is read
     // rather than that the pair is live.
     assert_eq!(
         whom(&project, "psi-eta").parent.as_deref(),
         Some("beta-omicron")
     );
-    let _ = std::fs::remove_dir_all(home(&project));
 }
 
 #[test]
@@ -69,11 +67,9 @@ fn a_session_reads_its_own_parent_off_the_note_rather_than_its_environment() {
     // everybody else saw a child — and the rule against a second parent tests exactly that.
     let project = alone("mine");
     let child = id(&project, "psi-eta");
-    std::fs::create_dir_all(home(&project)).expect("mkdir");
     assert_eq!(parent_of(&child), None, "it starts with nobody");
-    adopted(&child, "beta-omicron");
+    adopted(&child, "beta-omicron").expect("the note");
     assert_eq!(parent_of(&child).as_deref(), Some("beta-omicron"));
-    let _ = std::fs::remove_dir_all(home(&project));
 }
 #[test]
 fn dialling_a_name_nobody_is_listening_under_is_an_error() {

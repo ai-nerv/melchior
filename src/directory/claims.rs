@@ -290,13 +290,14 @@ fn read_at(path: &Path) -> Option<Claim> {
 mod tests {
     use super::*;
     use crate::identity::Identity;
+    use crate::scratch::Project;
 
     /// A project of its own, so these do not read each other's directory.
-    fn alone(name: &str) -> String {
-        let project = format!("melchior-claim-{}-{name}", std::process::id());
-        let _ = std::fs::remove_dir_all(home(&project));
-        std::fs::create_dir_all(home(&project)).expect("mkdir");
-        project
+    ///
+    /// A guard rather than a name: the line that removed it came after the assertions, so a
+    /// failing test left it behind for good — see [`crate::scratch`].
+    fn alone(name: &str) -> Project {
+        Project::new("melchior-claim", name)
     }
 
     fn id(project: &str, id: &str) -> Identity {
@@ -355,7 +356,6 @@ mod tests {
             assert!(lost.contains(&won[0].by), "{lost}");
         }
         assert_eq!(all(&project).len(), 256, "one round left two files behind");
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 
     #[test]
@@ -380,7 +380,6 @@ mod tests {
             1,
             "the new holder's claim was swept too"
         );
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 
     #[test]
@@ -422,7 +421,6 @@ mod tests {
             held_in(&project).is_dir(),
             "and the sweep deleted it on the way past"
         );
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 
     #[test]
@@ -439,7 +437,6 @@ mod tests {
             let_go(&project, "alpha-rho", "the parser").is_err(),
             "letting go of nothing said it worked"
         );
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 
     #[test]
@@ -453,7 +450,6 @@ mod tests {
         let again = take(&project, "alpha-rho", "the parser").expect("still ours");
         assert_eq!(first.about, again.about);
         assert_eq!(all(&project).len(), 1);
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 
     #[test]
@@ -485,7 +481,6 @@ mod tests {
         take(&project, "alpha-rho", "the parser").expect("taken");
         super::super::leave(&project);
         assert!(held_in(&project).is_dir(), "a live claim was deleted");
-        let _ = std::fs::remove_dir_all(home(&project));
     }
 
     #[test]
