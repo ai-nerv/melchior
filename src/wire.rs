@@ -61,9 +61,10 @@ pub enum Fault {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Reply {
     pub ok: bool,
-    /// See [`FAMILY`]. Defaulted on the way in, so a reply from a peer built before this existed
-    /// reads as this revision rather than failing to parse.
-    #[serde(default = "family")]
+    /// See [`FAMILY`]. Missing reads as `0`, which is what a peer from before the field existed
+    /// is; defaulting it to the current revision would make that peer indistinguishable from one
+    /// that named this one.
+    #[serde(default)]
     pub family: u16,
     /// See [`SURFACE`]. Only ever set on `verbs`: a fact about the program, not about the reply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -79,10 +80,6 @@ pub struct Reply {
     /// Which kind of no. See [`Fault`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fault: Option<Fault>,
-}
-
-fn family() -> u16 {
-    FAMILY
 }
 
 impl Reply {
@@ -354,7 +351,10 @@ mod tests {
             serde_json::from_str(r#"{"ok":true,"n":1,"result":[1]}"#).expect("reads");
         assert_eq!(older.surface, None);
         assert_eq!(older.fault, None);
-        assert_eq!(older.family, FAMILY, "and is accepted rather than refused");
+        assert_eq!(
+            older.family, 0,
+            "a peer that named no revision predates the field"
+        );
     }
 
     #[test]
