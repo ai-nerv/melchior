@@ -88,10 +88,191 @@ pub fn crew(me: &Whom) -> Vec<Whom> {
         .collect()
 }
 
+/// The same roster as a tree: each agent with how many forebears stand between it and the top of
+/// its branch, depth-first from the roots and children in id order, so the list reads as the
+/// indentation it becomes. Parentage is already on disk, so this is rendering and not new state.
+///
+/// A `.parent` note naming somebody already above it is a ring, which [`super::adopted`] can
+/// write. The ring is cut at the second visit and whatever it swallowed is listed at the root, so
+/// no agent in the run can be made invisible by a note somebody else wrote.
+#[must_use]
+pub fn tiered(held: &[Whom]) -> Vec<(&Whom, usize)> {
+    let known: std::collections::BTreeSet<&str> = held.iter().map(|it| it.id.as_str()).collect();
+    let mut roots: Vec<&Whom> = held
+        .iter()
+        .filter(|it| it.parent.as_deref().is_none_or(|up| !known.contains(up)))
+        .collect();
+    roots.sort_by(|one, two| one.id.cmp(&two.id));
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for root in roots {
+        descend(held, root, 0, &mut seen, &mut out);
+    }
+    for them in held {
+        if seen.insert(them.id.clone()) {
+            out.push((them, 0));
+        }
+    }
+    out
+}
+
+fn descend<'a>(
+    held: &'a [Whom],
+    them: &'a Whom,
+    deep: usize,
+    seen: &mut std::collections::BTreeSet<String>,
+    out: &mut Vec<(&'a Whom, usize)>,
+) {
+    if !seen.insert(them.id.clone()) {
+        return;
+    }
+    out.push((them, deep));
+    for child in born_to(held, &them.id) {
+        descend(held, child, deep + 1, seen, out);
+    }
+}
+
+/// Everything under `id`, nearest first and never `id` itself. What a branch is, for a caller
+/// about to end one: read off the notes rather than asked of anybody, because a session that
+/// declined to answer is still in the branch.
+#[must_use]
+pub fn under<'a>(held: &'a [Whom], id: &str) -> Vec<&'a Whom> {
+    let mut seen: std::collections::BTreeSet<String> = [id.to_owned()].into_iter().collect();
+    let mut edge = std::collections::VecDeque::from([id.to_owned()]);
+    let mut out = Vec::new();
+    while let Some(up) = edge.pop_front() {
+        for them in born_to(held, &up) {
+            if seen.insert(them.id.clone()) {
+                out.push(them);
+                edge.push_back(them.id.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Whoever names `id` as the one that started them, in id order.
+fn born_to<'a>(held: &'a [Whom], id: &str) -> Vec<&'a Whom> {
+    let mut out: Vec<&Whom> = held
+        .iter()
+        .filter(|it| it.parent.as_deref() == Some(id))
+        .collect();
+    out.sort_by(|one, two| one.id.cmp(&two.id));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::scratch::Project;
+
+    fn kin(id: &str, parent: Option<&str>) -> Whom {
+        Whom {
+            project: "magi".to_owned(),
+            id: id.to_owned(),
+            parent: parent.map(ToOwned::to_owned),
+            session: Some("alpha-rho-1".to_owned()),
+        }
+    }
+
+    /// Three generations, given out of order so nothing is riding on the directory's own.
+    fn three() -> Vec<Whom> {
+        vec![
+            kin("phi-beta", Some("theta-nu")),
+            kin("alpha-rho", None),
+            kin("theta-nu", Some("alpha-rho")),
+        ]
+    }
+
+    #[test]
+    fn a_roster_of_three_generations_is_two_levels_of_indent() {
+        let held = three();
+        let laid: Vec<(&str, usize)> = tiered(&held)
+            .into_iter()
+            .map(|(them, deep)| (them.id.as_str(), deep))
+            .collect();
+        assert_eq!(
+            laid,
+            vec![("alpha-rho", 0), ("theta-nu", 1), ("phi-beta", 2)]
+        );
+    }
+
+    #[test]
+    fn a_grandchild_and_a_sibling_s_child_no_longer_read_the_same() {
+        // The flat roster's complaint: both are "kin", and only the tree says which is whose.
+        let mut held = three();
+        held.push(kin("zeta-pi", Some("alpha-rho")));
+        held.push(kin("omega-xi", Some("zeta-pi")));
+        let laid: Vec<(&str, usize)> = tiered(&held)
+            .into_iter()
+            .map(|(them, deep)| (them.id.as_str(), deep))
+            .collect();
+        assert_eq!(
+            laid,
+            vec![
+                ("alpha-rho", 0),
+                ("theta-nu", 1),
+                ("phi-beta", 2),
+                ("zeta-pi", 1),
+                ("omega-xi", 2)
+            ]
+        );
+    }
+
+    #[test]
+    fn everybody_is_listed_once_however_the_notes_read() {
+        // A ring, which adoption can write, and a parent outside the run.
+        let held = vec![
+            kin("alpha-rho", Some("theta-nu")),
+            kin("theta-nu", Some("alpha-rho")),
+            kin("phi-beta", Some("nobody-nowhere")),
+        ];
+        let laid = tiered(&held);
+        assert_eq!(laid.len(), held.len(), "somebody was swallowed by a ring");
+        let mut named: Vec<&str> = laid.iter().map(|(them, _)| them.id.as_str()).collect();
+        named.sort_unstable();
+        assert_eq!(named, vec!["alpha-rho", "phi-beta", "theta-nu"]);
+    }
+
+    #[test]
+    fn a_branch_is_everything_under_it_and_never_itself() {
+        let mut held = three();
+        held.push(kin("zeta-pi", Some("alpha-rho")));
+        let branch: Vec<&str> = under(&held, "theta-nu")
+            .into_iter()
+            .map(|them| them.id.as_str())
+            .collect();
+        assert_eq!(branch, vec!["phi-beta"], "a sibling's branch came along");
+        let whole: Vec<&str> = under(&held, "alpha-rho")
+            .into_iter()
+            .map(|them| them.id.as_str())
+            .collect();
+        assert_eq!(
+            whole,
+            vec!["theta-nu", "zeta-pi", "phi-beta"],
+            "nearest first"
+        );
+        assert!(under(&held, "phi-beta").is_empty());
+    }
+
+    #[test]
+    fn a_ring_under_a_branch_ends_and_never_holds_the_branch_itself() {
+        // Adoption wrote the top of the branch back underneath its own grandchild.
+        let held = vec![
+            kin("theta-nu", Some("psi-eta")),
+            kin("phi-beta", Some("theta-nu")),
+            kin("psi-eta", Some("phi-beta")),
+        ];
+        let branch: Vec<&str> = under(&held, "theta-nu")
+            .into_iter()
+            .map(|them| them.id.as_str())
+            .collect();
+        assert_eq!(branch, vec!["phi-beta", "psi-eta"]);
+        assert!(
+            !branch.contains(&"theta-nu"),
+            "a branch that holds its own root would be stopped twice: {branch:?}"
+        );
+    }
 
     /// A project of its own, removed by a guard so a failing test does not leave it behind.
     fn alone(name: &str) -> Project {
