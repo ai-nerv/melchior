@@ -195,6 +195,7 @@ mod tests {
             me: me().full(),
         };
         let (wrote, written) = std::sync::mpsc::channel::<()>();
+        let (done, finish) = std::sync::mpsc::channel::<()>();
         let answering = std::thread::spawn(move || {
             let _: Call = framing::read_from(&mut Reading(&theirs)).expect("the first call");
             // A header past what this socket reads, with the connection still open on both
@@ -207,6 +208,9 @@ mod tests {
                 &Reply::of(serde_json::json!("the answer to the first call")),
             );
             wrote.send(()).ok();
+            // Held open to the end, so a second call that went out would be answered rather than
+            // failing on a socket that had simply gone.
+            finish.recv().ok();
         });
 
         let gave_up = held
@@ -222,6 +226,7 @@ mod tests {
             told.to_string().contains("closed"),
             "left with `{told}` after `{gave_up}`"
         );
+        done.send(()).ok();
         answering.join().expect("the far end finished");
     }
 
