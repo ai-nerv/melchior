@@ -18,6 +18,11 @@ pub struct Held {
     stream: UnixStream,
     /// Who this session is, put on every call.
     me: String,
+    /// Whether a call went out whose reply was never read to the end. One reply per call and
+    /// nothing in a reply that says which call it answers, so an abandoned one is still in the
+    /// stream: the next call would read it as its own answer, and every answer after that would
+    /// belong to the call before it. See FAMILY.md.
+    adrift: bool,
 }
 
 impl Held {
@@ -31,6 +36,7 @@ impl Held {
         Ok(Self {
             stream,
             me: me.full(),
+            adrift: false,
         })
     }
 
@@ -60,10 +66,31 @@ impl Held {
         })
     }
 
-    /// Write one call, read one reply.
+    /// Write one call, read one reply. A call that did not get its whole answer takes the
+    /// connection with it: what it is still owed arrives on this stream and nowhere else, and
+    /// reading it means waiting for a call this side has already given up on.
     fn ask(&mut self, call: Call) -> std::io::Result<Reply> {
-        framing::write_to(&mut Writing(&self.stream), &call)?;
-        framing::read_from(&mut Reading(&self.stream))
+        if self.adrift {
+            return Err(std::io::Error::other(
+                "this connection is closed: a reply left on the wire would answer the next call",
+            ));
+        }
+        // Set before the write, not after: a request half written is one the far end will finish
+        // reading out of whatever is sent next.
+        self.adrift = true;
+        let answered = framing::write_to(&mut Writing(&self.stream), &call)
+            .and_then(|()| framing::read_from(&mut Reading(&self.stream)));
+        match answered {
+            Ok(reply) => {
+                self.adrift = false;
+                Ok(reply)
+            }
+            Err(why) => {
+                // So the far end learns too, rather than answering into a socket nobody reads.
+                let _ = self.stream.shutdown(std::net::Shutdown::Both);
+                Err(why)
+            }
+        }
     }
 }
 
@@ -122,6 +149,7 @@ mod tests {
         let held = Held {
             // Any fd will do: nothing is written, and building the frame is what is under test.
             stream: UnixStream::pair().expect("a pair").0,
+            adrift: false,
             me: me().full(),
         };
         let call = Call {
@@ -139,6 +167,7 @@ mod tests {
         let (mine, theirs) = UnixStream::pair().expect("a pair");
         let mut held = Held {
             stream: mine,
+            adrift: false,
             me: me().full(),
         };
         let answering = std::thread::spawn(move || {
@@ -155,6 +184,45 @@ mod tests {
         answering.join().expect("the far end finished");
         assert!(reply.ok);
         assert_eq!(reply.result[0]["busy"], true);
+    }
+
+    #[test]
+    fn a_call_that_did_not_get_its_answer_takes_the_connection_with_it() {
+        let (mine, theirs) = UnixStream::pair().expect("a pair");
+        let mut held = Held {
+            stream: mine,
+            adrift: false,
+            me: me().full(),
+        };
+        let (wrote, written) = std::sync::mpsc::channel::<()>();
+        let answering = std::thread::spawn(move || {
+            let _: Call = framing::read_from(&mut Reading(&theirs)).expect("the first call");
+            // A header past what this socket reads, with the connection still open on both
+            // sides: the shape a timeout has, reachable in no time at all.
+            (&theirs).write_all(&[0xff_u8; 4]).expect("a header");
+            wrote.send(()).ok();
+            // What that call was still owed, arriving after the caller has given up on it.
+            let _ = framing::write_to(
+                &mut Writing(&theirs),
+                &Reply::of(serde_json::json!("the answer to the first call")),
+            );
+            wrote.send(()).ok();
+        });
+
+        let gave_up = held
+            .call("status", Vec::new())
+            .expect_err("that reply cannot be read");
+        written.recv().expect("the header is written");
+        written.recv().expect("the abandoned reply is written");
+
+        let told = held
+            .call("status", Vec::new())
+            .expect_err("the second call must not be answered by the first call's reply");
+        assert!(
+            told.to_string().contains("closed"),
+            "left with `{told}` after `{gave_up}`"
+        );
+        answering.join().expect("the far end finished");
     }
 
     #[test]

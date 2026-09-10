@@ -74,7 +74,11 @@ struct Cue {
 ///
 /// The reply is held until the test releases it, so the first call gives up for certain rather
 /// than for a sleep long enough to hope for.
-fn session(fixture: &mut Fixture, prompt: Vec<u8>, written: Vec<u8>) -> (Cue, std::thread::JoinHandle<()>) {
+fn session(
+    fixture: &mut Fixture,
+    prompt: Vec<u8>,
+    written: Vec<u8>,
+) -> (Cue, std::thread::JoinHandle<()>) {
     let listening = fixture.listening.take().expect("one session per fixture");
     let (give_up, released) = channel::<()>();
     let (report, landed) = channel::<()>();
@@ -144,7 +148,10 @@ fn a_reply_the_caller_gave_up_on_does_not_answer_the_next_call() {
     let mut engine = dialled(&fixture.at);
     call(&mut engine, "first");
     let (first, gave_up) = said(&mut engine, "first");
-    assert_eq!(first, "nil", "the first call was answered in time: {gave_up}");
+    assert_eq!(
+        first, "nil",
+        "the first call was answered in time: {gave_up}"
+    );
 
     cue.give_up.send(()).expect("the fixture is listening");
     cue.landed.recv().expect("the abandoned reply is written");
