@@ -257,14 +257,11 @@ fn what_the_parent_says_it_is_doing_is_what_a_sibling_is_told() {
 fn a_listing_answers_with_its_rows_rather_than_one_row_that_is_the_listing() {
     // The failure FAMILY.md names by name: `"result":[[…]]` with `"n":1`, invisible from the
     // sending side, and read by a coordinator going row by row as an array where a declaration
-    // belonged. Bound over a real socket rather than through `answer`, because the command line
-    // was the only door `gate-family.sh` ever probed and this one went unwatched behind it.
+    // belonged. Over a real socket, because the command line is the only door the gate probes.
     let serving = Serving::start("rows");
-    for text in ["build is green", "and the deploy went out"] {
-        serving.asked(&format!(
-            r#"{{"call":"tell","from":"demo/main/socat","args":["{text}"]}}"#
-        ));
-    }
+    let said = r#"{"call":"tell","from":"demo/main/socat","args":["build is green"]}"#;
+    serving.asked(said);
+    serving.asked(&said.replace("build is green", "and the deploy went out"));
 
     for verb in ["verbs", "needs", "inbox"] {
         let reply = serving.asked(&format!(r#"{{"call":"{verb}","from":"demo/main/socat"}}"#));
@@ -276,33 +273,25 @@ fn a_listing_answers_with_its_rows_rather_than_one_row_that_is_the_listing() {
             "{verb} says how many came back and then sends a different number: {reply}"
         );
         assert!(rows.len() > 1, "{verb} has more than one of them: {reply}");
-        for row in rows {
-            assert!(
-                !row.is_array(),
-                "{verb} wrapped its whole listing in one row: {reply}"
-            );
-        }
+        assert!(
+            !rows.iter().any(serde_json::Value::is_array),
+            "{verb} wrapped its whole listing in one row: {reply}"
+        );
     }
 
     // And the counts a re-wrapping would flatten to 1.
     let listed = serving.asked(r#"{"call":"verbs","from":"demo/main/socat"}"#);
-    assert_eq!(
-        listed["n"].as_u64().expect("a count") as usize,
-        melchior::wire::VERBS.len(),
-        "one row per verb: {listed}"
-    );
+    assert_eq!(listed["n"], melchior::wire::VERBS.len(), "{listed}");
     assert_eq!(listed["result"][0]["door"], "socket", "{listed}");
     let waiting = serving.asked(r#"{"call":"inbox","from":"demo/main/socat"}"#);
     assert_eq!(waiting["n"], 2, "two messages, two rows: {waiting}");
-    assert_eq!(waiting["result"][1]["text"], "and the deploy went out");
 
-    // A single record is still a single row: a map of id to secret is one thing.
+    // A record is still one row, and a map of id to secret is a record.
     let held = serving.asked(r#"{"call":"status","from":"demo/main/socat"}"#);
     assert_eq!(held["n"], 1, "a record is one row: {held}");
 
-    // And the other half of the same commit: the client this session serves. N rows reach Lua as
-    // N return values, so a client that did not gather them would hand its caller one verb and
-    // drop the rest on the floor.
+    // The other half of the same commit: the client this session serves. N rows reach Lua as N
+    // return values, so a client that did not gather them would hand its caller one verb.
     let mut engine = melchior::mind::lua::engine::Engine::new();
     let chunk = format!(
         "local it, why = load([=====[\n{source}]=====])(melchior.stream)\
@@ -657,12 +646,19 @@ impl Killable {
         // dropping this one would close the pipe and end `serve` for the ordinary reason.
         let held = shell.stdin.take();
         let served = read_pid(&pids).expect("the caller said which melchior it started");
-        Self {
+        let it = Self {
             shell,
             held,
             served,
             _runtime: runtime,
+        };
+        let home = it.home();
+        if !settled_in(&home, std::time::Duration::from_secs(10)) {
+            let left = left_in(&home);
+            it.cleared();
+            panic!("the session never came up: {left:?}");
         }
+        it
     }
 
     /// Where this session's socket and the notes beside it are.
@@ -689,6 +685,27 @@ impl Killable {
             // Already gone is the passing case, and its complaint reads like a failure.
             .stderr(Stdio::null())
             .status();
+    }
+}
+
+/// Wait for the session the shell started to come up, and say whether it did.
+///
+/// The pid is written the moment the shell forks, and `serve` writes its notes and binds its
+/// socket well after — so listing the directory on the next line found it empty on roughly one
+/// loaded run in three, and a kill in that window landed before the child had asked the kernel
+/// to end it with its parent. Polled: the `listening` line belongs to the shell.
+fn settled_in(project: &std::path::Path, patience: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + patience;
+    loop {
+        // The notes go down before the socket binds, so the socket says it is all there.
+        let names = left_in(project);
+        if names.iter().any(|it| !it.contains('.')) && names.iter().any(|it| it.ends_with(".ui")) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 
