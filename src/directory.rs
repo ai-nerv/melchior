@@ -94,11 +94,13 @@ pub fn inbox_of(me: &Identity) -> Vec<crate::wire::Message> {
     let Ok(reply) = held.call("inbox", Vec::new()) else {
         return Vec::new();
     };
+    // A row is a message. Reading the first row as the whole inbox is the other half of the
+    // mistake FAMILY.md names, and it is what a consumer holding a stale client would do.
     reply
         .result
-        .first()
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
-        .unwrap_or_default()
+        .iter()
+        .filter_map(|value| serde_json::from_value(value.clone()).ok())
+        .collect()
 }
 
 /// The secrets this session minted for the children it started, by id. Never written to the

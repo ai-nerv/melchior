@@ -254,6 +254,86 @@ fn what_the_parent_says_it_is_doing_is_what_a_sibling_is_told() {
 }
 
 #[test]
+fn a_listing_answers_with_its_rows_rather_than_one_row_that_is_the_listing() {
+    // The failure FAMILY.md names by name: `"result":[[…]]` with `"n":1`, invisible from the
+    // sending side, and read by a coordinator going row by row as an array where a declaration
+    // belonged. Bound over a real socket rather than through `answer`, because the command line
+    // was the only door `gate-family.sh` ever probed and this one went unwatched behind it.
+    let serving = Serving::start("rows");
+    for text in ["build is green", "and the deploy went out"] {
+        serving.asked(&format!(
+            r#"{{"call":"tell","from":"demo/main/socat","args":["{text}"]}}"#
+        ));
+    }
+
+    for verb in ["verbs", "needs", "inbox"] {
+        let reply = serving.asked(&format!(r#"{{"call":"{verb}","from":"demo/main/socat"}}"#));
+        assert_eq!(reply["ok"], true, "{verb}: {reply}");
+        let rows = reply["result"].as_array().expect("result is a list");
+        assert_eq!(
+            reply["n"].as_u64().expect("a count"),
+            rows.len() as u64,
+            "{verb} says how many came back and then sends a different number: {reply}"
+        );
+        assert!(rows.len() > 1, "{verb} has more than one of them: {reply}");
+        for row in rows {
+            assert!(
+                !row.is_array(),
+                "{verb} wrapped its whole listing in one row: {reply}"
+            );
+        }
+    }
+
+    // And the counts a re-wrapping would flatten to 1.
+    let listed = serving.asked(r#"{"call":"verbs","from":"demo/main/socat"}"#);
+    assert_eq!(
+        listed["n"].as_u64().expect("a count") as usize,
+        melchior::wire::VERBS.len(),
+        "one row per verb: {listed}"
+    );
+    assert_eq!(listed["result"][0]["door"], "socket", "{listed}");
+    let waiting = serving.asked(r#"{"call":"inbox","from":"demo/main/socat"}"#);
+    assert_eq!(waiting["n"], 2, "two messages, two rows: {waiting}");
+    assert_eq!(waiting["result"][1]["text"], "and the deploy went out");
+
+    // A single record is still a single row: a map of id to secret is one thing.
+    let held = serving.asked(r#"{"call":"status","from":"demo/main/socat"}"#);
+    assert_eq!(held["n"], 1, "a record is one row: {held}");
+
+    // And the other half of the same commit: the client this session serves. N rows reach Lua as
+    // N return values, so a client that did not gather them would hand its caller one verb and
+    // drop the rest on the floor.
+    let mut engine = melchior::mind::lua::engine::Engine::new();
+    let chunk = format!(
+        "local it, why = load([=====[\n{source}]=====])(melchior.stream)\
+         .connect({{ path = {at:?}, timeout_ms = 5000 }})\n\
+         assert(it, tostring(why))\n\
+         it.from = \"demo/main/socat\"\n\
+         melchior.verbs = #it.verbs()\n\
+         melchior.needs = #it.needs()\n\
+         local waiting = it.inbox()\n\
+         melchior.inbox = #waiting\n\
+         melchior.first = tostring(waiting[1] and waiting[1].text)\n",
+        source = melchior::CLIENT,
+        at = serving.at().display().to_string(),
+    );
+    engine.run(&chunk, "gather.lua").expect("the client loads");
+    engine.harvest();
+    let config = engine.config();
+    assert_eq!(
+        config.number("verbs"),
+        Some(melchior::wire::VERBS.len() as f64),
+        "the client gathered the listing back into one table"
+    );
+    assert!(config.number("needs").unwrap_or_default() > 1.0);
+    assert_eq!(config.number("inbox"), Some(2.0));
+    assert_eq!(config.string("first"), Some("build is green"));
+    drop(engine);
+
+    assert!(serving.let_go());
+}
+
+#[test]
 fn nothing_outlives_the_parent() {
     // The promise the whole shape rests on. It was broken once and looked fine: a `select!` arm
     // whose pattern does not match is disabled rather than taken, so the closed pipe dropped

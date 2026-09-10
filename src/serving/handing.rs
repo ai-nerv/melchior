@@ -89,7 +89,7 @@ async fn every_verb_it_lists_is_one_a_client_could_call() {
     let listed = tokio::task::spawn_blocking(move || asked(&at, "verbs"))
         .await
         .expect("the thread finished");
-    let named_verbs: Vec<String> = listed["result"][0]
+    let named_verbs: Vec<String> = listed["result"]
         .as_array()
         .expect("a list")
         .iter()

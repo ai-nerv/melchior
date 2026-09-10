@@ -253,11 +253,13 @@ fn said(held: &mut asking::Held, wanted: &Wanted) -> std::io::Result<Reply> {
 fn landed(wanted: &Wanted, reply: &Reply) -> String {
     let who = wanted.who.full();
     match wanted.verb.as_str() {
-        // A report is whatever came back, verbatim.
-        "about" | "status" | "verbs" => reply
-            .result
-            .first()
-            .map_or_else(|| "nothing".to_owned(), ToString::to_string),
+        // A report is whatever came back, verbatim. Every row of it: `verbs` answers one row per
+        // verb, and reading only the first would report a surface of one.
+        "about" | "status" | "verbs" => match reply.result.as_slice() {
+            [] => "nothing".to_owned(),
+            [only] => only.to_string(),
+            rows => serde_json::Value::Array(rows.to_vec()).to_string(),
+        },
         "stop" => format!("`{who}` was told to stop."),
         // A role is what `crew` shows a coordinator; it is not an instruction and grants nothing.
         "role" | "assign" => format!(

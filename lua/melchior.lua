@@ -306,9 +306,28 @@ local SURFACE = {
   "stop",
 }
 
+-- The verbs that answer one row per thing rather than one row that is the answer.
+--
+-- `result` is the rows and `n` is how many, so a listing arrives here as N return values. Gathered
+-- back into a table, because `#them.inbox()` is what a caller asking for an inbox wants and is
+-- what `ipairs` reads. Every other verb answers one value and is handed over untouched.
+local LISTINGS = {
+  verbs = true, needs = true, inbox = true,
+}
+
+--- Gather a listing verb's rows into one table, leaving every other verb alone.
+local function gathered(verb, ...)
+  if not LISTINGS[verb] then return ... end
+  local out = table.pack(...)
+  -- A refusal is `nil, why` and passes through as it stands.
+  if out.n > 0 and out[1] == nil then return ... end
+  out.n = nil
+  return out
+end
+
 local function attach(session)
   for _, verb in ipairs(SURFACE) do
-    session[verb] = function(...) return session:call(verb, ...) end
+    session[verb] = function(...) return gathered(verb, session:call(verb, ...)) end
   end
   return session
 end
@@ -474,7 +493,7 @@ function M.fetch(where, verb, ...)
   if not session then return nil, why end
   local answers = table.pack(session:call(verb, ...))
   session:close()
-  return table.unpack(answers, 1, answers.n)
+  return gathered(verb, table.unpack(answers, 1, answers.n))
 end
 
 --- This file's own source, as the session it is talking to has it.

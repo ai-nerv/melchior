@@ -96,12 +96,13 @@ pub enum Then {
 pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then) {
     // Answered before any permission check, so a client never has to guess the vocabulary.
     if call.call == "verbs" {
-        let mut listed = Reply::of(serde_json::json!(
+        // A listing is the rows, and every row carries a `door`: both are FAMILY.md's.
+        let mut listed = Reply::rows(
             VERBS
                 .iter()
-                .map(|(name, said)| serde_json::json!({"verb": name, "does": said}))
-                .collect::<Vec<_>>()
-        ));
+                .map(|(verb, about)| serde_json::json!({"verb": verb, "about": about, "door": "socket"}))
+                .collect::<Vec<_>>(),
+        );
         // What a plugin writes against, on the self-description and nowhere else.
         listed.surface = Some(crate::wire::SURFACE);
         return (listed, Then::Nothing);
@@ -173,8 +174,14 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
     match call.call.as_str() {
         // Read-only, so it answers anyone the walls allow. `configure` has no verb here: it runs
         // Lua, and a socket that runs things is remote code execution.
+        // One row per declaration, which is the case FAMILY.md tells the story about.
         "needs" => (
-            Reply::of(serde_json::json!(crate::mind::setup::needs())),
+            Reply::rows(
+                crate::mind::setup::needs()
+                    .iter()
+                    .map(|need| serde_json::json!(need))
+                    .collect(),
+            ),
             Then::Nothing,
         ),
         // The description comes off the note rather than out of `About`, which holds only the name.
@@ -207,7 +214,17 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
             })),
             Then::Nothing,
         ),
-        "inbox" => (Reply::of(serde_json::json!(about.inbox)), Then::Nothing),
+        "inbox" => (
+            Reply::rows(
+                about
+                    .inbox
+                    .iter()
+                    .map(|message| serde_json::json!(message))
+                    .collect(),
+            ),
+            Then::Nothing,
+        ),
+        // One row: a map of id to secret is looked up by key, not walked.
         "minted" => (Reply::of(serde_json::json!(about.minted)), Then::Nothing),
         "role" => roles::set(call, about),
         // Names a child and mints its secret; starting the process is the harness's job, so
