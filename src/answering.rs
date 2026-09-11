@@ -147,6 +147,39 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
         return (refusal, Then::Nothing);
     }
 
+    // The model's coordination vocabulary — the same `verbs::answer` surface `melchior tool` runs
+    // on the command line, offered here on the socket too so a harness reaches it through the
+    // client library exactly as it reaches balthasar's. This session's own only: it acts with this
+    // session's authority — sending, claiming and assigning as it — which no other instance borrows.
+    if call.call == "tool" {
+        if relation != policy::Relation::Myself {
+            return (
+                Reply::refused(
+                    "`tool` is this session's own coordination surface; another instance may not \
+                     run it as you",
+                ),
+                Then::Nothing,
+            );
+        }
+        let standing = crate::verbs::Standing {
+            inbox: about.inbox.clone(),
+            forked: crate::directory::children(&about.me),
+            parent: about.parent.clone(),
+            minted: about.minted.clone(),
+            me: about.me.full(),
+        };
+        let asked = call.args.first().cloned().unwrap_or_default();
+        let answered = crate::verbs::answer(&asked, &standing);
+        return (
+            if answered.failed {
+                Reply::refused(answered.said)
+            } else {
+                Reply::of(serde_json::json!(answered.said))
+            },
+            Then::Nothing,
+        );
+    }
+
     let wanted = match call.call.as_str() {
         "identity" | "kin" | "status" | "inbox" | "needs" => Reach::Ask,
         // Already settled above: only this session and its parent ask this, and they have.
@@ -625,7 +658,7 @@ mod tests {
         let mut about = about();
         match verb {
             // Asked by the session itself, over the socket it bound.
-            "mint" | "minted" => (about, whom("magi", "alpha-rho", None)),
+            "mint" | "minted" | "tool" => (about, whom("magi", "alpha-rho", None)),
             // A main asking a main, so this one is deliberately left without a parent.
             "adopt" => (about, whom("magi", "beta-nu", None)),
             _ => {
@@ -640,9 +673,16 @@ mod tests {
     fn every_verb_the_family_is_told_about_is_one_that_answers() {
         for (name, _) in VERBS {
             let (about, caller) = entitled(name);
+            // `tool`'s one argument is the coordination map, not a bare value; `help` is the verb
+            // that always answers.
+            let arg = if *name == "tool" {
+                serde_json::json!({ "verb": "help" })
+            } else {
+                serde_json::json!("something")
+            };
             let call = Call {
                 call: (*name).to_owned(),
-                args: vec![serde_json::json!("something")],
+                args: vec![arg],
                 token: Some("s3cret".to_owned()),
                 from: None,
             };

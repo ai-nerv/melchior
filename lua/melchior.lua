@@ -304,6 +304,10 @@ local SURFACE = {
   -- The one act the far end cannot decline, so the one that has to prove itself: it carries the
   -- secret the session was started with, and a session nobody started holds none.
   "stop",
+  -- The model's coordination vocabulary, the same surface `melchior tool` runs on the command
+  -- line: `them.tool({ verb = "…", … })`. A session's own only, and answered as it because the far
+  -- end takes who is calling from the kernel. This is how a harness reaches it through the library.
+  "tool",
 }
 
 -- The verbs that answer one row per thing rather than one row that is the answer.

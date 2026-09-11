@@ -210,9 +210,12 @@ fn caller_of(call: &Call, peer: Option<i32>, about: &About) -> Option<Whom> {
     }
 }
 
-/// The verbs where being a given session *is* the authority to act. `stop` proves itself by secret.
+/// The verbs whose authority is being the session itself, so their caller comes from the kernel.
 fn is_authority(verb: &str) -> bool {
-    matches!(verb, "mint" | "minted" | "role" | "adopt" | "adopted")
+    matches!(
+        verb,
+        "mint" | "minted" | "role" | "adopt" | "adopted" | "tool"
+    )
 }
 
 /// The caller as the kernel names it: the session id in the connecting process's own environment.

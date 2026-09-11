@@ -176,6 +176,10 @@ pub const VERBS: &[(&str, &str)] = &[
         "stop",
         "end it — only from the session that started it, with the secret it was given",
     ),
+    (
+        "tool",
+        "run the model coordination vocabulary; the call's one argument carries {verb, …}",
+    ),
 ];
 
 /// What a message is for. One inbox, sorted by what each thing is, rather than a channel per
@@ -397,9 +401,11 @@ mod tests {
 
     #[test]
     fn nothing_that_runs_a_command_is_in_the_first_cut() {
+        // `tool` is exempt: no shell command, only the session's own vocabulary, and the caller is
+        // taken from the kernel (`serving::is_authority`) — as safe on the socket as `melchior tool`.
         for (name, _) in VERBS {
             assert!(
-                !["run", "shell", "exec", "eval", "tool"].contains(name),
+                !["run", "shell", "exec", "eval"].contains(name),
                 "{name} does not belong on a socket"
             );
         }
