@@ -1,9 +1,42 @@
-//! Naming a child, and the secret that makes `stop` refusable.
+//! Naming a child, the secret that makes `stop` refusable, and who may ask for either.
 
 use super::tests::{alone, listening, named};
+use crate::answering::{About, Then, answer};
+use crate::identity::Identity;
+use crate::wire::Call;
 use std::time::Duration;
 
-/// One hand-written call carrying a `from`, so the policy can place the caller.
+/// This session, with nothing minted yet. A root: no parent, no token.
+fn about(me: &Identity) -> About {
+    About {
+        me: me.clone(),
+        parent: None,
+        token: None,
+        busy: false,
+        working_for: 0,
+        inbox: Vec::new(),
+        minted: std::collections::BTreeMap::new(),
+    }
+}
+
+/// A `mint` or `minted` as this session's own process makes it. `serving::caller_of` derives the
+/// caller of an authority verb from the kernel — the connecting process's `/proc/environ` — and a
+/// session's own fork process carries the session's id there, so the caller it hands `answer` is
+/// this session. Placing the caller here as `about.whom()` is exactly that.
+fn as_myself(verb: &str, about: &About) -> (crate::wire::Reply, Then) {
+    let mine = about.whom();
+    answer(
+        &Call {
+            call: verb.to_owned(),
+            ..Call::default()
+        },
+        about,
+        Some(&mine),
+    )
+}
+
+/// A hand-written call over a real socket, carrying whatever `from` it likes. What a process that
+/// is not this session sends when it tries to pass for it.
 fn asked_as(at: &std::path::Path, verb: &str, from: &str) -> serde_json::Value {
     use std::io::{Read, Write};
     let mut sock = std::os::unix::net::UnixStream::connect(at).expect("connected");
@@ -23,30 +56,24 @@ fn asked_as(at: &std::path::Path, verb: &str, from: &str) -> serde_json::Value {
     serde_json::from_slice(&answer).expect("it is JSON")
 }
 
-/// A session names a child and mints its secret, and remembers having done so.
-#[tokio::test]
-async fn a_session_names_a_child_and_keeps_the_secret_it_minted() {
+/// A session names a child and mints its secret, and hands the child what it needs to come up.
+#[test]
+fn a_session_names_a_child_and_keeps_the_secret_it_minted() {
     let it = alone("minting");
     let me = named(&it, "alpha-nu");
-    let _bound = listening(&me).await;
-    let at = crate::directory::listening_at(&me);
-    let full = me.full();
+    let about = about(&me);
 
-    let (at2, full2) = (at.clone(), full.clone());
-    let reply = tokio::task::spawn_blocking(move || asked_as(&at2, "mint", &full2))
-        .await
-        .expect("the thread finished");
-    assert_eq!(reply["ok"], true, "{reply}");
+    let (reply, then) = as_myself("mint", &about);
+    assert!(reply.ok, "{reply:?}");
 
-    let child = &reply["result"][0];
+    let child = &reply.result[0];
     let id = child["id"].as_str().expect("a name").to_owned();
     let token = child["token"].as_str().expect("a secret").to_owned();
     assert_ne!(id, me.id, "a child is not its parent");
     assert_eq!(child["parent"], me.id, "and it knows whose it is");
     assert_eq!(token.len(), 32, "sixteen bytes as hex: {token}");
 
-    // The environment a harness starts it with, so it need not know which variables melchior
-    // reads.
+    // The environment a harness starts it with, so it need not know which variables melchior reads.
     let env = &child["environment"];
     assert_eq!(env[crate::inherited::PARENT], me.id);
     assert_eq!(env[crate::inherited::TOKEN], token);
@@ -57,49 +84,57 @@ async fn a_session_names_a_child_and_keeps_the_secret_it_minted() {
         "a root hands down its own id as the run: {env}"
     );
 
-    // Read back over the socket, never off the directory: a secret a sibling could read there
-    // would be authority over a session it did not start.
-    let held = tokio::task::spawn_blocking(move || asked_as(&at, "minted", &full))
-        .await
-        .expect("the thread finished");
-    assert_eq!(held["result"][0][&id], token, "{held}");
+    // Carried up to the session, which is what records it — never written to the directory.
+    match then {
+        Then::Minted {
+            id: minted,
+            token: secret,
+        } => {
+            assert_eq!(minted, id);
+            assert_eq!(secret, token);
+        }
+        other => panic!("mint did not carry the secret up: {other:?}"),
+    }
 }
 
 /// A run is handed down, not started afresh at every hop.
-#[tokio::test]
-async fn a_child_inherits_the_run_rather_than_starting_one() {
+#[test]
+fn a_child_inherits_the_run_rather_than_starting_one() {
     let it = alone("minting-run");
     let me = named(&it, "delta-rho");
-    let _bound = listening(&me).await;
-    let at = crate::directory::listening_at(&me);
+    // The note `whom` reads to learn which run this session belongs to.
     std::fs::write(crate::directory::sessions::session_at(&me), "alpha-rho").expect("the note");
+    let about = about(&me);
 
-    let full = me.full();
-    let reply = tokio::task::spawn_blocking(move || asked_as(&at, "mint", &full))
-        .await
-        .expect("the thread finished");
-    let child = &reply["result"][0];
-    assert_eq!(child["session"], "alpha-rho", "{reply}");
+    let (reply, _) = as_myself("mint", &about);
+    let child = &reply.result[0];
+    assert_eq!(child["session"], "alpha-rho", "{reply:?}");
     assert_eq!(
         child["environment"][crate::inherited::SESSION],
         "alpha-rho",
-        "the child was handed a run of its own: {reply}"
+        "the child was handed the run it belongs to: {reply:?}"
     );
 }
 
-/// A secret is not something a sibling may read.
+/// A secret is not something a sibling may read — proven the way it matters, over a real socket
+/// with a forged `from`. The connecting process is not this session in the kernel's eyes, whatever
+/// name it puts on the wire, so `minted` is refused however it claims to be the session itself.
 #[tokio::test]
-async fn what_was_minted_is_refused_to_anybody_who_could_not_stop_this() {
+async fn a_forged_from_reads_no_secrets() {
     let it = alone("minting-wall");
     let me = named(&it, "beta-rho");
     let _bound = listening(&me).await;
     let at = crate::directory::listening_at(&me);
 
-    // A main in the same project: it may ask this session things and tell it things, and it may
-    // not end it.
-    let stranger = named(&it, "gamma-pi").full();
-    let reply = tokio::task::spawn_blocking(move || asked_as(&at, "minted", &stranger))
-        .await
-        .expect("the thread finished");
-    assert_eq!(reply["ok"], false, "a sibling reads no secrets: {reply}");
+    for claim in [me.full(), named(&it, "gamma-pi").full()] {
+        let (at, asked) = (at.clone(), claim.clone());
+        let reply = tokio::task::spawn_blocking(move || asked_as(&at, "minted", &asked))
+            .await
+            .expect("the thread finished");
+        assert_eq!(
+            reply["ok"], false,
+            "a socket peer the kernel did not place as this session read its secrets claiming \
+             `{claim}`: {reply}"
+        );
+    }
 }

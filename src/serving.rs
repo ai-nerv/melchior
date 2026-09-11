@@ -96,6 +96,8 @@ pub async fn accept(listener: tokio::net::UnixListener, serving: Serving) -> std
 /// One connection, for as many calls as it cares to make. It keeps serving after replying: a
 /// client that holds its connection dies on its second call against a server that closes.
 async fn talk(stream: tokio::net::UnixStream, serving: Serving) -> std::io::Result<()> {
+    // Which of the user's sessions the caller is, from the kernel — the one thing it cannot forge.
+    let peer = stream.peer_cred().ok().and_then(|cred| cred.pid());
     let (mut reader, mut writer) = stream.into_split();
 
     loop {
@@ -120,7 +122,7 @@ async fn talk(stream: tokio::net::UnixStream, serving: Serving) -> std::io::Resu
         // and writes the note — so it is re-read per call rather than trusted from startup.
         about.parent = crate::directory::parent_of(&about.me);
         // And the caller's, per call rather than per connection: a session may fork mid-call.
-        let caller = placed(call.from.as_deref(), &about);
+        let caller = caller_of(&call, peer, &about);
         let (reply, then) = answer(&call, &about, caller.as_ref());
         framing::write_as(&mut writer, wire, &reply).await?;
         match then {
@@ -179,16 +181,67 @@ fn placed(from: Option<&str>, about: &About) -> Option<Whom> {
     // Parsed as a whole name, never split at the first slash: `magi/review/iota-mu` cut that way
     // is a session called `review/iota-mu`, which is nobody. The role is dropped on purpose.
     let them = crate::identity::Identity::read(from?)?;
-    if them.project != about.me.project {
-        return Some(Whom {
-            project: them.project,
-            id: them.id,
+    Some(place(&them.project, &them.id, about))
+}
+
+/// Where a session by this project and id sits in the tree. Another project's is placed with no
+/// parent and no run: its directory is not one this session lists.
+fn place(project: &str, id: &str, about: &About) -> Whom {
+    if project != about.me.project {
+        return Whom {
+            project: project.to_owned(),
+            id: id.to_owned(),
             parent: None,
-            // Nothing to read: another project's directory is not one this session lists.
             session: None,
-        });
+        };
     }
-    Some(whom(&them.project, &them.id))
+    whom(project, id)
+}
+
+/// Who to treat as the caller. An [`is_authority`] verb takes its caller only from the kernel, so
+/// none can pass for a session that did not spawn it; any other verb falls back to the `from` it
+/// sent, which is never taken over the kernel.
+fn caller_of(call: &Call, peer: Option<i32>, about: &About) -> Option<Whom> {
+    let verified = claimed(peer, about);
+    if is_authority(&call.call) {
+        verified
+    } else {
+        verified.or_else(|| placed(call.from.as_deref(), about))
+    }
+}
+
+/// The verbs where being a given session *is* the authority to act. `stop` proves itself by secret.
+fn is_authority(verb: &str) -> bool {
+    matches!(verb, "mint" | "minted" | "role" | "adopt" | "adopted")
+}
+
+/// The caller as the kernel names it: the session id in the connecting process's own environment.
+/// `None` — the most restricted caller — when it names none, or the process is gone.
+fn claimed(peer: Option<i32>, about: &About) -> Option<Whom> {
+    let body = std::fs::read(format!("/proc/{}/environ", peer?)).ok()?;
+    let project = var_in(&body, crate::inherited::PROJECT)?;
+    let id = var_in(&body, crate::inherited::ID)?;
+    Some(place(&project, &id, about))
+}
+
+/// One variable out of a NUL-separated `/proc/<pid>/environ` block, the older `MAGI_*` spelling too.
+fn var_in(environ: &[u8], name: &str) -> Option<String> {
+    let find = |key: &str| {
+        let prefix = format!("{key}=");
+        environ
+            .split(|byte| *byte == 0)
+            .filter_map(|entry| std::str::from_utf8(entry).ok())
+            .find_map(|entry| entry.strip_prefix(&prefix))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    find(name).or_else(|| {
+        find(&format!(
+            "MAGI_{}",
+            name.trim_start_matches("MAGI_MELCHIOR_")
+        ))
+    })
 }
 
 /// Two instances, one socket, and a message that actually arrives. The one thing that cannot be
