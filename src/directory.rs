@@ -53,9 +53,13 @@ pub fn parent_of(me: &Identity) -> Option<String> {
 }
 
 /// How deep a tree of agents may go: a root and this many generations under it. A bound, so a
-/// session that keeps spawning children cannot grow the tree without end — the breadth of it is
-/// the operating system's to cap, but the depth is counted here where the parentage is known.
+/// session that keeps spawning children cannot grow the tree without end. [`MAX_CHILDREN`] bounds
+/// it the other way, so depth times breadth is the most agents one root can put on the machine.
 pub const MAX_DEPTH: u32 = 8;
+
+/// How many children one session may have running at once. Counted from the directory, so a child
+/// that has ended and been swept no longer counts against its parent.
+pub const MAX_CHILDREN: usize = 8;
 
 /// How many ancestors `me` has, counting up the parent notes and stopping at [`MAX_DEPTH`] — a root
 /// is `0`. Read off the directory, so it is the same number any other session would compute.

@@ -243,6 +243,18 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
                     Then::Nothing,
                 );
             }
+            // Nor more children at once than [`crate::directory::MAX_CHILDREN`]; ending one and
+            // letting it be swept makes room for another.
+            let running = crate::directory::children(&about.me).len();
+            if running >= crate::directory::MAX_CHILDREN {
+                return (
+                    Reply::refused(format!(
+                        "this session already has {running} children running, the most one may \
+                         start at once"
+                    )),
+                    Then::Nothing,
+                );
+            }
             let child = crate::directory::free_in(&about.me.project);
             let secret = crate::identity::secret();
             // Ours, not the child's, and handed down unchanged however deep the tree gets: a child

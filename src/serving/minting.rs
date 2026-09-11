@@ -120,6 +120,25 @@ fn a_session_at_the_depth_limit_starts_no_child() {
     assert!(matches!(then, Then::Nothing), "and nothing was minted");
 }
 
+/// A session may not hold more children at once than the limit: with that many real ones listening
+/// and pointing at it, the next mint is refused.
+#[tokio::test]
+async fn a_session_full_of_children_starts_no_more() {
+    use crate::directory::MAX_CHILDREN;
+    let it = alone("minting-breadth");
+    let me = named(&it, "full-house");
+    // Real listeners, each noted as this session's child, so `children` counts them by dialling.
+    let mut kids = Vec::new();
+    for n in 0..MAX_CHILDREN {
+        let kid = named(&it, &format!("kid-{n}"));
+        crate::directory::wrote(&crate::directory::kin_at(&kid), &me.id).expect("a parent note");
+        kids.push(listening(&kid).await);
+    }
+    let (reply, then) = as_myself("mint", &about(&me));
+    assert!(!reply.ok, "a full session minted anyway: {reply:?}");
+    assert!(matches!(then, Then::Nothing));
+}
+
 /// A run is handed down, not started afresh at every hop.
 #[test]
 fn a_child_inherits_the_run_rather_than_starting_one() {
