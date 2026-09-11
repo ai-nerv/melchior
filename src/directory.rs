@@ -52,6 +52,27 @@ pub fn parent_of(me: &Identity) -> Option<String> {
         .or_else(parent)
 }
 
+/// How deep a tree of agents may go: a root and this many generations under it. A bound, so a
+/// session that keeps spawning children cannot grow the tree without end — the breadth of it is
+/// the operating system's to cap, but the depth is counted here where the parentage is known.
+pub const MAX_DEPTH: u32 = 8;
+
+/// How many ancestors `me` has, counting up the parent notes and stopping at [`MAX_DEPTH`] — a root
+/// is `0`. Read off the directory, so it is the same number any other session would compute.
+#[must_use]
+pub fn depth_of(me: &Identity) -> u32 {
+    let mut depth = 0;
+    let mut above = parent_of(me);
+    while let Some(id) = above {
+        depth += 1;
+        if depth >= MAX_DEPTH {
+            break;
+        }
+        above = whom(&me.project, &id).parent;
+    }
+    depth
+}
+
 #[must_use]
 pub fn token() -> Option<String> {
     said(TOKEN)

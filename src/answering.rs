@@ -230,6 +230,19 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
         // Names a child and mints its secret; starting the process is the harness's job, so
         // nothing is spawned here.
         "mint" => {
+            // A tree that has reached its depth spawns no deeper: the child would be one level
+            // past what [`crate::directory::MAX_DEPTH`] allows.
+            if crate::directory::depth_of(&about.me) + 1 >= crate::directory::MAX_DEPTH {
+                return (
+                    Reply::refused(format!(
+                        "this session is {} deep and may start no child: a tree of agents goes \
+                         {} levels and no further",
+                        crate::directory::depth_of(&about.me),
+                        crate::directory::MAX_DEPTH
+                    )),
+                    Then::Nothing,
+                );
+            }
             let child = crate::directory::free_in(&about.me.project);
             let secret = crate::identity::secret();
             // Ours, not the child's, and handed down unchanged however deep the tree gets: a child

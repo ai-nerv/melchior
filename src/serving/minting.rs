@@ -97,6 +97,29 @@ fn a_session_names_a_child_and_keeps_the_secret_it_minted() {
     }
 }
 
+/// A tree of agents has a bottom: a session already at the depth limit mints no child.
+#[test]
+fn a_session_at_the_depth_limit_starts_no_child() {
+    use crate::directory::MAX_DEPTH;
+    let it = alone("minting-depth");
+    let me = named(&it, "deep-one");
+    // A chain of parent notes above `me`, one short of the limit, so `me` sits at the last level
+    // that may still spawn; a note per ancestor is all `depth_of` reads.
+    let mut child = me.id.clone();
+    for rung in 0..MAX_DEPTH {
+        let parent = format!("rung-{rung}");
+        crate::directory::wrote(&crate::directory::kin_at(&named(&it, &child)), &parent)
+            .expect("a parent note");
+        child = parent;
+    }
+    let (reply, then) = as_myself("mint", &about(&me));
+    assert!(
+        !reply.ok,
+        "a session at the limit minted a child anyway: {reply:?}"
+    );
+    assert!(matches!(then, Then::Nothing), "and nothing was minted");
+}
+
 /// A run is handed down, not started afresh at every hop.
 #[test]
 fn a_child_inherits_the_run_rather_than_starting_one() {
