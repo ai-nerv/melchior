@@ -99,10 +99,10 @@ struct Writing<'a>(&'a UnixStream);
 
 impl Write for Writing<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        (&*self.0).write(buf)
+        self.0.write(buf)
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        (&*self.0).flush()
+        self.0.flush()
     }
 }
 
@@ -111,7 +111,7 @@ struct Reading<'a>(&'a UnixStream);
 
 impl Read for Reading<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        (&*self.0).read(buf)
+        self.0.read(buf)
     }
 }
 
