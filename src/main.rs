@@ -172,21 +172,82 @@ struct Peer {
     /// Who started it — the id in its `.parent` note — or `null` for a main, so a harness can draw
     /// the run as the tree it is.
     parent: Option<String>,
+    /// Whether it is in a turn right now, and for how long, and how much is waiting in its inbox —
+    /// asked of its own socket. Absent (false/0) for one that did not answer in time.
+    busy: bool,
+    working_for: u64,
+    waiting: usize,
+    /// The piece of work it has claimed, if any.
+    claim: Option<String>,
 }
 
-/// Everyone listening in `project`, as they go on the pipe.
-fn around(project: &str) -> Vec<Peer> {
+/// Everyone listening in `project`, with each one's live status asked of its socket. Blocking — it
+/// dials every peer — so it runs on the poller thread, never the async loop. `me` is the asker each
+/// dial names.
+fn around(me: &melchior::identity::Identity) -> Vec<Peer> {
+    let project = &me.project;
+    // The claims once, mapped by the id of whoever holds each, rather than dialled per peer.
+    let claims: std::collections::BTreeMap<String, String> =
+        melchior::directory::claims::all(project)
+            .into_iter()
+            .map(|held| (id_of(&held.by), held.about))
+            .collect();
     melchior::directory::listening(project)
         .into_iter()
-        .map(|id| Peer {
-            role: melchior::directory::roles::role_in(project, &id)
-                .map_or_else(|| melchior::directory::roles::MAIN.to_owned(), |it| it.name),
-            ui: melchior::directory::screens::ui_in(project, &id)
-                .map(|at| at.display().to_string()),
-            parent: melchior::directory::parent_note(project, &id),
-            id,
+        .map(|id| {
+            let (busy, working_for, waiting) = status_of(project, &id, me).unwrap_or_default();
+            Peer {
+                role: melchior::directory::roles::role_in(project, &id)
+                    .map_or_else(|| melchior::directory::roles::MAIN.to_owned(), |it| it.name),
+                ui: melchior::directory::screens::ui_in(project, &id)
+                    .map(|at| at.display().to_string()),
+                parent: melchior::directory::parent_note(project, &id),
+                claim: claims.get(&id).cloned(),
+                busy,
+                working_for,
+                waiting,
+                id,
+            }
         })
         .collect()
+}
+
+/// A peer's `busy`/`working_for`/`waiting`, asked of its own socket. `None` when it did not answer
+/// within the dial's patience — that peer simply reads as idle rather than stalling the roster.
+fn status_of(
+    project: &str,
+    id: &str,
+    me: &melchior::identity::Identity,
+) -> Option<(bool, u64, usize)> {
+    let them = melchior::identity::Identity {
+        project: project.to_owned(),
+        role: String::new(),
+        id: id.to_owned(),
+    };
+    let reply = melchior::directory::dial(&them, me)
+        .ok()?
+        .call("status", Vec::new())
+        .ok()?;
+    let said = reply.result.first()?;
+    Some((
+        said.get("busy")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        said.get("working_for")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        usize::try_from(
+            said.get("waiting")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+        )
+        .unwrap_or(0),
+    ))
+}
+
+/// The id out of a `project/role/id`, or the whole of a bare one.
+fn id_of(full: &str) -> String {
+    full.rsplit('/').next().unwrap_or(full).to_owned()
 }
 
 /// `melchior fork` — a name and a secret for a session this one is about to start, printed as
@@ -299,6 +360,20 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         let (minted_tx, mut minted) = tokio::sync::mpsc::channel::<(String, String)>(4);
         let (named_tx, mut named) =
             tokio::sync::mpsc::channel::<melchior::directory::roles::Role>(4);
+        // The roster with everyone's live status, gathered on a thread of its own: it dials every
+        // peer, and a blocking dial has no place in the async loop.
+        let (roster_tx, mut roster) = tokio::sync::mpsc::channel::<Vec<Peer>>(4);
+        {
+            let me = me.clone();
+            std::thread::spawn(move || {
+                loop {
+                    if roster_tx.blocking_send(around(&me)).is_err() {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+            });
+        }
 
         // The note beside the socket, so the tree can be read off the directory. Refused rather
         // than served when it will not land: without it a session comes up as a main, with a
@@ -465,18 +540,20 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                     say(&Heard::Stopped);
                     break;
                 }
+                // The roster with each peer's live status, gathered off-thread; pushed only when it
+                // changed — a peer that turned busy or took a claim is a change worth redrawing.
+                Some(now) = roster.recv() => {
+                    if now != listed {
+                        listed = now;
+                        say(&Heard::Around { agents: listed.clone() });
+                    }
+                }
                 _ = sweep.tick() => {
                     // Re-read on the tick: being adopted happens to this session from outside it,
                     // and no variable can be set on a process already running.
                     let mine = melchior::directory::parent_of(&me);
                     if mine != about_tx.borrow().parent {
                         about_tx.send_modify(|about| about.parent.clone_from(&mine));
-                    }
-                    // Compared whole: a peer that changed role or published a screen is a change.
-                    let now = around(&me.project);
-                    if now != listed {
-                        listed = now;
-                        say(&Heard::Around { agents: listed.clone() });
                     }
                 }
                 () = ending.came() => break,
