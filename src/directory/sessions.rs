@@ -80,11 +80,13 @@ pub fn forget_in(project: &str, id: &str) {
 /// Everyone in `me`'s run, `me` included, and not filtered by what `me` may reach.
 #[must_use]
 pub fn crew(me: &Whom) -> Vec<Whom> {
-    let run = me.session_root().to_owned();
+    // The branch as it stands now, walked off the parent notes, so an adopted subtree is on the
+    // roster of whoever took it on. Its memory stays filed under the run it was born in.
+    let run = me.tree_root().to_owned();
     listening(&me.project)
         .into_iter()
         .map(|id| whom(&me.project, &id))
-        .filter(|them| them.session_root() == run)
+        .filter(|them| them.tree_root() == run)
         .collect()
 }
 
@@ -172,6 +174,7 @@ mod tests {
             id: id.to_owned(),
             parent: parent.map(ToOwned::to_owned),
             session: Some("alpha-rho-1".to_owned()),
+            root: None,
         }
     }
 

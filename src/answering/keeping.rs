@@ -88,12 +88,14 @@ mod tests {
             working_for: 0,
             inbox: Vec::new(),
             minted: std::collections::BTreeMap::new(),
+            adopted_token: None,
         };
         let them = Whom {
             project: "magi".to_owned(),
             id: "beta-nu".to_owned(),
             parent: None,
             session: None,
+            root: None,
         };
         let call = Call {
             call: "tell".to_owned(),

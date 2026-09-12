@@ -117,9 +117,14 @@ pub struct Whom {
     pub id: String,
     /// Who started it, or `None` if it is a main.
     pub parent: Option<String>,
-    /// Which run it belongs to: the id of the root the whole of it was started under, or `None`
-    /// where no note said — see [`Whom::session_root`].
+    /// Which run it was *born* in: the run note it inherited at mint, kept as provenance and as the
+    /// key its memory is filed under — never rewritten, not even by adoption. See [`Whom::session_root`].
     pub session: Option<String>,
+    /// The top of its branch *now*, found by walking the parent notes to the root — so an adopted
+    /// subtree belongs to whoever took it on. `None` when it was not walked (a hand-built peer, a
+    /// session with no parent), and then [`Whom::tree_root`] falls back to the born run. Filled by
+    /// [`crate::directory::whom`], which is the one place that reads the whole chain off the directory.
+    pub root: Option<String>,
 }
 
 impl Whom {
@@ -134,6 +139,14 @@ impl Whom {
     #[must_use]
     pub fn session_root(&self) -> &str {
         self.session.as_deref().unwrap_or(&self.id)
+    }
+
+    /// The top of its branch as the tree stands now: the walked-up root when one was found, else
+    /// the born run. This is what decides run membership, so an adopted subtree joins the run of
+    /// whoever took it on while its memory stays filed under the run it was born in.
+    #[must_use]
+    pub fn tree_root(&self) -> &str {
+        self.root.as_deref().unwrap_or_else(|| self.session_root())
     }
 }
 
@@ -213,9 +226,10 @@ pub fn between(me: &Whom, them: &Whom) -> Relation {
     {
         return Relation::Sibling;
     }
-    // Compared by root rather than by walking parentage, so a grandchild handed to a new parent
-    // is still in the run it did its work in.
-    if me.session_root() == them.session_root() {
+    // The top of the branch as it stands now, walked up the parent notes: a subtree adopted by a
+    // new root reads as kin to it, which is what makes a graft one tree rather than a link between
+    // two. Before any adoption this is the run they were born in, so nothing else moves.
+    if me.tree_root() == them.tree_root() {
         return Relation::Kin;
     }
     if them.is_main() {
@@ -573,6 +587,7 @@ mod tests_support {
             id: id.to_owned(),
             parent: None,
             session: None,
+            root: None,
         }
     }
 
@@ -582,6 +597,7 @@ mod tests_support {
             id: id.to_owned(),
             parent: Some(parent.to_owned()),
             session: None,
+            root: None,
         }
     }
 

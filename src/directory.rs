@@ -52,6 +52,61 @@ pub fn parent_of(me: &Identity) -> Option<String> {
         .or_else(parent)
 }
 
+/// The `.parent` note beside the socket called `id`, read straight off the directory: who started
+/// it, as any other session sees it. No environment fallback — that is for a session reading its
+/// own, in [`parent_of`].
+#[must_use]
+pub fn parent_note(project: &str, id: &str) -> Option<String> {
+    std::fs::read_to_string(home(project).join(format!("{}.parent", safe(id))))
+        .ok()
+        .map(|said| said.trim().to_owned())
+        .filter(|said| !said.is_empty())
+}
+
+/// The top of `id`'s branch, walked up the parent notes: the highest ancestor that answers to
+/// nobody, or `None` when `id` is itself a root. This is what makes an adopted subtree belong to
+/// whoever took its root on. Ring-safe and capped at [`MAX_DEPTH`], so a `.parent` note pointing
+/// back down cannot loop.
+#[must_use]
+pub fn root_of(project: &str, id: &str) -> Option<String> {
+    let mut seen = std::collections::BTreeSet::from([id.to_owned()]);
+    let mut top: Option<String> = None;
+    let mut current = id.to_owned();
+    while let Some(up) = parent_note(project, &current) {
+        if seen.len() > MAX_DEPTH as usize + 1 || !seen.insert(up.clone()) {
+            break;
+        }
+        current = up.clone();
+        top = Some(up);
+    }
+    top
+}
+
+/// The deepest chain below `id` among the sessions listening in `project` — `0` when nothing
+/// answers to it. Used to check that grafting a branch on by adoption keeps the tree inside
+/// [`MAX_DEPTH`]. Ring-safe: the walk down is bounded by the same depth.
+#[must_use]
+pub fn height_below(project: &str, id: &str) -> u32 {
+    let kin: Vec<(String, Option<String>)> = listening(project)
+        .into_iter()
+        .map(|child| {
+            let up = parent_note(project, &child);
+            (child, up)
+        })
+        .collect();
+    fn deepest(kin: &[(String, Option<String>)], id: &str, guard: u32) -> u32 {
+        if guard == 0 {
+            return 0;
+        }
+        kin.iter()
+            .filter(|(_, up)| up.as_deref() == Some(id))
+            .map(|(child, _)| 1 + deepest(kin, child, guard - 1))
+            .max()
+            .unwrap_or(0)
+    }
+    deepest(&kin, id, MAX_DEPTH)
+}
+
 /// How deep a tree of agents may go: a root and this many generations under it. A bound, so a
 /// session that keeps spawning children cannot grow the tree without end. [`MAX_CHILDREN`] bounds
 /// it the other way, so depth times breadth is the most agents one root can put on the machine.
@@ -72,7 +127,7 @@ pub fn depth_of(me: &Identity) -> u32 {
         if depth >= MAX_DEPTH {
             break;
         }
-        above = whom(&me.project, &id).parent;
+        above = parent_note(&me.project, &id);
     }
     depth
 }
@@ -105,7 +160,7 @@ pub fn children(me: &Identity) -> Vec<String> {
     listening(&me.project)
         .into_iter()
         .filter(|id| *id != me.id)
-        .filter(|id| whom(&me.project, id).parent.as_deref() == Some(me.id.as_str()))
+        .filter(|id| parent_note(&me.project, id).as_deref() == Some(me.id.as_str()))
         .collect()
 }
 
@@ -310,9 +365,16 @@ pub fn adopted(them: &Identity, parent: &str) -> Result<(), String> {
     wrote(&kin_at(them), parent)
 }
 
-/// Tell whoever asked what was decided, either way, as an ordinary message. `handover` goes by a
-/// separate call so what a harness lends an adopted session never lands in an inbox a model reads.
-pub fn answer_request(who: &str, me: &Identity, accept: bool, handover: Option<&str>) {
+/// Tell whoever asked what was decided, either way, as an ordinary message. `handover` and the
+/// stop `secret` go by a separate `adopted` call so what a harness lends, and the token that ends
+/// the session, never land in an inbox a model reads.
+pub fn answer_request(
+    who: &str,
+    me: &Identity,
+    accept: bool,
+    handover: Option<&str>,
+    secret: Option<&str>,
+) {
     let Some(them) = Identity::read(who) else {
         return;
     };
@@ -332,13 +394,17 @@ pub fn answer_request(who: &str, me: &Identity, accept: bool, handover: Option<&
         ],
     );
     if accept {
+        let text = |value: Option<&str>| {
+            value.map_or(serde_json::Value::Null, |said| {
+                serde_json::Value::String(said.to_owned())
+            })
+        };
         let _ = held.call(
             "adopted",
             vec![
                 serde_json::Value::String(me.full()),
-                handover.map_or(serde_json::Value::Null, |said| {
-                    serde_json::Value::String(said.to_owned())
-                }),
+                text(handover),
+                text(secret),
             ],
         );
     }
@@ -361,15 +427,12 @@ pub fn dial(them: &Identity, me: &Identity) -> std::io::Result<crate::asking::He
 /// What is known about a session, read off the directory rather than asked of the session itself.
 #[must_use]
 pub fn whom(project: &str, id: &str) -> Whom {
-    let kin = home(project).join(format!("{}.parent", safe(id)));
     Whom {
         project: project.to_owned(),
         id: id.to_owned(),
-        parent: std::fs::read_to_string(kin)
-            .ok()
-            .map(|name| name.trim().to_owned())
-            .filter(|name| !name.is_empty()),
+        parent: parent_note(project, id),
         session: sessions::session_in(project, id),
+        root: root_of(project, id),
     }
 }
 

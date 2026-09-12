@@ -31,6 +31,10 @@ pub struct About {
     /// off disk: a secret a sibling could read off the directory would buy the reader authority
     /// over a session it did not start.
     pub minted: std::collections::BTreeMap<String, String>,
+    /// A secret a new parent minted when it adopted this session, kept in memory as a stop-token a
+    /// root would otherwise not have. `stop` accepts it alongside [`Self::token`], so whoever took
+    /// this session on can end it. `None` until an adoption hands one over.
+    pub adopted_token: Option<String>,
 }
 
 impl About {
@@ -44,6 +48,9 @@ impl About {
             // Read rather than held, so this answers the same as what a caller reads off the
             // directory about us.
             session: crate::directory::sessions::session_of(&self.me),
+            // Walked off the directory, so an adopted session reads its new branch, not the run it
+            // was born in.
+            root: crate::directory::root_of(&self.me.project, &self.me.id),
         }
     }
 }
@@ -66,6 +73,8 @@ pub enum Then {
         by: String,
         /// What they handed over, unread by anything here.
         handover: Option<String>,
+        /// The stop secret the new parent minted; held by the loop, never surfaced to the model.
+        secret: Option<String>,
     },
     /// A child has been named and its secret minted; hold on to it.
     ///
@@ -381,6 +390,8 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
                 Then::Adopted {
                     by: text_at(call, 0).unwrap_or_else(|| caller.id.clone()),
                     handover: text_at(call, 1),
+                    // Minted by the parent that accepted, so it can stop what it took on.
+                    secret: text_at(call, 2),
                 },
             )
         }
@@ -408,6 +419,21 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
                     Then::Nothing,
                 );
             }
+            // Grafting the asker's whole branch on must keep the tree inside its depth.
+            let combined = crate::directory::depth_of(&about.me)
+                + 1
+                + crate::directory::height_below(&caller.project, &caller.id);
+            if combined >= crate::directory::MAX_DEPTH {
+                return (
+                    Reply::refused(format!(
+                        "taking `{}` on would make a branch {combined} deep, and a tree of agents \
+                         goes {} levels and no further",
+                        caller.id,
+                        crate::directory::MAX_DEPTH
+                    )),
+                    Then::Nothing,
+                );
+            }
             let why = text_at(call, 0).unwrap_or_default();
             let from = Identity {
                 project: caller.project.clone(),
@@ -426,9 +452,10 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
             )
         }
         "stop" => {
-            // The relation says the caller is the one that started this session; the secret says
-            // it is actually them, because a name is free to claim and this is not.
-            let Some(mine) = about.token.as_deref() else {
+            // The relation says the caller started this session; the secret says it is actually
+            // them. Either the one it was spawned with, or the one a parent minted on adopting it —
+            // a root taken on has only the latter.
+            let Some(mine) = about.token.as_deref().or(about.adopted_token.as_deref()) else {
                 return (
                     Reply::refused(
                         "this session was not started by another, so nothing may stop it",
@@ -470,6 +497,7 @@ mod tests {
             working_for: 0,
             inbox: Vec::new(),
             minted: std::collections::BTreeMap::new(),
+            adopted_token: None,
         }
     }
 
@@ -479,6 +507,7 @@ mod tests {
             id: id.to_owned(),
             parent: parent.map(ToOwned::to_owned),
             session: None,
+            root: None,
         }
     }
 
@@ -628,6 +657,58 @@ mod tests {
         let (reply, then) = answer(&call, &about, Some(&sibling));
         assert!(!reply.ok, "{reply:?}");
         assert_eq!(then, Then::Nothing);
+    }
+
+    #[test]
+    fn an_adopted_root_is_stopped_with_the_secret_its_new_parent_minted() {
+        // A root has no token of its own; adoption hands it one, held in `adopted_token`, and the
+        // parent that took it on may stop it by quoting that.
+        let mut about = about();
+        about.parent = Some("beta-nu".to_owned());
+        about.adopted_token = Some("granted".to_owned());
+        let parent = whom("magi", "beta-nu", None);
+
+        let bare = Call {
+            call: "stop".to_owned(),
+            ..Call::default()
+        };
+        let (reply, then) = answer(&bare, &about, Some(&parent));
+        assert!(!reply.ok, "stopped with no secret");
+        assert_eq!(then, Then::Nothing);
+
+        let with = Call {
+            call: "stop".to_owned(),
+            token: Some("granted".to_owned()),
+            ..Call::default()
+        };
+        let (reply, then) = answer(&with, &about, Some(&parent));
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(then, Then::Stop);
+    }
+
+    #[test]
+    fn adoption_hands_the_new_parent_a_secret_to_stop_by() {
+        // The `adopted` call carries the stop secret in its third argument; it comes up as part of
+        // `Then::Adopted` for the loop to hold, never into the inbox.
+        let mut about = about();
+        about.parent = Some("beta-nu".to_owned());
+        let parent = whom("magi", "beta-nu", None);
+        let call = Call {
+            call: "adopted".to_owned(),
+            args: vec![
+                serde_json::json!("magi/main/beta-nu"),
+                serde_json::Value::Null,
+                serde_json::json!("the-secret"),
+            ],
+            from: Some("magi/main/beta-nu".to_owned()),
+            token: None,
+        };
+        let (reply, then) = answer(&call, &about, Some(&parent));
+        assert!(reply.ok, "{reply:?}");
+        let Then::Adopted { secret, .. } = then else {
+            panic!("not an adoption: {then:?}");
+        };
+        assert_eq!(secret.as_deref(), Some("the-secret"));
     }
 
     #[test]

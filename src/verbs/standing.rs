@@ -45,11 +45,13 @@ impl Standing {
     pub fn whom(&self) -> Whom {
         let me = self.identity();
         let session = crate::directory::sessions::session_of(&me);
+        let root = crate::directory::root_of(&me.project, &me.id);
         Whom {
             project: me.project,
             id: me.id,
             parent: self.parent.clone(),
             session,
+            root,
         }
     }
 
@@ -100,6 +102,7 @@ mod tests {
         let them = Whom {
             project: "magi".to_owned(),
             id: "beta-nu".to_owned(),
+            root: None,
             parent: None,
             session: None,
         };

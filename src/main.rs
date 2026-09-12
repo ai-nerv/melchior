@@ -285,6 +285,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
             working_for: 0,
             inbox: Vec::new(),
             minted: std::collections::BTreeMap::new(),
+            adopted_token: None,
         });
         let (arrived_tx, mut arrived) = tokio::sync::mpsc::channel(64);
         let (asked_tx, mut asked) = tokio::sync::mpsc::channel(16);
@@ -386,7 +387,11 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                     pending.push(request);
                 }
                 // Straight up the pipe, never into the inbox: a handover is not a model's to read.
-                Some((by, handover)) = adopted.recv() => {
+                Some((by, handover, secret)) = adopted.recv() => {
+                    // The stop secret stays here for the loop; only `by`/`handover` reach the harness.
+                    if let Some(secret) = secret {
+                        about_tx.send_modify(|about| about.adopted_token = Some(secret));
+                    }
                     say(&Heard::Adopted { by, handover });
                 }
                 // A child this session named. The secret is held here and said nowhere else.
@@ -426,11 +431,20 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                         // The acceptance is downgraded rather than reported as one when the note
                         // will not write.
                         let mut accept = accept;
-                        if accept && let Some(them) = melchior::identity::Identity::read(&request.from)
-                            && let Err(why) = melchior::directory::adopted(&them, &me.id)
-                        {
-                            eprintln!("melchior: {} was not taken on: {why}", request.from);
-                            accept = false;
+                        // The secret that lets this session stop the one it takes on, minted only
+                        // when the note wrote, held beside `mint`'s and handed over on the call.
+                        let mut secret: Option<String> = None;
+                        if accept && let Some(them) = melchior::identity::Identity::read(&request.from) {
+                            if let Err(why) = melchior::directory::adopted(&them, &me.id) {
+                                eprintln!("melchior: {} was not taken on: {why}", request.from);
+                                accept = false;
+                            } else {
+                                let minted = melchior::identity::secret();
+                                about_tx.send_modify(|about| {
+                                    about.minted.insert(them.id.clone(), minted.clone());
+                                });
+                                secret = Some(minted);
+                            }
                         }
                         // Told either way: a silence the asker could not tell from a refusal
                         // would leave it waiting for good.
@@ -439,6 +453,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                             &me,
                             accept,
                             handover.as_deref(),
+                            secret.as_deref(),
                         );
                     }
                 },

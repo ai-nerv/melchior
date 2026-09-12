@@ -30,6 +30,7 @@ fn me(parent: Option<&str>) -> About {
         working_for: 0,
         inbox: Vec::new(),
         minted: std::collections::BTreeMap::new(),
+        adopted_token: None,
     }
 }
 
@@ -39,6 +40,7 @@ fn caller(id: &str) -> Whom {
         id: id.to_owned(),
         parent: None,
         session: None,
+        root: None,
     }
 }
 

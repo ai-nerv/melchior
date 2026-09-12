@@ -90,6 +90,7 @@ mod tests {
             working_for: 0,
             inbox: Vec::new(),
             minted: std::collections::BTreeMap::new(),
+            adopted_token: None,
         }
     }
 
@@ -99,6 +100,7 @@ mod tests {
             id: id.to_owned(),
             parent: parent.map(ToOwned::to_owned),
             session: None,
+            root: None,
         }
     }
 

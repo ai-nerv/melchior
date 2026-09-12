@@ -28,8 +28,9 @@ pub struct Serving {
     /// Requests that arrived, on their way to the person at the keyboard. Separate from
     /// `arrived` because a request waits for an answer only a person can give.
     pub asked: mpsc::Sender<crate::wire::Request>,
-    /// What a parent handed over when it took this session on, for the harness.
-    pub adopted: mpsc::Sender<(String, Option<String>)>,
+    /// What a parent handed over when it took this session on (for the harness), and the stop
+    /// secret it minted (for the loop's own record, never the harness).
+    pub adopted: mpsc::Sender<(String, Option<String>, Option<String>)>,
     /// Somebody with the right to stop this instance did.
     pub stopped: mpsc::Sender<()>,
     /// A child was named and its secret minted, on its way to this session's own record of it.
@@ -130,8 +131,12 @@ async fn talk(stream: tokio::net::UnixStream, serving: Serving) -> std::io::Resu
             Then::Keep(message) => {
                 let _ = serving.arrived.send(message).await;
             }
-            Then::Adopted { by, handover } => {
-                let _ = serving.adopted.send((by, handover)).await;
+            Then::Adopted {
+                by,
+                handover,
+                secret,
+            } => {
+                let _ = serving.adopted.send((by, handover, secret)).await;
             }
             Then::Ask(request) => {
                 let _ = serving.asked.send(request).await;
@@ -193,6 +198,7 @@ fn place(project: &str, id: &str, about: &About) -> Whom {
             id: id.to_owned(),
             parent: None,
             session: None,
+            root: None,
         };
     }
     whom(project, id)
@@ -289,6 +295,7 @@ mod tests {
             working_for: 0,
             inbox: Vec::new(),
             minted: std::collections::BTreeMap::new(),
+            adopted_token: None,
         });
         let (arrived_tx, arrived) = mpsc::channel(8);
         let (stopped_tx, stopped) = mpsc::channel(1);
@@ -439,6 +446,7 @@ mod tests {
             working_for: 0,
             inbox: Vec::new(),
             minted: std::collections::BTreeMap::new(),
+            adopted_token: None,
         };
         // The note a child leaves beside its socket. Written by hand here; a session writes its
         // own.

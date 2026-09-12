@@ -273,6 +273,7 @@ mod tests {
             id: "alpha-rho".to_owned(),
             parent: None,
             session: Some("alpha-rho-1".to_owned()),
+            root: None,
         }
     }
 

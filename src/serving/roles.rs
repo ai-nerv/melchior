@@ -40,6 +40,7 @@ fn about(project: &str) -> About {
         working_for: 0,
         inbox: Vec::new(),
         minted: std::collections::BTreeMap::new(),
+        adopted_token: None,
     }
 }
 
@@ -49,6 +50,7 @@ fn mine(project: &str) -> Whom {
         id: "alpha-rho".to_owned(),
         parent: None,
         session: None,
+        root: None,
     }
 }
 

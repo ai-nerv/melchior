@@ -26,6 +26,7 @@ fn a_main() -> About {
         working_for: 0,
         inbox: Vec::new(),
         minted: std::collections::BTreeMap::new(),
+        adopted_token: None,
     }
 }
 
@@ -35,6 +36,7 @@ fn caller(parent: Option<&str>) -> Whom {
         id: "beta-nu".to_owned(),
         parent: parent.map(ToOwned::to_owned),
         session: None,
+        root: None,
     }
 }
 
