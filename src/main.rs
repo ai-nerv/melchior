@@ -169,6 +169,9 @@ struct Peer {
     /// Where its harness draws it, or `null` for one that published no screen — read off the note
     /// left at announce time, see [`directory::screens`](melchior::directory::screens).
     ui: Option<String>,
+    /// Who started it — the id in its `.parent` note — or `null` for a main, so a harness can draw
+    /// the run as the tree it is.
+    parent: Option<String>,
 }
 
 /// Everyone listening in `project`, as they go on the pipe.
@@ -180,6 +183,7 @@ fn around(project: &str) -> Vec<Peer> {
                 .map_or_else(|| melchior::directory::roles::MAIN.to_owned(), |it| it.name),
             ui: melchior::directory::screens::ui_in(project, &id)
                 .map(|at| at.display().to_string()),
+            parent: melchior::directory::parent_note(project, &id),
             id,
         })
         .collect()

@@ -12,12 +12,13 @@ fn a_peer_goes_up_the_pipe_as_an_id_a_role_and_a_screen() {
             id: "beta-nu".to_owned(),
             role: "reviewer".to_owned(),
             ui: Some("/run/user/1000/magi/magi/1f4a.host".to_owned()),
+            parent: Some("alpha-rho".to_owned()),
         }],
     })
     .expect("a line");
     assert_eq!(
         line,
-        r#"{"event":"around","agents":[{"id":"beta-nu","role":"reviewer","ui":"/run/user/1000/magi/magi/1f4a.host"}]}"#
+        r#"{"event":"around","agents":[{"id":"beta-nu","role":"reviewer","ui":"/run/user/1000/magi/magi/1f4a.host","parent":"alpha-rho"}]}"#
     );
 }
 
@@ -29,6 +30,7 @@ fn an_agent_with_no_screen_says_so_rather_than_leaving_the_field_out() {
             id: "beta-nu".to_owned(),
             role: "main".to_owned(),
             ui: None,
+            parent: None,
         }],
     })
     .expect("a line");
