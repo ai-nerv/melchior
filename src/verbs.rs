@@ -17,6 +17,7 @@ mod fanning;
 pub mod saying;
 mod standing;
 pub mod tasking;
+mod watching;
 
 pub use standing::Standing;
 
@@ -204,6 +205,15 @@ pub const VERBS: &[(&str, &str)] = &[
         "let a claimed piece of work go, naming it in `about` exactly as `claim` did",
     ),
     ("claims", "what every instance has said it is working on"),
+    // Being told when another agent moves, beyond the parent and children heard about anyway.
+    (
+        "watch",
+        "ask to be told when an instance's phase changes — as you are for a child, by its `who`",
+    ),
+    (
+        "unwatch",
+        "stop being told about an instance named by `watch`",
+    ),
     // Reading what came back: the inbox and nothing else. A conversation store is balthasar's.
     (
         "inbox",
@@ -324,6 +334,9 @@ pub fn answer(arguments: &Value, standing: &Standing) -> Answer {
         "claim" => claiming::take(arguments, standing),
         "release" => claiming::let_go(arguments, standing),
         "claims" => claiming::held(standing),
+        // A note, like a claim: nothing is dialled, so `who` here names a target, not a call.
+        "watch" => watching::watch(arguments, standing),
+        "unwatch" => watching::unwatch(arguments, standing),
         // Derived, never stored.
         "task" => tasking::reported(arguments, standing),
         // The floor: a verb added to `ALONE` and not to the dispatch lands here silently, because

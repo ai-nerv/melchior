@@ -92,7 +92,13 @@ fn a_child_changing_phase_signals_its_parent() {
     ];
     // As the lead: the child finishing is a signal; the lead's own unchanged phase is not.
     assert_eq!(
-        kinds(&signal_changes("lead", None, &was, &now)),
+        kinds(&signal_changes(
+            "lead",
+            None,
+            &Default::default(),
+            &was,
+            &now
+        )),
         vec![("kid".to_owned(), "finished".to_owned())]
     );
 }
@@ -108,7 +114,16 @@ fn a_stranger_and_an_unchanged_phase_signal_nothing() {
         peer("other", Some("someone"), Some("finished")),
     ];
     // As the lead: `other` is not ours, and `kid` did not change — neither signals.
-    assert!(kinds(&signal_changes("lead", None, &was, &now)).is_empty());
+    assert!(
+        kinds(&signal_changes(
+            "lead",
+            None,
+            &Default::default(),
+            &was,
+            &now
+        ))
+        .is_empty()
+    );
 }
 
 #[test]
@@ -117,7 +132,26 @@ fn a_parent_finishing_signals_its_child() {
     let now = vec![peer("lead", None, Some("finished"))];
     // As the kid, whose parent is the lead: the parent's change reaches it.
     assert_eq!(
-        kinds(&signal_changes("kid", Some("lead"), &was, &now)),
+        kinds(&signal_changes(
+            "kid",
+            Some("lead"),
+            &Default::default(),
+            &was,
+            &now
+        )),
         vec![("lead".to_owned(), "finished".to_owned())]
+    );
+}
+
+#[test]
+fn an_explicitly_watched_stranger_signals() {
+    let was = vec![peer("far", Some("someone-else"), Some("working"))];
+    let now = vec![peer("far", Some("someone-else"), Some("finished"))];
+    let mut watched = std::collections::BTreeSet::new();
+    watched.insert("far".to_owned());
+    // `far` is neither child nor parent, but this session asked to watch it.
+    assert_eq!(
+        kinds(&signal_changes("lead", None, &watched, &was, &now)),
+        vec![("far".to_owned(), "finished".to_owned())]
     );
 }

@@ -592,7 +592,11 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                 Some(now) = roster.recv() => {
                     if now != listed {
                         let my_parent = about_tx.borrow().parent.clone();
-                        for signal in signal_changes(&me.id, my_parent.as_deref(), &listed, &now) {
+                        let watched =
+                            melchior::directory::watches::watched_by(&me.project, &me.id);
+                        for signal in
+                            signal_changes(&me.id, my_parent.as_deref(), &watched, &listed, &now)
+                        {
                             say(&signal);
                         }
                         listed = now;
@@ -629,7 +633,13 @@ fn name_of(sort: melchior::wire::Sort) -> String {
 /// A [`Heard::Signal`] for each watched agent whose phase changed since the last roster. Watched is
 /// this session's children (peers whose parent is `me`) and its parent — the mechanical edges a
 /// coordinator reacts to. Only a real change fires, and a peer that reports no phase never does.
-fn signal_changes(me: &str, my_parent: Option<&str>, was: &[Peer], now: &[Peer]) -> Vec<Heard> {
+fn signal_changes(
+    me: &str,
+    my_parent: Option<&str>,
+    watched: &std::collections::BTreeSet<String>,
+    was: &[Peer],
+    now: &[Peer],
+) -> Vec<Heard> {
     let before: std::collections::BTreeMap<&str, Option<&str>> = was
         .iter()
         .map(|p| (p.id.as_str(), p.phase.as_deref()))
@@ -640,6 +650,8 @@ fn signal_changes(me: &str, my_parent: Option<&str>, was: &[Peer], now: &[Peer])
             "child"
         } else if Some(peer.id.as_str()) == my_parent {
             "parent"
+        } else if watched.contains(&peer.id) {
+            "watched"
         } else {
             continue;
         };

@@ -24,6 +24,7 @@ pub mod roles;
 pub mod screens;
 pub mod sending;
 pub mod sessions;
+pub mod watches;
 
 use crate::identity::Identity;
 use crate::inherited::{ID, PARENT, PROJECT, TOKEN, said};
@@ -356,6 +357,7 @@ pub fn forget(me: &Identity) {
     screens::ended(me);
     sending::ended(me);
     claims::forget_in(&me.project, &me.id);
+    watches::forget_in(&me.project, &me.id);
 }
 
 /// Record that `them` now answers to `parent`, written by the session that consented rather than
