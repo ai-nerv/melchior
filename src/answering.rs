@@ -25,6 +25,9 @@ pub struct About {
     pub busy: bool,
     /// How long it has been running, in seconds.
     pub working_for: u64,
+    /// The coarse phase the harness reports, answered by `status` so a sibling's roster carries it.
+    pub phase: Option<String>,
+    pub cause: Option<String>,
     /// What has arrived and not been read.
     pub inbox: Vec<Message>,
     /// The secret handed to each session this one started, by id, written only by `mint` and kept
@@ -253,6 +256,8 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
                 "busy": about.busy,
                 "working_for": about.working_for,
                 "waiting": about.inbox.len(),
+                "phase": about.phase,
+                "cause": about.cause,
             })),
             Then::Nothing,
         ),
@@ -497,6 +502,8 @@ mod tests {
             working_for: 0,
             inbox: Vec::new(),
             minted: std::collections::BTreeMap::new(),
+            phase: None,
+            cause: None,
             adopted_token: None,
         }
     }

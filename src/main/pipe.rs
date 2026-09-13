@@ -13,6 +13,9 @@ fn a_peer_goes_up_the_pipe_as_an_id_a_role_and_a_screen() {
             role: "reviewer".to_owned(),
             ui: Some("/run/user/1000/magi/magi/1f4a.host".to_owned()),
             parent: Some("alpha-rho".to_owned()),
+            session: Some("alpha-rho".to_owned()),
+            phase: None,
+            cause: None,
             busy: true,
             working_for: 12,
             waiting: 0,
@@ -22,7 +25,7 @@ fn a_peer_goes_up_the_pipe_as_an_id_a_role_and_a_screen() {
     .expect("a line");
     assert_eq!(
         line,
-        r#"{"event":"around","agents":[{"id":"beta-nu","role":"reviewer","ui":"/run/user/1000/magi/magi/1f4a.host","parent":"alpha-rho","busy":true,"working_for":12,"waiting":0,"claim":"the-parser"}]}"#
+        r#"{"event":"around","agents":[{"id":"beta-nu","role":"reviewer","ui":"/run/user/1000/magi/magi/1f4a.host","parent":"alpha-rho","session":"alpha-rho","busy":true,"working_for":12,"waiting":0,"claim":"the-parser"}]}"#
     );
 }
 
@@ -35,6 +38,9 @@ fn an_agent_with_no_screen_says_so_rather_than_leaving_the_field_out() {
             role: "main".to_owned(),
             ui: None,
             parent: None,
+            session: None,
+            phase: None,
+            cause: None,
             busy: false,
             working_for: 0,
             waiting: 0,
@@ -43,4 +49,75 @@ fn an_agent_with_no_screen_says_so_rather_than_leaving_the_field_out() {
     })
     .expect("a line");
     assert!(line.contains(r#""ui":null"#), "{line}");
+}
+
+use super::signal_changes;
+
+/// A peer with just the fields the signalling looks at.
+fn peer(id: &str, parent: Option<&str>, phase: Option<&str>) -> Peer {
+    Peer {
+        id: id.to_owned(),
+        role: "worker".to_owned(),
+        ui: None,
+        parent: parent.map(ToOwned::to_owned),
+        session: None,
+        phase: phase.map(ToOwned::to_owned),
+        cause: None,
+        busy: false,
+        working_for: 0,
+        waiting: 0,
+        claim: None,
+    }
+}
+
+fn kinds(signals: &[Heard]) -> Vec<(String, String)> {
+    signals
+        .iter()
+        .filter_map(|h| match h {
+            Heard::Signal { from, kind, .. } => Some((from.clone(), kind.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_child_changing_phase_signals_its_parent() {
+    let was = vec![
+        peer("lead", None, Some("working")),
+        peer("kid", Some("lead"), Some("working")),
+    ];
+    let now = vec![
+        peer("lead", None, Some("working")),
+        peer("kid", Some("lead"), Some("finished")),
+    ];
+    // As the lead: the child finishing is a signal; the lead's own unchanged phase is not.
+    assert_eq!(
+        kinds(&signal_changes("lead", None, &was, &now)),
+        vec![("kid".to_owned(), "finished".to_owned())]
+    );
+}
+
+#[test]
+fn a_stranger_and_an_unchanged_phase_signal_nothing() {
+    let was = vec![
+        peer("kid", Some("lead"), Some("working")),
+        peer("other", Some("someone"), Some("working")),
+    ];
+    let now = vec![
+        peer("kid", Some("lead"), Some("working")),
+        peer("other", Some("someone"), Some("finished")),
+    ];
+    // As the lead: `other` is not ours, and `kid` did not change — neither signals.
+    assert!(kinds(&signal_changes("lead", None, &was, &now)).is_empty());
+}
+
+#[test]
+fn a_parent_finishing_signals_its_child() {
+    let was = vec![peer("lead", None, Some("working"))];
+    let now = vec![peer("lead", None, Some("finished"))];
+    // As the kid, whose parent is the lead: the parent's change reaches it.
+    assert_eq!(
+        kinds(&signal_changes("kid", Some("lead"), &was, &now)),
+        vec![("lead".to_owned(), "finished".to_owned())]
+    );
 }

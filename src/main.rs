@@ -101,8 +101,15 @@ enum Told {
         /// For how long, in seconds.
         #[serde(default)]
         working_for: u64,
+        /// Unread count to truncate the inbox to; `None` (a parked child that does not count) leaves
+        /// it alone rather than wiping it to zero.
         #[serde(default)]
-        waiting: usize,
+        waiting: Option<usize>,
+        /// The coarse phase, if the harness reports one; defaulted so an older one still updates the rest.
+        #[serde(default)]
+        phase: Option<String>,
+        #[serde(default)]
+        cause: Option<String>,
     },
     /// What the person said to a request this session was asked to answer.
     Answered {
@@ -142,6 +149,16 @@ enum Heard {
         /// Every session listening, this one included.
         agents: Vec<Peer>,
     },
+    /// A watched agent's phase changed — a mechanical edge for the harness to react to, not a
+    /// message a model reads. Emitted for this session's children and its parent.
+    Signal {
+        from: String,
+        /// The phase it entered — the signal's kind: `finished`, `blocked`, `working`, …
+        kind: String,
+        /// How `from` stands to this session: `child` or `parent`. What decides the reaction.
+        kin: String,
+        cause: Option<String>,
+    },
     /// Somebody with the right to stop this session did.
     Stopped,
     /// Another session is asking to become this one's child, and a person has to answer.
@@ -172,11 +189,18 @@ struct Peer {
     /// Who started it — the id in its `.parent` note — or `null` for a main, so a harness can draw
     /// the run as the tree it is.
     parent: Option<String>,
+    /// Which run it belongs to — the `.session` note — so a harness can show one run's tree alone.
+    session: Option<String>,
     /// Whether it is in a turn right now, and for how long, and how much is waiting in its inbox —
     /// asked of its own socket. Absent (false/0) for one that did not answer in time.
     busy: bool,
     working_for: u64,
     waiting: usize,
+    /// The coarse phase a coordinator reads; `null` for a peer whose harness does not report one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cause: Option<String>,
     /// The piece of work it has claimed, if any.
     claim: Option<String>,
 }
@@ -195,17 +219,20 @@ fn around(me: &melchior::identity::Identity) -> Vec<Peer> {
     melchior::directory::listening(project)
         .into_iter()
         .map(|id| {
-            let (busy, working_for, waiting) = status_of(project, &id, me).unwrap_or_default();
+            let status = status_of(project, &id, me).unwrap_or_default();
             Peer {
                 role: melchior::directory::roles::role_in(project, &id)
                     .map_or_else(|| melchior::directory::roles::MAIN.to_owned(), |it| it.name),
                 ui: melchior::directory::screens::ui_in(project, &id)
                     .map(|at| at.display().to_string()),
                 parent: melchior::directory::parent_note(project, &id),
+                session: melchior::directory::sessions::session_in(project, &id),
                 claim: claims.get(&id).cloned(),
-                busy,
-                working_for,
-                waiting,
+                busy: status.busy,
+                working_for: status.working_for,
+                waiting: status.waiting,
+                phase: status.phase,
+                cause: status.cause,
                 id,
             }
         })
@@ -214,11 +241,7 @@ fn around(me: &melchior::identity::Identity) -> Vec<Peer> {
 
 /// A peer's `busy`/`working_for`/`waiting`, asked of its own socket. `None` when it did not answer
 /// within the dial's patience — that peer simply reads as idle rather than stalling the roster.
-fn status_of(
-    project: &str,
-    id: &str,
-    me: &melchior::identity::Identity,
-) -> Option<(bool, u64, usize)> {
+fn status_of(project: &str, id: &str, me: &melchior::identity::Identity) -> Option<Status> {
     let them = melchior::identity::Identity {
         project: project.to_owned(),
         role: String::new(),
@@ -229,20 +252,39 @@ fn status_of(
         .call("status", Vec::new())
         .ok()?;
     let said = reply.result.first()?;
-    Some((
-        said.get("busy")
+    let word = |key: &str| {
+        said.get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned)
+    };
+    Some(Status {
+        busy: said
+            .get("busy")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
-        said.get("working_for")
+        working_for: said
+            .get("working_for")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0),
-        usize::try_from(
+        waiting: usize::try_from(
             said.get("waiting")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0),
         )
         .unwrap_or(0),
-    ))
+        phase: word("phase"),
+        cause: word("cause"),
+    })
+}
+
+/// A peer's live status as its own socket reports it. Defaulted for one that did not answer in time.
+#[derive(Default)]
+struct Status {
+    busy: bool,
+    working_for: u64,
+    waiting: usize,
+    phase: Option<String>,
+    cause: Option<String>,
 }
 
 /// The id out of a `project/role/id`, or the whole of a bare one.
@@ -350,6 +392,8 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
             working_for: 0,
             inbox: Vec::new(),
             minted: std::collections::BTreeMap::new(),
+            phase: None,
+            cause: None,
             adopted_token: None,
         });
         let (arrived_tx, mut arrived) = tokio::sync::mpsc::channel(64);
@@ -491,13 +535,16 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                 // `select!` arm whose pattern does not match is disabled, not taken.
                 told = told.recv() => match told {
                     None => break,
-                    Some(Told::Doing { busy, working_for, waiting }) => {
+                    Some(Told::Doing { busy, working_for, waiting, phase, cause }) => {
                         about_tx.send_modify(|about| {
                             about.busy = busy;
                             about.working_for = working_for;
-                            // What the harness still holds unread, which is not the same as what
-                            // has arrived here.
-                            about.inbox.truncate(waiting.min(about.inbox.len()));
+                            about.phase = phase;
+                            about.cause = cause;
+                            // Only when the harness counts, so one that does not wipe ours to zero.
+                            if let Some(waiting) = waiting {
+                                about.inbox.truncate(waiting.min(about.inbox.len()));
+                            }
                         });
                     }
                     // Written by the side that consented: an asker writing its own note would be
@@ -544,6 +591,10 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                 // changed — a peer that turned busy or took a claim is a change worth redrawing.
                 Some(now) = roster.recv() => {
                     if now != listed {
+                        let my_parent = about_tx.borrow().parent.clone();
+                        for signal in signal_changes(&me.id, my_parent.as_deref(), &listed, &now) {
+                            say(&signal);
+                        }
                         listed = now;
                         say(&Heard::Around { agents: listed.clone() });
                     }
@@ -573,6 +624,38 @@ fn name_of(sort: melchior::wire::Sort) -> String {
         .ok()
         .and_then(|value| value.as_str().map(ToOwned::to_owned))
         .unwrap_or_else(|| "note".to_owned())
+}
+
+/// A [`Heard::Signal`] for each watched agent whose phase changed since the last roster. Watched is
+/// this session's children (peers whose parent is `me`) and its parent — the mechanical edges a
+/// coordinator reacts to. Only a real change fires, and a peer that reports no phase never does.
+fn signal_changes(me: &str, my_parent: Option<&str>, was: &[Peer], now: &[Peer]) -> Vec<Heard> {
+    let before: std::collections::BTreeMap<&str, Option<&str>> = was
+        .iter()
+        .map(|p| (p.id.as_str(), p.phase.as_deref()))
+        .collect();
+    let mut out = Vec::new();
+    for peer in now {
+        let kin = if peer.parent.as_deref() == Some(me) {
+            "child"
+        } else if Some(peer.id.as_str()) == my_parent {
+            "parent"
+        } else {
+            continue;
+        };
+        let Some(phase) = peer.phase.as_deref() else {
+            continue;
+        };
+        if before.get(peer.id.as_str()).copied().flatten() != Some(phase) {
+            out.push(Heard::Signal {
+                from: peer.id.clone(),
+                kind: phase.to_owned(),
+                kin: kin.to_owned(),
+                cause: peer.cause.clone(),
+            });
+        }
+    }
+    out
 }
 
 /// One line to the parent, flushed every time because the parent is waiting on it.

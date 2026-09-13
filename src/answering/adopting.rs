@@ -26,6 +26,8 @@ fn a_main() -> About {
         working_for: 0,
         inbox: Vec::new(),
         minted: std::collections::BTreeMap::new(),
+        phase: None,
+        cause: None,
         adopted_token: None,
     }
 }
