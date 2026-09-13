@@ -132,6 +132,20 @@ pub fn answers(where_it_is: &Path, me: &Identity) -> bool {
     }
 }
 
+/// The phase `them` reports off its `status`, or `None` when it does not answer or does not say —
+/// so a reader like `crew` can show what each agent is doing, not only that it is there.
+#[must_use]
+pub fn phase(where_it_is: &Path, me: &Identity) -> Option<String> {
+    let mut held = Held::at(where_it_is, me).ok()?;
+    let reply = held.call("status", Vec::new()).ok()?;
+    reply
+        .result
+        .first()?
+        .get("phase")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

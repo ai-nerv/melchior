@@ -103,14 +103,16 @@ pub fn crew(standing: &Standing) -> String {
                 .as_deref()
                 .map(|said| format!("\n{step}      {}", roles::quoted(&them.id, said)))
                 .unwrap_or_default();
-            let alive = if asking::answers(
-                &crate::directory::socket(&them.project, &them.id),
-                &me_named,
-            ) {
+            let socket = crate::directory::socket(&them.project, &them.id);
+            let alive = if asking::answers(&socket, &me_named) {
                 ""
             } else {
                 " — not answering; its socket is what a crash left behind"
             };
+            // What it is doing right now, so the model reads the crew's state, not just its shape.
+            let doing = asking::phase(&socket, &me_named)
+                .map(|phase| format!(" ({phase})"))
+                .unwrap_or_default();
             let refused = if relation == Relation::Myself || policy::may(&me, relation, Reach::Ask)
             {
                 String::new()
@@ -121,7 +123,7 @@ pub fn crew(standing: &Standing) -> String {
                 )
             };
             format!(
-                "{step}- `{}` [{}] — {}{alive}{refused}{said}",
+                "{step}- `{}` [{}]{doing} — {}{alive}{refused}{said}",
                 them.id,
                 role.name,
                 relation.named()
