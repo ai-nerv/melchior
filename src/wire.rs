@@ -534,6 +534,10 @@ pub const CLI_VERBS: &[(&str, &str)] = &[
     ("needs", "what a coordinator may tell it, as declarations"),
     ("configure", "take that configuration, as Lua on stdin"),
     ("models", "what this machine could talk to"),
+    (
+        "card",
+        "one model in full: its limits, prices, scores and who serves it",
+    ),
     ("ask", "run a turn; an Ask on stdin"),
     ("serve", "bind this session's socket and answer for it"),
     ("fork", "start a child session, named and vouched for"),

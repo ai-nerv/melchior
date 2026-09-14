@@ -14,6 +14,22 @@ pub struct Usage {
     pub cache_read: u64,
     /// Prompt tokens written to cache.
     pub cache_write: u64,
+    /// What the provider said the request cost, in millionths of a US dollar; zero where it did
+    /// not say. Read as a number of either kind, because it arrives from Lua.
+    #[serde(default, deserialize_with = "whole")]
+    pub cost_micros: u64,
+}
+
+/// A count that may arrive as `1234` or as `1234.0`: Lua does not always tell the two apart.
+fn whole<'de, D: serde::Deserializer<'de>>(said: D) -> Result<u64, D::Error> {
+    let value = f64::deserialize(said)?;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to zero and rounded first"
+    )]
+    let count = value.max(0.0).round() as u64;
+    Ok(count)
 }
 
 impl Usage {
@@ -36,6 +52,7 @@ impl Usage {
         self.output += other.output;
         self.cache_read += other.cache_read;
         self.cache_write += other.cache_write;
+        self.cost_micros += other.cost_micros;
     }
 
     /// What these tokens cost at `cost`.
@@ -78,8 +95,27 @@ mod tests {
             output: 50,
             cache_read: 900,
             cache_write: 10,
+            cost_micros: 0,
         };
         assert_eq!(usage.prompt_tokens(), 1010);
+    }
+
+    #[test]
+    fn a_cost_arrives_as_either_kind_of_number() {
+        let whole: Usage = serde_json::from_str(
+            r#"{"input":1,"output":1,"cache_read":0,"cache_write":0,"cost_micros":1234}"#,
+        )
+        .expect("an integer");
+        let float: Usage = serde_json::from_str(
+            r#"{"input":1,"output":1,"cache_read":0,"cache_write":0,"cost_micros":1234.0}"#,
+        )
+        .expect("a float");
+        assert_eq!(whole.cost_micros, 1234);
+        assert_eq!(float.cost_micros, 1234);
+        let unsaid: Usage =
+            serde_json::from_str(r#"{"input":1,"output":1,"cache_read":0,"cache_write":0}"#)
+                .expect("none at all");
+        assert_eq!(unsaid.cost_micros, 0);
     }
 
     #[test]

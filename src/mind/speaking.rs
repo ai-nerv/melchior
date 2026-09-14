@@ -84,6 +84,36 @@ pub fn models(flags: &std::collections::BTreeMap<String, String>) -> std::io::Re
     }
 }
 
+/// `melchior card --model provider/model` — one model in full, for a card to be drawn from.
+pub fn card(flags: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
+    let how = As::asked(flags);
+    let mut out = std::io::stdout().lock();
+    let Some(asked) = flags.get("model") else {
+        return refuse(
+            &mut out,
+            how,
+            "which model: --model provider/model",
+            Fault::Refused,
+        );
+    };
+    match Catalog::load(&Catalog::dir()) {
+        Ok(catalog) => match catalog.find(asked) {
+            Some((provider, model)) => reply(
+                &mut out,
+                how,
+                &[crate::mind::describing::describe(provider, model)],
+            ),
+            None => refuse(
+                &mut out,
+                how,
+                &format!("{asked} is not in the catalog"),
+                Fault::Refused,
+            ),
+        },
+        Err(why) => refuse(&mut out, how, &why.to_string(), Fault::Refused),
+    }
+}
+
 /// `melchior ask` — read an [`Ask`] and stream what the model says.
 ///
 /// The request arrives on stdin, in the encoding named by the flags. Every [`Said`] is written

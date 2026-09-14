@@ -24,6 +24,7 @@ fn main() -> std::io::Result<()> {
             Ok(())
         }
         Some("models") => melchior::mind::speaking::models(&flags(args)),
+        Some("card") => melchior::mind::speaking::card(&flags(args)),
         // Before stdin is read: from there on the turn holds a connection with no timeout over it.
         Some("ask") => {
             tied::to_magi()?;
@@ -76,12 +77,13 @@ fn main() -> std::io::Result<()> {
 
 /// What a person gets from `melchior --help`, and from a bare `melchior` on stderr.
 const USAGE: &str = "\
-usage: melchior serve | tool | fork | brief | models | ask | client | verbs
+usage: melchior serve | tool | fork | brief | models | card | ask | client | verbs
 
   serve     bind this session's socket and answer for it
   tool      the vocabulary a model calls, one exec per request
   brief     what to tell a model about the sessions a prompt named
   models    what this machine could talk to  [--json|--cbor]
+  card      one model in full: --model ID    [--json|--cbor]
   ask       run a turn, an Ask on stdin      [--json|--cbor]
   client    print the Lua client library     [--json|--cbor]
   verbs     what a session answers           [--json|--cbor]

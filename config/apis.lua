@@ -88,6 +88,10 @@ do -- openai-completions
     if compat.supports_usage_in_streaming then
       body.stream_options = { include_usage = true }
     end
+    -- OpenRouter says what a request cost when asked. Only it is asked: the field is its own.
+    if model.provider == "openrouter" then
+      body.usage = { include = true }
+    end
 
     if ctx.tools and #ctx.tools > 0 then
       local tools = {}
@@ -159,6 +163,8 @@ do -- openai-completions
         output = u.completion_tokens or 0,
         cache_read = details.cached_tokens or 0,
         cache_write = 0,
+        -- Dollars from the provider, where it says, kept as millionths so totals add up exactly.
+        cost_micros = type(u.cost) == "number" and math.floor(u.cost * 1000000 + 0.5) or 0,
       }
       deltas[#deltas + 1] = { kind = "usage", usage = usage }
     end

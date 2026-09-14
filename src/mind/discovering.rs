@@ -13,7 +13,7 @@ pub const FRESH: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// How long a fetch may take before the cache — even a stale one — is preferred. This runs while
 /// somebody is waiting for a prompt.
-const PATIENCE: Duration = Duration::from_secs(5);
+pub(crate) const PATIENCE: Duration = Duration::from_secs(5);
 
 /// What a model is assumed to hold when the provider does not say: an underestimate, which costs
 /// an early compaction, where an overestimate costs a refused request mid-turn.
@@ -64,7 +64,7 @@ struct Held {
 }
 
 /// Where a provider's fetched catalog is kept.
-fn cache_path(id: &str) -> Option<PathBuf> {
+pub(crate) fn cache_path(id: &str) -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
@@ -107,7 +107,7 @@ fn write_cache(id: &str, models: &[Model]) {
 }
 
 /// The key this provider authenticates with, if the environment has one.
-fn key_for(provider: &Provider) -> Option<String> {
+pub(crate) fn key_for(provider: &Provider) -> Option<String> {
     let crate::mind::provider::endpoint::Auth::ApiKey { vars } = &provider.auth else {
         return None;
     };

@@ -3,6 +3,7 @@
 
 pub mod acknowledged;
 pub mod catalog;
+pub mod describing;
 pub mod discovering;
 pub mod lua;
 pub mod model;
