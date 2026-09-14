@@ -256,6 +256,38 @@ fn completions_uses_the_conservative_token_field_by_default() {
     assert!(body.get("store").is_none(), "an unknown field is a 400");
 }
 
+/// A model OpenRouter routes, which is the only one a provider order is sent to.
+fn routed() -> Model {
+    let mut m = plain_model();
+    m.provider = "openrouter".into();
+    m
+}
+
+#[test]
+fn openrouter_asks_the_chosen_provider_first() {
+    let options = Options {
+        provider: Some("open-inference/fp8".into()),
+        ..Options::default()
+    };
+    let body = adapter("openai-completions").request(&routed(), &plain_context(), &options);
+    assert_eq!(
+        body["provider"],
+        serde_json::json!({ "order": ["open-inference/fp8"] }),
+        "{body}"
+    );
+    assert_eq!(
+        body["usage"]["include"], true,
+        "the cost is still asked for"
+    );
+}
+
+#[test]
+fn openrouter_routes_freely_when_no_provider_is_chosen() {
+    let body =
+        adapter("openai-completions").request(&routed(), &plain_context(), &Options::default());
+    assert!(body.get("provider").is_none(), "{body}");
+}
+
 #[test]
 fn completions_honours_a_declared_dialect() {
     let mut m = plain_model();
