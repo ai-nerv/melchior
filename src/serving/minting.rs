@@ -18,6 +18,7 @@ fn about(me: &Identity) -> About {
         minted: std::collections::BTreeMap::new(),
         phase: None,
         cause: None,
+        spent: Vec::new(),
         adopted_token: None,
     }
 }

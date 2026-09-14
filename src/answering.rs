@@ -28,15 +28,13 @@ pub struct About {
     /// The coarse phase the harness reports, answered by `status` so a sibling's roster carries it.
     pub phase: Option<String>,
     pub cause: Option<String>,
+    /// What it has spent, a row per model, as the harness last said; answered by `status`.
+    pub spent: Vec<serde_json::Value>,
     /// What has arrived and not been read.
     pub inbox: Vec<Message>,
-    /// The secret handed to each session this one started, by id, written only by `mint` and kept
-    /// off disk: a secret a sibling could read off the directory would buy the reader authority
-    /// over a session it did not start.
+    /// Each started session's secret, by id: written only by `mint`, and never to disk.
     pub minted: std::collections::BTreeMap<String, String>,
-    /// A secret a new parent minted when it adopted this session, kept in memory as a stop-token a
-    /// root would otherwise not have. `stop` accepts it alongside [`Self::token`], so whoever took
-    /// this session on can end it. `None` until an adoption hands one over.
+    /// A stop-token a new parent minted on adopting this session, taken by `stop` beside `token`.
     pub adopted_token: Option<String>,
 }
 
@@ -258,6 +256,7 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
                 "waiting": about.inbox.len(),
                 "phase": about.phase,
                 "cause": about.cause,
+                "spent": about.spent,
             })),
             Then::Nothing,
         ),
@@ -504,6 +503,7 @@ mod tests {
             minted: std::collections::BTreeMap::new(),
             phase: None,
             cause: None,
+            spent: Vec::new(),
             adopted_token: None,
         }
     }

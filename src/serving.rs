@@ -297,6 +297,7 @@ mod tests {
             minted: std::collections::BTreeMap::new(),
             phase: None,
             cause: None,
+            spent: Vec::new(),
             adopted_token: None,
         });
         let (arrived_tx, arrived) = mpsc::channel(8);
@@ -450,6 +451,7 @@ mod tests {
             minted: std::collections::BTreeMap::new(),
             phase: None,
             cause: None,
+            spent: Vec::new(),
             adopted_token: None,
         };
         // The note a child leaves beside its socket. Written by hand here; a session writes its

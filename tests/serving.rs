@@ -242,14 +242,17 @@ fn what_the_parent_says_it_is_doing_is_what_a_sibling_is_told() {
         false
     );
 
-    serving.told(r#"{"event":"doing","busy":true,"working_for":7,"waiting":0}"#);
-    // Given to the reader thread and through the channel; a moment, not a race worth a retry
-    // loop, because the next call is a fresh connection either way.
+    serving.told(r#"{"event":"doing","busy":true,"working_for":7,"waiting":0,"spent":[{"model":"a/b","cost_micros":150}]}"#);
+    // A moment for the reader thread; the next call is a fresh connection either way.
     std::thread::sleep(std::time::Duration::from_millis(300));
 
     let status = serving.asked(r#"{"call":"status","from":"demo/main/socat"}"#);
     assert_eq!(status["result"][0]["busy"], true, "{status}");
     assert_eq!(status["result"][0]["working_for"], 7);
+    assert_eq!(
+        status["result"][0]["spent"][0]["cost_micros"], 150,
+        "{status}"
+    );
     assert!(serving.let_go());
 }
 

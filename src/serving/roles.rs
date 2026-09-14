@@ -42,6 +42,7 @@ fn about(project: &str) -> About {
         minted: std::collections::BTreeMap::new(),
         phase: None,
         cause: None,
+        spent: Vec::new(),
         adopted_token: None,
     }
 }

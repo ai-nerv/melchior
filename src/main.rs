@@ -90,6 +90,8 @@ usage: melchior serve | tool | fork | brief | models | card | ask | client | ver
 ";
 
 mod ending;
+#[path = "main/status.rs"]
+mod status;
 mod tied;
 mod tool;
 
@@ -112,6 +114,8 @@ enum Told {
         phase: Option<String>,
         #[serde(default)]
         cause: Option<String>,
+        #[serde(default)]
+        spent: Option<Vec<serde_json::Value>>,
     },
     /// What the person said to a request this session was asked to answer.
     Answered {
@@ -205,6 +209,9 @@ struct Peer {
     cause: Option<String>,
     /// The piece of work it has claimed, if any.
     claim: Option<String>,
+    /// What it has spent, a row per model, as its harness reported it; left out when nothing.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    spent: Vec<serde_json::Value>,
 }
 
 /// Everyone listening in `project`, with each one's live status asked of its socket. Blocking — it
@@ -221,7 +228,7 @@ fn around(me: &melchior::identity::Identity) -> Vec<Peer> {
     melchior::directory::listening(project)
         .into_iter()
         .map(|id| {
-            let status = status_of(project, &id, me).unwrap_or_default();
+            let status = status::status_of(project, &id, me).unwrap_or_default();
             Peer {
                 role: melchior::directory::roles::role_in(project, &id)
                     .map_or_else(|| melchior::directory::roles::MAIN.to_owned(), |it| it.name),
@@ -235,58 +242,11 @@ fn around(me: &melchior::identity::Identity) -> Vec<Peer> {
                 waiting: status.waiting,
                 phase: status.phase,
                 cause: status.cause,
+                spent: status.spent,
                 id,
             }
         })
         .collect()
-}
-
-/// A peer's `busy`/`working_for`/`waiting`, asked of its own socket. `None` when it did not answer
-/// within the dial's patience — that peer simply reads as idle rather than stalling the roster.
-fn status_of(project: &str, id: &str, me: &melchior::identity::Identity) -> Option<Status> {
-    let them = melchior::identity::Identity {
-        project: project.to_owned(),
-        role: String::new(),
-        id: id.to_owned(),
-    };
-    let reply = melchior::directory::dial(&them, me)
-        .ok()?
-        .call("status", Vec::new())
-        .ok()?;
-    let said = reply.result.first()?;
-    let word = |key: &str| {
-        said.get(key)
-            .and_then(serde_json::Value::as_str)
-            .map(ToOwned::to_owned)
-    };
-    Some(Status {
-        busy: said
-            .get("busy")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
-        working_for: said
-            .get("working_for")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
-        waiting: usize::try_from(
-            said.get("waiting")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0),
-        )
-        .unwrap_or(0),
-        phase: word("phase"),
-        cause: word("cause"),
-    })
-}
-
-/// A peer's live status as its own socket reports it. Defaulted for one that did not answer in time.
-#[derive(Default)]
-struct Status {
-    busy: bool,
-    working_for: u64,
-    waiting: usize,
-    phase: Option<String>,
-    cause: Option<String>,
 }
 
 /// The id out of a `project/role/id`, or the whole of a bare one.
@@ -396,6 +356,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
             minted: std::collections::BTreeMap::new(),
             phase: None,
             cause: None,
+            spent: Vec::new(),
             adopted_token: None,
         });
         let (arrived_tx, mut arrived) = tokio::sync::mpsc::channel(64);
@@ -537,12 +498,15 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                 // `select!` arm whose pattern does not match is disabled, not taken.
                 told = told.recv() => match told {
                     None => break,
-                    Some(Told::Doing { busy, working_for, waiting, phase, cause }) => {
+                    Some(Told::Doing { busy, working_for, waiting, phase, cause, spent }) => {
                         about_tx.send_modify(|about| {
                             about.busy = busy;
                             about.working_for = working_for;
                             about.phase = phase;
                             about.cause = cause;
+                            if let Some(spent) = spent {
+                                about.spent = spent;
+                            }
                             // Only when the harness counts, so one that does not wipe ours to zero.
                             if let Some(waiting) = waiting {
                                 about.inbox.truncate(waiting.min(about.inbox.len()));

@@ -20,6 +20,7 @@ fn a_peer_goes_up_the_pipe_as_an_id_a_role_and_a_screen() {
             working_for: 12,
             waiting: 0,
             claim: Some("the-parser".to_owned()),
+            spent: Vec::new(),
         }],
     })
     .expect("a line");
@@ -45,6 +46,7 @@ fn an_agent_with_no_screen_says_so_rather_than_leaving_the_field_out() {
             working_for: 0,
             waiting: 0,
             claim: None,
+            spent: Vec::new(),
         }],
     })
     .expect("a line");
@@ -67,7 +69,28 @@ fn peer(id: &str, parent: Option<&str>, phase: Option<&str>) -> Peer {
         working_for: 0,
         waiting: 0,
         claim: None,
+        spent: Vec::new(),
     }
+}
+
+#[test]
+fn what_a_peer_spent_goes_up_the_pipe_and_nothing_when_it_spent_nothing() {
+    let row = serde_json::json!({"model": "a/b", "input": 12, "cost_micros": 150});
+    let line = serde_json::to_string(&Heard::Around {
+        agents: vec![Peer {
+            spent: vec![row],
+            ..peer("kid", None, None)
+        }],
+    })
+    .expect("a line");
+    let sent: serde_json::Value = serde_json::from_str(&line).expect("json");
+    assert_eq!(sent["agents"][0]["spent"][0]["model"], "a/b", "{line}");
+    assert_eq!(sent["agents"][0]["spent"][0]["cost_micros"], 150, "{line}");
+    let bare = serde_json::to_string(&Heard::Around {
+        agents: vec![peer("kid", None, None)],
+    })
+    .expect("a line");
+    assert!(!bare.contains("spent"), "{bare}");
 }
 
 fn kinds(signals: &[Heard]) -> Vec<(String, String)> {
