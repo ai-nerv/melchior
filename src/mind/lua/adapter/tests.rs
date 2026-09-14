@@ -51,6 +51,29 @@ fn anthropic_streams_and_caps_its_tokens() {
 }
 
 #[test]
+fn a_huge_ceiling_is_not_what_a_reply_asks_for() {
+    // A router holds credit for every token asked for: a million-token ceiling asked by default
+    // is a dozen dollars held against one answer, and a 402 on an account with less.
+    let mut model = plain_model();
+    model.max_tokens = 1_000_000;
+    let a = adapter("anthropic-messages");
+    let body = a.request(&model, &plain_context(), &Options::default());
+    assert_eq!(body["max_tokens"], 32_000);
+    let asked = a.request(
+        &model,
+        &plain_context(),
+        &Options {
+            max_tokens: Some(200_000),
+            ..Options::default()
+        },
+    );
+    assert_eq!(
+        asked["max_tokens"], 200_000,
+        "the config still says otherwise"
+    );
+}
+
+#[test]
 fn anthropic_merges_consecutive_same_role_messages() {
     let context = Context {
         messages: vec![

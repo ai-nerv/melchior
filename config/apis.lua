@@ -4,6 +4,11 @@
 -- ending in the `melchior.api` calls that register it. A vendor deviating inside a dialect says
 -- so in its `compat` block in `providers.lua`, not here.
 
+-- What a reply may run to when nothing says otherwise. Not the model's ceiling: a router holds
+-- credit for every token asked for, and a million-token ceiling priced like Kimi's is a dozen
+-- dollars held against a one-line answer. `max_tokens` in the config says otherwise.
+local OUTPUT = 32000
+
 do -- openai-completions
   local M = {}
 
@@ -81,7 +86,7 @@ do -- openai-completions
 
     -- Which field caps the response is the single most common way these dialects differ.
     local field = compat.max_tokens_field
-    body[field] = math.min(opts.max_tokens or model.max_tokens, model.max_tokens)
+    body[field] = math.min(opts.max_tokens or OUTPUT, model.max_tokens)
 
     if compat.supports_store then body.store = false end
     -- Usage is not reported while streaming unless asked for, and some dialects cannot.
@@ -263,7 +268,7 @@ do -- openai-responses
       model = model.id,
       stream = true,
       input = inputs(ctx.messages),
-      max_output_tokens = math.min(opts.max_tokens or model.max_tokens, model.max_tokens),
+      max_output_tokens = math.min(opts.max_tokens or OUTPUT, model.max_tokens),
     }
     if ctx.system then body.instructions = ctx.system end
 
@@ -467,7 +472,7 @@ do -- anthropic-messages
     local body = {
       model = model.id,
       stream = true,
-      max_tokens = math.min(opts.max_tokens or model.max_tokens, model.max_tokens),
+      max_tokens = math.min(opts.max_tokens or OUTPUT, model.max_tokens),
       messages = messages(ctx.messages),
     }
     if ctx.system then body.system = ctx.system end
@@ -496,7 +501,7 @@ do -- anthropic-messages
     -- yields a turn with nothing in it.
     local budget = opts.thinking and BUDGET[opts.thinking]
     if budget then
-      local cap = math.max(model.max_tokens - 1024, 1024)
+      local cap = math.max(body.max_tokens - 1024, 1024)
       body.thinking = { type = "enabled", budget_tokens = math.min(budget, cap) }
     end
     return body
@@ -625,7 +630,7 @@ do -- google
     local body = {
       contents = contents(ctx.messages),
       generationConfig = {
-        maxOutputTokens = math.min(opts.max_tokens or model.max_tokens, model.max_tokens),
+        maxOutputTokens = math.min(opts.max_tokens or OUTPUT, model.max_tokens),
       },
     }
     -- Google puts it on the generation config, and wants the mime type set with it.
@@ -795,7 +800,7 @@ do -- pi-messages
       model = model.id,
       stream = true,
       messages = messages,
-      maxTokens = math.min(opts.max_tokens or model.max_tokens, model.max_tokens),
+      maxTokens = math.min(opts.max_tokens or OUTPUT, model.max_tokens),
     }
     if ctx.system then body.system = ctx.system end
     if ctx.tools and #ctx.tools > 0 then body.tools = ctx.tools end
