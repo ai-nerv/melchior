@@ -91,6 +91,8 @@ do -- openai-completions
     -- OpenRouter says what a request cost when asked. Only it is asked: the field is its own.
     if model.provider == "openrouter" then
       body.usage = { include = true }
+      -- A provider the person chose is asked first; the rest stay behind it as fallbacks.
+      if opts.provider then body.provider = { order = { opts.provider } } end
     end
 
     if ctx.tools and #ctx.tools > 0 then

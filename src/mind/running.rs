@@ -80,6 +80,7 @@ pub async fn run(asked: &Ask, mut say: impl FnMut(Said)) {
                 name: s.name.clone(),
                 schema: s.schema.clone(),
             }),
+        provider: asked.wants.provider.clone(),
     };
     let call = Call {
         adapter: &adapter,

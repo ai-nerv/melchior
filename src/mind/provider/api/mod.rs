@@ -15,6 +15,9 @@ pub struct Options {
     /// A JSON Schema the answer must satisfy; each protocol names the field differently.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<Schema>,
+    /// The provider to ask first, by routing tag, for a dialect that routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

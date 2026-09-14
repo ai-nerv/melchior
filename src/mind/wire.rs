@@ -43,6 +43,9 @@ pub struct Wants {
     /// A JSON Schema the answer must satisfy, and what to call it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<Schema>,
+    /// Which of the model's providers to ask first, by its routing tag, where more than one serves it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -179,6 +182,7 @@ mod tests {
                 thinking: Some(ThinkingLevel::Medium),
                 max_tokens: Some(256),
                 schema: None,
+                provider: None,
             },
             about: "t1".into(),
         }

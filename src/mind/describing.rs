@@ -25,6 +25,18 @@ pub struct Described {
     pub modality: Option<String>,
     pub benchmarks: Vec<Score>,
     pub endpoints: Vec<Serving>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokenizer: Option<String>,
+    /// What it takes in and gives back: `text`, `image`, `audio`, `file`.
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
+    /// The request parameters it accepts, as the provider lists them: `tools`, `reasoning`, ….
+    pub features: Vec<String>,
+    /// When it was published, in Unix seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub moderated: Option<bool>,
 }
 
 /// Dollars per million tokens.
@@ -47,8 +59,23 @@ pub struct Score {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Serving {
     pub provider: String,
+    /// The routing slug a request names it by, `open-inference/fp8`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quantization: Option<String>,
+    /// What this provider charges, which is not what the model's listing says.
+    pub price: Price,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output: Option<u64>,
+    /// Median time to the first token over the last half hour, in milliseconds as published.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<f64>,
+    /// Median tokens a second over the last half hour.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub throughput: Option<f64>,
     /// Percent of the last half hour it answered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uptime_30m: Option<f64>,
@@ -139,27 +166,18 @@ fn published(out: &mut Described, entry: &Value) {
             .filter(|said| !said.is_empty())
             .map(ToOwned::to_owned)
     };
-    // Priced per token, as a string; a card reads per million.
-    let per_million = |key: &str| {
-        entry
-            .pointer(&format!("/pricing/{key}"))
-            .and_then(Value::as_str)
-            .and_then(|said| said.parse::<f64>().ok())
-            .map(|each| each * 1_000_000.0)
-    };
     out.description = text("/description");
     out.knowledge_cutoff = text("/knowledge_cutoff");
     out.modality = text("/architecture/modality");
-    for (key, into) in [
-        ("prompt", &mut out.price.input),
-        ("completion", &mut out.price.output),
-        ("input_cache_read", &mut out.price.cache_read),
-        ("input_cache_write", &mut out.price.cache_write),
-    ] {
-        if let Some(price) = per_million(key) {
-            *into = price;
-        }
-    }
+    out.tokenizer = text("/architecture/tokenizer");
+    out.inputs = strings(entry, "/architecture/input_modalities");
+    out.outputs = strings(entry, "/architecture/output_modalities");
+    out.features = strings(entry, "/supported_parameters");
+    out.created = entry.get("created").and_then(Value::as_u64);
+    out.moderated = entry
+        .pointer("/top_provider/is_moderated")
+        .and_then(Value::as_bool);
+    priced(&mut out.price, entry);
     if let Some(ceiling) = entry
         .pointer("/top_provider/max_completion_tokens")
         .and_then(Value::as_u64)
@@ -189,17 +207,71 @@ fn servings(body: &Value) -> Vec<Serving> {
     endpoints
         .iter()
         .filter_map(|endpoint| {
+            let mut price = Price::default();
+            priced(&mut price, endpoint);
             Some(Serving {
                 provider: endpoint.get("provider_name")?.as_str()?.to_owned(),
+                tag: endpoint
+                    .get("tag")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
                 quantization: endpoint
                     .get("quantization")
                     .and_then(Value::as_str)
                     .filter(|q| !q.is_empty() && *q != "unknown")
                     .map(ToOwned::to_owned),
+                price,
+                context: endpoint.get("context_length").and_then(Value::as_u64),
+                max_output: endpoint
+                    .get("max_completion_tokens")
+                    .and_then(Value::as_u64),
+                latency_ms: median(endpoint.get("latency_last_30m")),
+                throughput: median(endpoint.get("throughput_last_30m")),
                 uptime_30m: endpoint.get("uptime_last_30m").and_then(Value::as_f64),
             })
         })
         .collect()
+}
+
+/// A listing's or an endpoint's `pricing`, read into dollars per million: each is quoted per
+/// token, as a string.
+fn priced(price: &mut Price, entry: &Value) {
+    for (key, into) in [
+        ("prompt", &mut price.input),
+        ("completion", &mut price.output),
+        ("input_cache_read", &mut price.cache_read),
+        ("input_cache_write", &mut price.cache_write),
+    ] {
+        if let Some(each) = entry
+            .pointer(&format!("/pricing/{key}"))
+            .and_then(Value::as_str)
+            .and_then(|said| said.parse::<f64>().ok())
+        {
+            *into = each * 1_000_000.0;
+        }
+    }
+}
+
+/// A figure published either bare or as percentiles, as its median.
+fn median(value: Option<&Value>) -> Option<f64> {
+    let value = value?;
+    value
+        .as_f64()
+        .or_else(|| value.get("p50").and_then(Value::as_f64))
+}
+
+/// A list of strings at `at`, empty where there is none.
+fn strings(entry: &Value, at: &str) -> Vec<String> {
+    entry
+        .pointer(at)
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// `GET url` as JSON, on a thread with a runtime of its own, the way the catalog's own fetch runs.
@@ -238,13 +310,22 @@ mod tests {
             "id": "deepseek/deepseek-chat",
             "description": "A model.",
             "knowledge_cutoff": "2025-01-31",
-            "architecture": {"modality": "text->text"},
+            "architecture": {"modality": "text->text", "tokenizer": "DeepSeek",
+                             "input_modalities": ["text", "image"], "output_modalities": ["text"]},
             "pricing": {"prompt": "0.0000003", "completion": "0.0000012", "input_cache_read": "0.00000003"},
-            "top_provider": {"max_completion_tokens": 16384},
+            "top_provider": {"max_completion_tokens": 16384, "is_moderated": false},
+            "supported_parameters": ["tools", "reasoning"],
+            "created": 1_789_000_000,
             "benchmarks": {"artificial_analysis": {"coding_index": 37.6, "intelligence_index": 50.1}},
         });
         let mut out = Described::default();
         published(&mut out, &entry);
+        assert_eq!(out.tokenizer.as_deref(), Some("DeepSeek"));
+        assert_eq!(out.inputs, ["text", "image"]);
+        assert_eq!(out.outputs, ["text"]);
+        assert_eq!(out.features, ["tools", "reasoning"]);
+        assert_eq!(out.created, Some(1_789_000_000));
+        assert_eq!(out.moderated, Some(false));
         assert_eq!(out.description.as_deref(), Some("A model."));
         assert_eq!(out.modality.as_deref(), Some("text->text"));
         assert!((out.price.input - 0.3).abs() < 1e-9, "{:?}", out.price);
@@ -269,5 +350,27 @@ mod tests {
         assert_eq!(read[0].quantization.as_deref(), Some("fp4"));
         assert_eq!(read[1].quantization, None);
         assert_eq!(read[1].uptime_30m, None);
+    }
+
+    #[test]
+    fn an_endpoint_says_what_it_charges_how_much_it_holds_and_how_fast_it_is() {
+        let body = serde_json::json!({"data": {"endpoints": [
+            {"provider_name": "OpenInference", "tag": "open-inference/fp8",
+             "pricing": {"prompt": "0.00000004", "completion": "0.0000001"},
+             "context_length": 1_048_576, "max_completion_tokens": 393_216,
+             "latency_last_30m": {"p50": 420.0, "p90": 900.0}, "throughput_last_30m": 85.5},
+            {"provider_name": "Bare"},
+        ]}});
+        let read = servings(&body);
+        let first = &read[0];
+        assert_eq!(first.tag.as_deref(), Some("open-inference/fp8"));
+        assert!((first.price.input - 0.04).abs() < 1e-9, "{:?}", first.price);
+        assert!((first.price.output - 0.1).abs() < 1e-9, "{:?}", first.price);
+        assert_eq!(first.context, Some(1_048_576));
+        assert_eq!(first.max_output, Some(393_216));
+        assert_eq!(first.latency_ms, Some(420.0), "the median of percentiles");
+        assert_eq!(first.throughput, Some(85.5), "a bare figure as it is");
+        assert_eq!(read[1].tag, None);
+        assert_eq!(read[1].latency_ms, None);
     }
 }

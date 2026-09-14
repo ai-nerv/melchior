@@ -296,6 +296,7 @@ mod thinking_tests {
             schema: None,
             thinking: Some(level),
             max_tokens: None,
+            provider: None,
         }
     }
 
