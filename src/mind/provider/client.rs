@@ -193,12 +193,16 @@ impl Client {
         let mut parser = sse::Parser::new();
         let mut state = crate::mind::provider::api::StreamState::default();
         let mut stopped = false;
+        // The last events, said when the stream ends: whether a finish came before the end is what
+        // tells an answer from one the provider cut off.
+        let mut tail: Vec<String> = Vec::new();
         let mut body = response.bytes_stream();
         while let Some(chunk) = body.next().await {
             let chunk =
                 chunk.map_err(|e| ProviderError::new(RetryClass::Transport, e.to_string()))?;
             let text = String::from_utf8_lossy(&chunk);
             for event in parser.push(&text) {
+                kept(&mut tail, &event.data);
                 for delta in adapter.on_event(&mut state, &event) {
                     stopped |= matches!(delta, Delta::Stop(_));
                     on_delta(delta);
@@ -206,12 +210,22 @@ impl Client {
             }
         }
         if let Some(event) = parser.finish() {
+            kept(&mut tail, &event.data);
             for delta in adapter.on_event(&mut state, &event) {
                 stopped |= matches!(delta, Delta::Stop(_));
                 on_delta(delta);
             }
         }
+        crate::noted!("ask: {} stream ended after {tail:?}", provider.id);
         finished(stopped, &provider.id)
+    }
+}
+
+/// Keep the last two events' data, short.
+fn kept(tail: &mut Vec<String>, data: &str) {
+    tail.push(data.chars().take(120).collect());
+    if tail.len() > 2 {
+        tail.remove(0);
     }
 }
 
