@@ -11,16 +11,67 @@
 
 use crate::mind::catalog::Catalog;
 use crate::mind::lua::adapter::LuaAdapter;
+use crate::mind::model::Usage;
 use crate::mind::provider::api::{Delta, Options};
 use crate::mind::provider::client::{Call, Client};
 use crate::mind::wire::{Ask, Refusal, Said};
 
-/// Run one ask, handing over each [`Said`] as it happens.
+/// Run one ask, handing over each [`Said`] as it happens, and log how it started and ended.
+pub async fn run(asked: &Ask, mut say: impl FnMut(Said)) {
+    let began = std::time::Instant::now();
+    crate::noted!(
+        "ask: {} — {} messages, max_tokens {:?}, thinking {:?}, route {:?}",
+        asked.model,
+        asked.context.messages.len(),
+        asked.wants.max_tokens,
+        asked.wants.thinking,
+        asked.wants.provider
+    );
+    let mut spent = Usage::default();
+    asking(asked, |said| {
+        logged(&said, &mut spent, began);
+        say(said);
+    })
+    .await;
+}
+
+/// The log line for a [`Said`] that says how the ask is going; the counts are kept for the end.
+fn logged(said: &Said, spent: &mut Usage, began: std::time::Instant) {
+    let ms = began.elapsed().as_millis();
+    match said {
+        Said::Spent { usage } => *spent = *usage,
+        Said::Retrying {
+            attempt,
+            of,
+            seconds,
+            why,
+        } => crate::noted!(
+            "ask: retry {attempt}/{of} in {seconds:.1}s — {}",
+            crate::noted::short(why)
+        ),
+        Said::Stop { reason } => crate::noted!(
+            "ask: done {reason:?} in {ms}ms — {} in, {} out, cache {} read {} written, ${}.{:06}",
+            spent.input,
+            spent.output,
+            spent.cache_read,
+            spent.cache_write,
+            spent.cost_micros / 1_000_000,
+            spent.cost_micros % 1_000_000
+        ),
+        Said::Failed { message, why } => crate::noted!(
+            "ask: failed {why:?} in {ms}ms — {}",
+            crate::noted::short(message)
+        ),
+        _ => {}
+    }
+}
+
+/// The ask itself.
 ///
 /// Never returns an error: everything that could go wrong is a [`Said::Failed`], because the
 /// caller is reading a stream and a stream that stops without saying so is the one failure it
 /// cannot interpret.
-pub async fn run(asked: &Ask, mut say: impl FnMut(Said)) {
+async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
     let catalog = match Catalog::load(&Catalog::dir()) {
         Ok(catalog) => catalog,
         Err(why) => {
@@ -58,6 +109,11 @@ pub async fn run(asked: &Ask, mut say: impl FnMut(Said)) {
             return;
         }
     };
+    crate::noted!(
+        "ask: {} is served by {} over {api}",
+        asked.model,
+        provider.name
+    );
     let adapter = match LuaAdapter::new(catalog.engine, &api) {
         Ok(adapter) => adapter,
         Err(why) => {

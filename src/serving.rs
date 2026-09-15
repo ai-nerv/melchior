@@ -124,11 +124,30 @@ async fn talk(stream: tokio::net::UnixStream, serving: Serving) -> std::io::Resu
         about.parent = crate::directory::parent_of(&about.me);
         // And the caller's, per call rather than per connection: a session may fork mid-call.
         let caller = caller_of(&call, peer, &about);
+        let began = std::time::Instant::now();
         let (reply, then) = answer(&call, &about, caller.as_ref());
+        crate::noted!(
+            "serve: {} from {} → {} in {}ms",
+            call.call,
+            caller.as_ref().map_or_else(
+                || call.from.clone().unwrap_or_else(|| "?".to_owned()),
+                |them| format!("{}/{}", them.project, them.id)
+            ),
+            if reply.ok {
+                "ok".to_owned()
+            } else {
+                format!(
+                    "refused: {}",
+                    crate::noted::short(reply.error.as_deref().unwrap_or_default())
+                )
+            },
+            began.elapsed().as_millis()
+        );
         framing::write_as(&mut writer, wire, &reply).await?;
         match then {
             Then::Nothing => {}
             Then::Keep(message) => {
+                crate::noted!("serve: message from {} ({:?})", message.from, message.sort);
                 let _ = serving.arrived.send(message).await;
             }
             Then::Adopted {
@@ -136,18 +155,23 @@ async fn talk(stream: tokio::net::UnixStream, serving: Serving) -> std::io::Resu
                 handover,
                 secret,
             } => {
+                crate::noted!("serve: taken on by {by}");
                 let _ = serving.adopted.send((by, handover, secret)).await;
             }
             Then::Ask(request) => {
+                crate::noted!("serve: {} asks to be taken on", request.from);
                 let _ = serving.asked.send(request).await;
             }
             Then::Minted { id, token } => {
+                crate::noted!("serve: minted {id}");
                 let _ = serving.minted.send((id, token)).await;
             }
             Then::Named(role) => {
+                crate::noted!("serve: named {}", role.name);
                 let _ = serving.named.send(role).await;
             }
             Then::Stop => {
+                crate::noted!("serve: stopped");
                 let _ = serving.stopped.send(()).await;
                 return Ok(());
             }

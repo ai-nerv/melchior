@@ -90,6 +90,8 @@ usage: melchior serve | tool | fork | brief | models | card | ask | client | ver
 ";
 
 mod ending;
+#[path = "main/roster.rs"]
+mod roster;
 #[path = "main/status.rs"]
 mod status;
 mod tied;
@@ -284,6 +286,7 @@ fn fork(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<(
     let Some(child) = reply.result.first() else {
         return Err(std::io::Error::other("mint answered nothing"));
     };
+    melchior::noted!("fork: minted {child}");
     println!("{child}");
     Ok(())
 }
@@ -405,6 +408,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
             // Read back from the note `announce` just wrote, so the directory holds one answer.
             run: melchior::directory::sessions::session_of(&me).unwrap_or_else(|| me.id.clone()),
         });
+        melchior::noted!("serve: {} listening at {}", me.full(), at.display());
         tokio::spawn(async move {
             let _ = melchior::serving::accept(
                 listener,
@@ -565,6 +569,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                         {
                             say(&signal);
                         }
+                        roster::noted(&listed, &now);
                         listed = now;
                         say(&Heard::Around { agents: listed.clone() });
                     }
@@ -581,6 +586,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                 else => break,
             }
         }
+        melchior::noted!("serve: {} ends", me.full());
         melchior::directory::forget(&me);
         let _ = std::fs::remove_file(&at);
         // And the directory itself, which refuses while anybody else is still in the project.
