@@ -1,70 +1,49 @@
 //! Naming another session, and where it lives.
 //!
-//! # The layout
-//!
 //! ```text
 //! $XDG_RUNTIME_DIR/melchior/
 //!   myproject/             <- one directory per project
 //!     alpha-rho            <- a socket, named by the id and nothing else
 //!     iota-mu
 //!     iota-mu.parent       <- "alpha-rho": who started it
+//!     iota-mu.session      <- "alpha-rho": which run it belongs to
+//!     iota-mu.role         <- "reviewer", and a line saying what that means
+//!     iota-mu.sent         <- what it has sent lately, so a loop runs out of window
+//!     .claims/             <- one file per piece of work somebody has taken
+//!       the-parser
 //!   other-project/
 //!     beta-nu
 //! ```
 //!
-//! A project directory, and inside it a socket per session named by its id. No role in the
-//! path, because a role is not part of a name — see [`crate::identity`]. Sessions in different
-//! projects are not refused each other, they are *not in each other's directory*, which is the
-//! project wall from [`policy`] enforced by the filesystem rather than by a check somebody could
-//! forget to write.
-//!
-//! The `.parent` file beside a subagent's socket says who started it. That is what makes the
-//! tree legible: a session that finds `iota-mu` in the directory can tell it is behind
-//! `alpha-rho`'s door without asking it, and without trusting what it would have said.
-//!
-//! # What a caller's name is worth
-//!
-//! Every call says who is making it, and for `ask` and `tell` that claim is taken at face
-//! value. It has to be: everything here runs as one user in one directory, so any process that
-//! can open the socket could open it claiming anything, and a check that cannot be enforced is
-//! worse than none — it reads like security to whoever comes along next.
-//!
-//! `stop` is the exception, because it is the one act the far end cannot decline. It carries the
-//! secret handed to the session in [`TOKEN`] when it was started, which only whoever started it
-//! ever held. A session nobody started holds none, so nothing can stop it.
+//! Every name beside a socket carries a dot, and the claims directory begins with one, because
+//! [`listening`] dials each dotless entry as a socket. `stop` carries the secret from [`TOKEN`],
+//! which only whoever started the session ever held; `ask` and `tell` take a name at face value.
+
+pub mod claims;
+pub mod roles;
+pub mod screens;
+pub mod sending;
+pub mod sessions;
+pub mod watches;
 
 use crate::identity::Identity;
-use crate::inherited::{ID, PARENT, PROJECT, ROLE, TOKEN, said};
+use crate::inherited::{ID, PARENT, PROJECT, TOKEN, said};
 
 use crate::policy::{self, Whom};
 use std::path::{Path, PathBuf};
 
 /// What the model calls the tool that reaches other instances.
-///
-/// Named once, because it is said in three places: the tool registers under it, the briefing
-/// tells the model to use it, and its own help repeats it.
 pub const TOOL: &str = "agent";
 
-/// Who started this session, if anybody did.
-///
-/// `None` for one somebody started at a terminal, which is most of them — and a session with no
-/// parent is a *main*, which is the whole of what that word means here.
+/// Who started this session, if anybody did. A session with no parent is a *main*.
 #[must_use]
 pub fn parent() -> Option<String> {
     said(PARENT)
 }
 
-/// Who `me` answers to, as everybody else can see it.
-///
-/// **The note first, the environment second**, and the order is the whole point. A session
-/// spawned as a child learns its parent from the environment and writes the note from it; a
-/// session *adopted* while it runs is given a note by whoever accepted it, and there is no
-/// environment to change — a variable cannot be set on a process that is already running.
-///
-/// Reading only the environment left a session that had been adopted still calling itself a
-/// main. Every other session read the note and saw a child, so the tree disagreed with itself
-/// depending on who was asked — and the rule that stops a session having two parents, which
-/// tests exactly this, could be walked straight through.
+/// Who `me` answers to, as everybody else can see it. The note first, the environment second: a
+/// session adopted while it runs is given a note by whoever accepted it, and no variable can be
+/// set on a process that is already running.
 #[must_use]
 pub fn parent_of(me: &Identity) -> Option<String> {
     std::fs::read_to_string(kin_at(me))
@@ -74,50 +53,120 @@ pub fn parent_of(me: &Identity) -> Option<String> {
         .or_else(parent)
 }
 
-/// The secret this session was started with, if it was started by another.
+/// The `.parent` note beside the socket called `id`, read straight off the directory: who started
+/// it, as any other session sees it. No environment fallback — that is for a session reading its
+/// own, in [`parent_of`].
+#[must_use]
+pub fn parent_note(project: &str, id: &str) -> Option<String> {
+    std::fs::read_to_string(home(project).join(format!("{}.parent", safe(id))))
+        .ok()
+        .map(|said| said.trim().to_owned())
+        .filter(|said| !said.is_empty())
+}
+
+/// The top of `id`'s branch, walked up the parent notes: the highest ancestor that answers to
+/// nobody, or `None` when `id` is itself a root. This is what makes an adopted subtree belong to
+/// whoever took its root on. Ring-safe and capped at [`MAX_DEPTH`], so a `.parent` note pointing
+/// back down cannot loop.
+#[must_use]
+pub fn root_of(project: &str, id: &str) -> Option<String> {
+    let mut seen = std::collections::BTreeSet::from([id.to_owned()]);
+    let mut top: Option<String> = None;
+    let mut current = id.to_owned();
+    while let Some(up) = parent_note(project, &current) {
+        if seen.len() > MAX_DEPTH as usize + 1 || !seen.insert(up.clone()) {
+            break;
+        }
+        current = up.clone();
+        top = Some(up);
+    }
+    top
+}
+
+/// The deepest chain below `id` among the sessions listening in `project` — `0` when nothing
+/// answers to it. Used to check that grafting a branch on by adoption keeps the tree inside
+/// [`MAX_DEPTH`]. Ring-safe: the walk down is bounded by the same depth.
+#[must_use]
+pub fn height_below(project: &str, id: &str) -> u32 {
+    let kin: Vec<(String, Option<String>)> = listening(project)
+        .into_iter()
+        .map(|child| {
+            let up = parent_note(project, &child);
+            (child, up)
+        })
+        .collect();
+    fn deepest(kin: &[(String, Option<String>)], id: &str, guard: u32) -> u32 {
+        if guard == 0 {
+            return 0;
+        }
+        kin.iter()
+            .filter(|(_, up)| up.as_deref() == Some(id))
+            .map(|(child, _)| 1 + deepest(kin, child, guard - 1))
+            .max()
+            .unwrap_or(0)
+    }
+    deepest(&kin, id, MAX_DEPTH)
+}
+
+/// How deep a tree of agents may go: a root and this many generations under it. A bound, so a
+/// session that keeps spawning children cannot grow the tree without end. [`MAX_CHILDREN`] bounds
+/// it the other way, so depth times breadth is the most agents one root can put on the machine.
+pub const MAX_DEPTH: u32 = 8;
+
+/// How many children one session may have running at once. Counted from the directory, so a child
+/// that has ended and been swept no longer counts against its parent.
+pub const MAX_CHILDREN: usize = 8;
+
+/// How many ancestors `me` has, counting up the parent notes and stopping at [`MAX_DEPTH`] — a root
+/// is `0`. Read off the directory, so it is the same number any other session would compute.
+#[must_use]
+pub fn depth_of(me: &Identity) -> u32 {
+    let mut depth = 0;
+    let mut above = parent_of(me);
+    while let Some(id) = above {
+        depth += 1;
+        if depth >= MAX_DEPTH {
+            break;
+        }
+        above = parent_note(&me.project, &id);
+    }
+    depth
+}
+
 #[must_use]
 pub fn token() -> Option<String> {
     said(TOKEN)
 }
 
-/// Which session a spawned process belongs to, from its environment.
-///
-/// `None` outside a session — `melchior tool` run by hand from a shell, which should say so rather
-/// than invent a name and send messages signed with it.
+/// Which session a spawned process belongs to, from its environment. `None` outside one.
 #[must_use]
 pub fn mine() -> Option<Identity> {
     let project = said(PROJECT)?;
     let id = said(ID)?;
-    // The one part with a sensible default. Project and id place a session and a wrong guess at
-    // either would sign messages as somebody else; a role only says what it is for.
-    let role = said(ROLE).unwrap_or_else(|| "main".to_owned());
+    // The note first, the environment second, as in `parent_of`: `assign` and `role` change what
+    // an agent is for while it runs, and no variable can be set on a process already started.
+    let role = roles::role_of(&Identity {
+        project: project.clone(),
+        role: roles::MAIN.to_owned(),
+        id: id.clone(),
+    })
+    .name;
     Some(Identity { project, role, id })
 }
 
-/// What `me` started, read off the project directory.
-///
-/// Not from anything the session remembers: a session that restarted forgot, and a child that
-/// declined to leave its note would have made itself unstoppable by forgetting who its parent
-/// was. The directory is the one place both facts survive.
-///
-/// Ids, not whole names. The directory knows where a session is, not what it calls itself: a
-/// role is not on disk, so a full name built from here would be a name with a guess in it.
+/// What `me` started, read off the project directory. Ids, not whole names: a role is not on
+/// disk, so a full name built from here would be a name with a guess in it.
 #[must_use]
 pub fn children(me: &Identity) -> Vec<String> {
     listening(&me.project)
         .into_iter()
         .filter(|id| *id != me.id)
-        .filter(|id| whom(&me.project, id).parent.as_deref() == Some(me.id.as_str()))
+        .filter(|id| parent_note(&me.project, id).as_deref() == Some(me.id.as_str()))
         .collect()
 }
 
-/// What has arrived for `me`, asked of `me`'s own socket.
-///
-/// A separate process cannot see the UI's memory, and the inbox lives there. So it asks — which
-/// works because a session is allowed to ask itself anything, and because the answer then comes
-/// from the one copy that is actually current rather than from a snapshot taken at spawn.
-///
-/// Empty when nothing answers, which is the ordinary case for a peer started outside a session.
+/// What has arrived for `me`, asked of `me`'s own socket because the inbox lives in the UI's
+/// memory. Empty when nothing answers.
 #[must_use]
 pub fn inbox_of(me: &Identity) -> Vec<crate::wire::Message> {
     let Ok(mut held) = dial(me, me) else {
@@ -126,23 +175,18 @@ pub fn inbox_of(me: &Identity) -> Vec<crate::wire::Message> {
     let Ok(reply) = held.call("inbox", Vec::new()) else {
         return Vec::new();
     };
+    // A row is a message. Reading the first row as the whole inbox is the other half of the
+    // mistake FAMILY.md names, and it is what a consumer holding a stale client would do.
     reply
         .result
-        .first()
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
-        .unwrap_or_default()
+        .iter()
+        .filter_map(|value| serde_json::from_value(value.clone()).ok())
+        .collect()
 }
 
-/// The secrets this session minted for the children it started, by id.
-///
-/// Asked of its own socket, for the same reason [`inbox_of`] is: the session holds them and this
-/// process does not exist between calls. Read only by the session's own tool, and never written
-/// to the directory — a sibling that could read one off disk would have authority over a session
-/// it did not start.
-///
-/// Empty when nothing answers, which means `stop` is refused with "this session did not start
-/// it". That is the right answer when the session cannot be reached: refusing to end something
-/// on a guess.
+/// The secrets this session minted for the children it started, by id. Never written to the
+/// directory: a sibling that could read one off disk would have authority over a session it did
+/// not start. Empty when nothing answers, which refuses `stop`.
 #[must_use]
 pub fn minted_by(me: &Identity) -> std::collections::BTreeMap<String, String> {
     let Ok(mut held) = dial(me, me) else {
@@ -158,35 +202,18 @@ pub fn minted_by(me: &Identity) -> std::collections::BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
-/// Another instance, by name.
-///
-/// The same three parts a session wears on its status line, and the short forms fill in from
-/// whoever is asking: `$iota-mu` is one in this project, `$review/iota-mu` says what it is for,
-/// `$magi/review/iota-mu` says everything.
-///
-/// The last of those parses and then loses — [`policy`] refuses anything outside the asker's own
-/// project, and the directory it would have to be found in is not one this session lists. It
-/// reads rather than being rejected as a typo so the refusal can say *why*.
-///
-/// **The id is the part that finds it.** A role is what a session says about itself, so a role
-/// in an address is a description, not a lookup: it is filled in and carried along, and never
-/// consulted to work out which socket is meant.
+/// Another instance, by name: `$iota-mu`, `$review/iota-mu` or `$magi/review/iota-mu`, the short
+/// forms filling in from whoever is asking. The id is the part that finds it — a role in an
+/// address is carried along and never consulted to work out which socket is meant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Address {
-    /// Which project, or `None` to mean the asker's own.
     pub project: Option<String>,
-    /// What it is for, or `None` to mean the asker's own.
     pub role: Option<String>,
-    /// Which instance. Always given: this is the part that names one.
     pub id: String,
 }
 
 impl Address {
-    /// Read `$iota-mu`, `$review/iota-mu` or `$magi/review/iota-mu`.
-    ///
-    /// The sigil is optional so this reads what the trigger hands over as well as what somebody
-    /// wrote. Read from the right, because the id is the part that is always there and the rest
-    /// fills in from the outside: `a/b/c/d` is not a deeper address, it is a typo.
+    /// Read `$iota-mu`, `$review/iota-mu` or `$magi/review/iota-mu`, with or without the sigil.
     #[must_use]
     pub fn read(written: &str) -> Option<Self> {
         let body = written.strip_prefix('$').unwrap_or(written);
@@ -211,7 +238,6 @@ impl Address {
         }
     }
 
-    /// The address as somebody would type it.
     #[must_use]
     pub fn written(&self) -> String {
         let mut out = String::from("$");
@@ -227,36 +253,38 @@ impl Address {
         out
     }
 
-    /// The full name, filling the gaps in from whoever is asking.
+    /// The full name, with the gaps filled in: the project from whoever is asking, the role from
+    /// the target's own note. An unqualified name borrowing the asker's role reported every
+    /// message as landing in an inbox belonging to somebody with a role the target does not have.
     #[must_use]
     pub fn against(&self, asker: &Identity) -> Identity {
+        let project = self
+            .project
+            .clone()
+            .unwrap_or_else(|| asker.project.clone());
+        let role = self.role.clone().unwrap_or_else(|| {
+            roles::role_in(&project, &self.id).map_or_else(|| roles::MAIN.to_owned(), |it| it.name)
+        });
         Identity {
-            project: self
-                .project
-                .clone()
-                .unwrap_or_else(|| asker.project.clone()),
-            role: self.role.clone().unwrap_or_else(|| asker.role.clone()),
+            project,
+            role,
             id: self.id.clone(),
         }
     }
 }
 
-/// The directory a project's sockets live in.
 #[must_use]
 pub fn home(project: &str) -> PathBuf {
     runtime().join(crate::NAME).join(safe(project))
 }
 
-/// Where a session's socket is, by the only two parts of a name that place it.
-///
-/// No role. An id is already unique inside a project, so a role in the path would be a second
-/// key for the same door -- and a session that changed what it was for would move.
+/// Where a session's socket is. No role in the path: an id is already unique inside a project,
+/// and a session that changed what it was for would move.
 #[must_use]
 pub fn socket(project: &str, id: &str) -> PathBuf {
     home(project).join(safe(id))
 }
 
-/// Where a socket for `me` is put, so an instance can be reached by name.
 #[must_use]
 pub fn listening_at(me: &Identity) -> PathBuf {
     socket(&me.project, &me.id)
@@ -268,18 +296,14 @@ pub fn kin_at(me: &Identity) -> PathBuf {
     home(&me.project).join(format!("{}.parent", safe(&me.id)))
 }
 
-/// The directory sockets live in.
 fn runtime() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
 }
 
-/// Flatten one name into one path segment.
-///
-/// A project is the working directory's name and a directory can be called anything, including
-/// `..`. Anything that is not a letter, digit, dash or underscore becomes a dash, so a project
-/// called `../../etc` cannot name a directory outside the one this chose.
+/// Flatten one name into one path segment, so a project called `../../etc` cannot name a
+/// directory outside the one this chose.
 fn safe(name: &str) -> String {
     let flattened: String = name
         .chars()
@@ -299,56 +323,60 @@ fn safe(name: &str) -> String {
     }
 }
 
-/// Leave the note saying who started this session, so the tree can be read off the directory.
+/// Leave the notes saying who started this session, which run it is part of, and what it is for.
 ///
-/// A main writes none, and that absence is what says it is one.
-pub fn announce(me: &Identity) {
-    let Some(parent) = parent() else { return };
-    let path = kin_at(me);
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(path, parent);
+/// A main writes no parent, and that absence is what says it is one. `ui` is where the harness
+/// draws this agent, `None` for a session with no screen to offer.
+///
+/// # Errors
+/// When a note cannot be written. A child that could not write `.parent` reads as a main to every
+/// peer, with a main's reach, so the caller must refuse to come up rather than serve under it.
+pub fn announce(me: &Identity, role: &roles::Role, ui: Option<&Path>) -> Result<(), String> {
+    sessions::began(me)?;
+    roles::began(me, role)?;
+    screens::began(me, ui)?;
+    let Some(parent) = parent() else {
+        return Ok(());
+    };
+    wrote(&kin_at(me), &parent)
 }
 
-/// Take the note back down.
+/// Write one note beside a socket, naming the path in the error so a full filesystem and an
+/// unwritable runtime directory are told apart.
+pub(crate) fn wrote(path: &Path, said: &str) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|why| format!("{}: {why}", dir.display()))?;
+    }
+    std::fs::write(path, said).map_err(|why| format!("{}: {why}", path.display()))
+}
+
 pub fn forget(me: &Identity) {
     let _ = std::fs::remove_file(kin_at(me));
+    sessions::ended(me);
+    roles::ended(me);
+    screens::ended(me);
+    sending::ended(me);
+    claims::forget_in(&me.project, &me.id);
+    watches::forget_in(&me.project, &me.id);
 }
 
-/// Record that `them` now answers to `parent`.
-///
-/// Written by the session that *consented*, never by the one that asked. The note is what every
-/// other session reads to work out the tree, so a session that could write its own would be
-/// appointing its own parent — which is the whole thing the handshake exists to prevent.
-///
-/// It says nothing about what the child may then do. That is handed over separately, by the
-/// parent's harness to the child's, so a forged note buys the forger a word and no authority.
-///
-/// `parent` is an **id**, not a full name: it is what every reader of this note compares against
-/// — [`children`] and [`policy::between`] both test it against a bare id — and a full name here
-/// matches nothing. Written that way once, the adopted session read as a *cousin* to the very
-/// session that had just accepted it, which was then refused for reaching another instance's
-/// subagent.
-pub fn adopted(them: &Identity, parent: &str) {
-    let path = kin_at(them);
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(path, parent);
+/// Record that `them` now answers to `parent`, written by the session that consented rather than
+/// the one that asked. `parent` is an id, not a full name: [`children`] and [`policy::between`]
+/// both compare it against a bare id.
+pub fn adopted(them: &Identity, parent: &str) -> Result<(), String> {
+    wrote(&kin_at(them), parent)
 }
 
-/// Tell whoever asked what was decided.
-///
-/// Sent as an ordinary message, because that is what it is once the decision is made — and it
-/// goes into their inbox where a model will read it. Told either way: a refusal that arrived as
-/// silence is one a session cannot tell from an answer that never came, and it would wait for
-/// good.
-/// `handover` is whatever the accepting harness wants the adopted one to have, carried unread.
-/// It goes by a separate call from the message, because the message ends up in a transcript a
-/// model reads and this must not: what a harness lends a session it has taken on is not something
-/// a model should be able to read, reason about, or ask for more of.
-pub fn answer_request(who: &str, me: &Identity, accept: bool, handover: Option<&str>) {
+/// Tell whoever asked what was decided, either way, as an ordinary message. `handover` and the
+/// stop `secret` go by a separate `adopted` call so what a harness lends, and the token that ends
+/// the session, never land in an inbox a model reads.
+pub fn answer_request(
+    who: &str,
+    me: &Identity,
+    accept: bool,
+    handover: Option<&str>,
+    secret: Option<&str>,
+) {
     let Some(them) = Identity::read(who) else {
         return;
     };
@@ -368,25 +396,23 @@ pub fn answer_request(who: &str, me: &Identity, accept: bool, handover: Option<&
         ],
     );
     if accept {
-        // Second, and only on a yes. The order matters no more than that both arrive; what
-        // matters is that they are two calls, so the payload never lands in an inbox.
+        let text = |value: Option<&str>| {
+            value.map_or(serde_json::Value::Null, |said| {
+                serde_json::Value::String(said.to_owned())
+            })
+        };
         let _ = held.call(
             "adopted",
             vec![
                 serde_json::Value::String(me.full()),
-                handover.map_or(serde_json::Value::Null, |said| {
-                    serde_json::Value::String(said.to_owned())
-                }),
+                text(handover),
+                text(secret),
             ],
         );
     }
 }
 
 /// A name nothing in `project` is already listening under.
-///
-/// The two halves: [`crate::identity::free_of`] knows how to pick a name, and this module knows
-/// which names are in use. They were one function in `identity`, which is what made that module
-/// depend on this one — and this one already depends on it, for the type.
 #[must_use]
 pub fn free_in(project: &str) -> Identity {
     crate::identity::free_of(project, &listening(project))
@@ -394,43 +420,26 @@ pub fn free_in(project: &str) -> Identity {
 
 /// Open a connection to the session named `them`, as `me`.
 ///
-/// Here rather than on [`Held`](crate::asking::Held), which is where it was. A connection knows
-/// how to speak to a socket; *which* socket a name means is this module's whole subject, and
-/// having the constructor resolve it made `asking` depend on `directory` and `directory` depend
-/// on `asking` — one of three cycles among these four modules, and the one that made the other
-/// two hard to see.
-///
 /// # Errors
-/// When nothing is listening under that name, which is the ordinary answer for a session that
-/// has ended: the socket file outlives the process that made it.
+/// When nothing is listening under that name: the socket file outlives the process that made it.
 pub fn dial(them: &Identity, me: &Identity) -> std::io::Result<crate::asking::Held> {
     crate::asking::Held::at(&listening_at(them), me)
 }
 
-/// What is known about a session in `project`, read off the directory.
-///
-/// Read rather than asked, so a session cannot describe its own place in the tree. The answer is
-/// the same whether it is running, busy, or wedged.
+/// What is known about a session, read off the directory rather than asked of the session itself.
 #[must_use]
 pub fn whom(project: &str, id: &str) -> Whom {
-    let kin = home(project).join(format!("{}.parent", safe(id)));
     Whom {
         project: project.to_owned(),
         id: id.to_owned(),
-        parent: std::fs::read_to_string(kin)
-            .ok()
-            .map(|name| name.trim().to_owned())
-            .filter(|name| !name.is_empty()),
+        parent: parent_note(project, id),
+        session: sessions::session_in(project, id),
+        root: root_of(project, id),
     }
 }
 
-/// Every session currently listening in `project`.
-///
-/// Read from the directory rather than from a registry somebody has to keep up to date: a
-/// process that died did not get to remove itself from a list, and a socket file that nothing
-/// answers is discovered on the first call rather than trusted forever.
-///
-/// Only this project's, because there is no argument for any other and no way to ask for one.
+/// Every session currently listening in `project`, read off the directory and dial-tested, with
+/// anything that no longer answers swept on the way past.
 #[must_use]
 pub fn listening(project: &str) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(home(project)) else {
@@ -439,15 +448,9 @@ pub fn listening(project: &str) -> Vec<String> {
     let mut out: Vec<String> = entries
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        // The `.parent` notes sit beside the sockets. An id is two Greek words and a dash, so
-        // anything with a dot in it is not one.
+        // The notes sit beside the sockets, and an id is two Greek words and a dash.
         .filter(|name| !name.contains('.') && !name.is_empty())
         .filter(|id| {
-            // Dialled, not merely found. This is what the paragraph above promises and what the
-            // code did not do: a name was listed because a file was there, so every session that
-            // crashed — and every one from a build that named its socket differently — stayed in
-            // the roster for good. A model was then offered names nobody answered, and found out
-            // one failed send at a time.
             if answers(&socket(project, id)) {
                 return true;
             }
@@ -459,40 +462,33 @@ pub fn listening(project: &str) -> Vec<String> {
     out
 }
 
-/// Whether anything is serving at `path`.
-///
-/// Connecting is the whole test, and the only one that cannot be raced: a path is not a session,
-/// and the file outlives the process that made it. A listener answers from the moment it is
-/// bound — the kernel queues the connection whether or not anybody has called accept — so this
+/// Whether anything is serving at `path`. A listener answers from the moment it is bound, so this
 /// is never a false negative against a session that is merely busy.
 #[must_use]
 pub fn answers(path: &Path) -> bool {
     std::os::unix::net::UnixStream::connect(path).is_ok()
 }
 
-/// Take a dead session out of the directory: its socket, and the note beside it.
-///
-/// Swept where the roster is read, because the sessions needing a sweep are exactly the ones
-/// that never got to run their own exit path. Anything already gone is not an error — two
-/// sessions may notice the same corpse at once.
+/// Take a dead session out of the directory: its socket, the notes beside it, and its claims.
 fn forget_id(project: &str, id: &str) {
     let _ = std::fs::remove_file(socket(project, id));
     let _ = std::fs::remove_file(home(project).join(format!("{}.parent", safe(id))));
+    sessions::forget_in(project, id);
+    roles::forget_in(project, id);
+    screens::forget_in(project, id);
+    sending::forget_in(project, id);
+    claims::forget_in(project, id);
 }
 
-/// Last one out turns off the lights: drop the project's directory if nothing is left in it.
-///
-/// `remove_dir` refuses a directory that still holds something, which is exactly the test — no
-/// listing, and no race against a session binding as this one leaves. Without it a machine
-/// collects an empty directory per project, which is how the runtime directory filled up.
+/// Drop the project's directory if nothing is left in it.
 pub fn leave(project: &str) {
+    // The claims directory first: an empty one left inside would keep the project's alive.
+    claims::leave(project);
     let _ = std::fs::remove_dir(home(project));
 }
 
-/// Everyone `me` may actually reach, with how they stand to it.
-///
-/// The list the model is shown. Filtered here rather than at the point of calling, so a session
-/// is never told about something it would then be refused — which reads as a broken tool.
+/// Everyone `me` may actually reach, with how they stand to it, filtered so a session is never
+/// told about something it would then be refused.
 #[must_use]
 pub fn reachable(me: &Whom) -> Vec<(Whom, policy::Relation)> {
     listening(&me.project)
@@ -507,11 +503,8 @@ pub fn reachable(me: &Whom) -> Vec<(Whom, policy::Relation)> {
         .collect()
 }
 
-/// Whether a path is one this process may listen on.
-///
-/// Belt and braces against the flattening above: a socket path is built from a name that came off a wire,
-/// and a name is not a promise. Two levels below the runtime root and no more, so neither half
-/// can climb.
+/// Whether a path is one this process may listen on: two levels below the runtime root and no
+/// more, so neither half of a name that came off a wire can climb.
 #[must_use]
 pub fn inside(path: &Path) -> bool {
     let root = runtime().join(crate::NAME);
@@ -523,7 +516,6 @@ pub fn inside(path: &Path) -> bool {
             .all(|part| part.as_os_str() != std::ffi::OsStr::new(".."))
 }
 
-/// A name parses, resolves, and cannot escape the project it belongs to.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,6 +544,55 @@ mod tests {
     }
 
     #[test]
+    fn an_unqualified_name_wears_the_target_s_role_and_never_the_asker_s() {
+        let project = crate::scratch::Project::new("melchior-address", "role");
+        roles::given(&project, "iota-mu", &roles::Role::new("reviewer", None)).expect("the note");
+        let asker = Identity {
+            project: project.to_string(),
+            role: "coordinator".to_owned(),
+            id: "alpha-rho".to_owned(),
+        };
+        let whole = Address::read("$iota-mu")
+            .expect("an address")
+            .against(&asker);
+        assert_eq!(whole.role, "reviewer", "it reported the asker's own role");
+        assert_eq!(whole.full(), format!("{project}/reviewer/iota-mu"));
+    }
+
+    #[test]
+    fn a_target_nobody_has_described_is_a_main_rather_than_whatever_the_asker_is() {
+        let project = crate::scratch::Project::new("melchior-address", "unknown");
+        let asker = Identity {
+            project: project.to_string(),
+            role: "coordinator".to_owned(),
+            id: "alpha-rho".to_owned(),
+        };
+        let whole = Address::read("$nobody-nowhere")
+            .expect("an address")
+            .against(&asker);
+        assert_eq!(
+            whole.role,
+            roles::MAIN,
+            "an unknown target borrowed the asker's role"
+        );
+    }
+
+    #[test]
+    fn a_role_written_into_the_name_still_wins_over_the_note() {
+        let project = crate::scratch::Project::new("melchior-address", "written");
+        roles::given(&project, "iota-mu", &roles::Role::new("reviewer", None)).expect("the note");
+        let asker = Identity {
+            project: project.to_string(),
+            role: "main".to_owned(),
+            id: "alpha-rho".to_owned(),
+        };
+        let whole = Address::read("$scratch/iota-mu")
+            .expect("an address")
+            .against(&asker);
+        assert_eq!(whole.role, "scratch");
+    }
+
+    #[test]
     fn a_three_part_name_gives_everything() {
         let address = Address::read("$other/review/eta-nu").expect("an address");
         assert_eq!(address.against(&asker()).full(), "other/review/eta-nu");
@@ -559,8 +600,6 @@ mod tests {
 
     #[test]
     fn the_role_in_an_address_never_decides_which_socket_is_meant() {
-        // A role is what a session says it is for. Two addresses that differ only there are the
-        // same session, and a lookup that read the role would have made them two.
         let one = Address::read("$review/iota-mu").expect("an address");
         let other = Address::read("$scratch/iota-mu").expect("an address");
         let asker = asker();
@@ -605,8 +644,6 @@ mod tests {
 
     #[test]
     fn each_project_gets_its_own_directory() {
-        // The project wall, put in the filesystem: another project's sessions are not refused,
-        // they are somewhere this one never lists.
         let mine = home("magi");
         let theirs = home("other");
         assert_ne!(mine, theirs);
@@ -646,105 +683,18 @@ mod tests {
 
     #[test]
     fn a_session_with_no_note_beside_it_is_a_main() {
-        // Absence is the whole of what makes one, so the fallback has to be that and not an
-        // error: a directory that cannot be read must not turn a main into a subagent.
+        // A directory that cannot be read must not turn a main into a subagent.
         let unknown = whom("no-such-project-here", "iota-mu");
         assert!(unknown.is_main());
     }
 
     #[test]
     fn listening_answers_nothing_rather_than_failing_with_no_directory() {
-        // Nothing has started here yet, which is every project until something does.
         assert!(listening("no-such-project-here").is_empty());
     }
 }
 
 /// A note written by a consenting parent is one every reader agrees with.
 #[cfg(test)]
-mod adopting {
-    use super::*;
-
-    /// A project of its own, so these do not read each other's directory.
-    fn alone(name: &str) -> String {
-        let project = format!("melchior-adopt-{}-{name}", std::process::id());
-        let _ = std::fs::remove_dir_all(home(&project));
-        project
-    }
-
-    fn id(project: &str, id: &str) -> Identity {
-        Identity {
-            project: project.to_owned(),
-            role: "main".to_owned(),
-            id: id.to_owned(),
-        }
-    }
-
-    #[test]
-    fn the_adopted_session_reads_as_the_adopters_child() {
-        // The bug this is here for: the note was written as a full name and every reader
-        // compares it against a bare id, so the child read as a *cousin* — and the session that
-        // had just accepted it was refused for reaching another instance's subagent.
-        let project = alone("child");
-        let parent = id(&project, "beta-omicron");
-        let child = id(&project, "psi-eta");
-        std::fs::create_dir_all(home(&project)).expect("mkdir");
-
-        adopted(&child, &parent.id);
-
-        let theirs = whom(&project, &child.id);
-        let mine = whom(&project, &parent.id);
-        assert_eq!(
-            policy::between(&mine, &theirs),
-            policy::Relation::Child,
-            "the adopter does not see a child"
-        );
-        assert_eq!(
-            policy::between(&theirs, &mine),
-            policy::Relation::Parent,
-            "the adopted does not see a parent"
-        );
-        let _ = std::fs::remove_dir_all(home(&project));
-    }
-
-    #[test]
-    fn and_shows_up_as_one_of_the_adopters_children() {
-        // The other reader of the same note, and it compares the same way.
-        let project = alone("listed");
-        let parent = id(&project, "beta-omicron");
-        std::fs::create_dir_all(home(&project)).expect("mkdir");
-        adopted(&id(&project, "psi-eta"), &parent.id);
-        // `children` only counts sessions that are listening, so this asserts the note is read
-        // rather than that the pair is live.
-        assert_eq!(
-            whom(&project, "psi-eta").parent.as_deref(),
-            Some("beta-omicron")
-        );
-        let _ = std::fs::remove_dir_all(home(&project));
-    }
-
-    #[test]
-    fn a_session_reads_its_own_parent_off_the_note_rather_than_its_environment() {
-        // Being adopted happens from outside: no variable can be set on a running process. Read
-        // from the environment alone, an adopted session went on calling itself a main while
-        // everybody else saw a child — and the rule against a second parent tests exactly that.
-        let project = alone("mine");
-        let child = id(&project, "psi-eta");
-        std::fs::create_dir_all(home(&project)).expect("mkdir");
-        assert_eq!(parent_of(&child), None, "it starts with nobody");
-        adopted(&child, "beta-omicron");
-        assert_eq!(parent_of(&child).as_deref(), Some("beta-omicron"));
-        let _ = std::fs::remove_dir_all(home(&project));
-    }
-    #[test]
-    fn dialling_a_name_nobody_is_listening_under_is_an_error() {
-        // The half that used to live on `Held::to`: a name resolves to a path, and a path with
-        // nothing behind it is an error rather than a wait. A socket file outlives the process
-        // that made it, so this is the ordinary answer for a session that ended.
-        let missing = Identity {
-            project: "no-such-project-here".to_owned(),
-            role: "main".to_owned(),
-            id: "nobody-nowhere".to_owned(),
-        };
-        assert!(dial(&missing, &missing).is_err());
-    }
-}
+#[path = "directory/adopting.rs"]
+mod adopting;

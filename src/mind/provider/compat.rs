@@ -1,12 +1,5 @@
-//! The quirks one adapter has to absorb to serve twenty vendors.
-//!
-//! Every field here exists because some provider that claims to speak OpenAI Chat Completions
-//! does not, in one specific way. Pi carries the same struct and detects a default from the
-//! base URL; a model overrides a field only when detection got it wrong.
-//!
-//! This is what makes a provider a table row instead of a module. Without it, each vendor's
-//! deviation becomes its own adapter, and Tau's 66,310 lines for three backends is what that
-//! costs.
+//! The quirks one adapter absorbs to serve many vendors: each field is a way some provider that
+//! claims to speak OpenAI Chat Completions does not.
 
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +14,6 @@ pub enum MaxTokensField {
 }
 
 impl MaxTokensField {
-    /// The JSON key to write.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -50,11 +42,7 @@ pub enum ThinkingFormat {
     Qwen,
 }
 
-/// Overrides for one model's protocol quirks.
-///
-/// Every field is optional: `None` means "take what the base URL implies". A `Compat` with
-/// everything set is a provider detection cannot recognise, which is a bug report, not a
-/// design.
+/// Overrides for one model's protocol quirks; `None` means "take what the base URL implies".
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Compat {
     /// Whether `store` is accepted.
@@ -69,10 +57,8 @@ pub struct Compat {
     /// Whether `stream_options: {include_usage: true}` yields token counts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_usage_in_streaming: Option<bool>,
-    /// Whether streamed chunks carry `finish_reason`.
-    ///
-    /// When they do not, the stop reason is inferred from whether tool calls arrived — which
-    /// is why a missing `finish_reason` is a compat flag and not a parse error.
+    /// Whether streamed chunks carry `finish_reason`. Without it the stop reason is inferred from
+    /// whether tool calls arrived.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_finish_reason: Option<bool>,
     /// Which field caps the response length.
@@ -89,42 +75,25 @@ pub struct Compat {
     pub thinking_format: Option<ThinkingFormat>,
 }
 
-/// A `Compat` with every question answered.
-///
-/// Serialisable because this, not the sparse `Compat`, is what a protocol description is
-/// handed. A description that had to write `compat.thinking_format or "openai"` would be
-/// keeping a second copy of the defaults, in another language, for the two of them to disagree
-/// about later.
+/// A `Compat` with every question answered, which is what a protocol description is handed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct Resolved {
-    /// Whether `store` is accepted.
     pub supports_store: bool,
-    /// Whether the `developer` role is accepted.
     pub supports_developer_role: bool,
-    /// Whether `reasoning_effort` is accepted.
     pub supports_reasoning_effort: bool,
-    /// Whether streaming reports usage.
     pub supports_usage_in_streaming: bool,
-    /// Whether streaming reports a finish reason.
     pub supports_finish_reason: bool,
-    /// Which field caps the response length.
     pub max_tokens_field: MaxTokensField,
-    /// Whether a tool result must repeat the tool's name.
     pub requires_tool_result_name: bool,
-    /// Whether thinking must be flattened into text.
     pub requires_thinking_as_text: bool,
-    /// How reasoning is requested.
     pub thinking_format: ThinkingFormat,
 }
 
 impl Default for Resolved {
-    /// What an OpenAI-compatible endpoint does unless it says otherwise.
-    ///
-    /// The conservative reading, not OpenAI's own: the `store` field, the `developer` role and
-    /// the `max_completion_tokens` spelling are OpenAI extensions that most copies reject, so
-    /// a provider opts into them rather than out. A wrong default that omits a field degrades;
-    /// one that sends an unknown field is a 400.
+    /// What an OpenAI-compatible endpoint does unless it says otherwise: `store`, the `developer`
+    /// role and `max_completion_tokens` are OpenAI extensions most copies reject, so a provider
+    /// opts into them. A wrong default that omits a field degrades; one that sends it is a 400.
     fn default() -> Self {
         Self {
             supports_store: false,
@@ -142,12 +111,6 @@ impl Default for Resolved {
 
 impl Compat {
     /// Apply these overrides to the conservative defaults.
-    ///
-    /// There is no host sniffing here on purpose. Pi infers a dialect from the base URL, which
-    /// means every vendor it supports is named in an adapter; magi keeps vendors in the
-    /// catalog, so a provider states its own dialect and this crate stays free of vendor names.
-    /// A proxy or a self-hosted endpoint declares what it actually speaks instead of being
-    /// guessed at from a hostname that no longer resembles the vendor's.
     #[must_use]
     pub fn resolve(self) -> Resolved {
         let d = Resolved::default();
@@ -178,13 +141,8 @@ impl Compat {
 }
 
 impl Compat {
-    /// Layer these overrides on top of `base`, field by field.
-    ///
-    /// Per field, not per struct. A provider says what its whole endpoint does and a model
-    /// states the one thing it does differently; taking the model's table wholesale would
-    /// throw away everything the provider said, so a model that corrects one flag would
-    /// silently un-correct the rest. That is a bug you find as a 400 from one model on a
-    /// provider whose other models work.
+    /// Layer these overrides on top of `base`, field by field rather than per struct, so a model
+    /// correcting one flag keeps everything else its provider said.
     #[must_use]
     pub fn over(self, base: Option<Self>) -> Self {
         let Some(base) = base else { return self };

@@ -1,46 +1,21 @@
-//! What one magi calls itself.
-//!
-//! `project/role/id` — the folder you are in, what this session is for, and which session it is.
-//! Three parts because sessions talk to each other, and a name that says only "magi" answers
-//! none of the questions a message arriving from one would raise: *whose* work, doing *what*,
-//! and *which* of the several you have open.
-//!
-//! - **project** is the working directory's name, so it needs no configuration to be right. A
-//!   `.magi.lua` may override it, and that is one of the few things a project file may say about
-//!   itself: naming yourself carries no authority.
-//! - **role** is what this session is for. `main` today; multi-agent will fill it.
-//! - **id** tells two sessions in one directory apart. Two Greek words, because they are short,
-//!   pronounceable over a desk, and there are enough of them.
-//!
-//! # The name and the address are not the same length
-//!
-//! The socket is `<project>/<id>` — no role — and that is deliberate rather than an oversight.
-//! An id is already unique inside a project, so a role in the path would be a second key for the
-//! same door, and a session that changed what it was for would move.
-//!
-//! So the role is what a session *says about itself*, and the id is where it *is*. Permission
-//! never reads the role for the same reason: a session that could pick its own role could pick
-//! `main` and claim a main's reach. What decides that is the tree — see
-//! [`crate::policy`].
+//! What one magi calls itself: `project/role/id` — the working directory's name, which a
+//! `.magi.lua` may override, what this session is for, and which session it is. The socket
+//! address is `<project>/<id>` with no role, because an id is already unique inside a project and
+//! a session that changed what it was for would otherwise move. Permission never reads the role,
+//! since a session picks its own; what decides reach is the tree — see [`crate::policy`].
 
-/// The default role, until there is more than one.
 const ROLE: &str = "main";
 
 /// What a session calls itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
-    /// The working directory's name, or what a project file called it.
     pub project: String,
-    /// What this session is for.
     pub role: String,
-    /// Which session this is.
     pub id: String,
 }
 
 impl Identity {
-    /// Work out who this session is.
-    ///
-    /// `named` is what a config called the project, if it said anything.
+    /// Work out who this session is, `named` being what a config called the project.
     #[must_use]
     pub fn here(named: Option<&str>) -> Self {
         let project = named
@@ -61,12 +36,8 @@ impl Identity {
         format!("{}/{}/{}", self.project, self.role, self.id)
     }
 
-    /// Read one back, from a name that came off the wire.
-    ///
-    /// Three parts, or two with the role left out — `magi/alpha-rho` is what an older session
-    /// or a hand-written client sends, and refusing it would break the one thing a name is for.
-    /// Anything else is not a short form of something, it is a session that will not be found,
-    /// and `None` says so where a guess would have resolved to somebody else.
+    /// Read one back from a name that came off the wire: three parts, or two with the role left
+    /// out, which is what an older session or a hand-written client sends.
     #[must_use]
     pub fn read(whole: &str) -> Option<Self> {
         let parts: Vec<&str> = whole.split('/').filter(|part| !part.is_empty()).collect();
@@ -86,11 +57,7 @@ impl Identity {
     }
 }
 
-/// The working directory's own name.
-///
-/// The last component, not the path: `/home/you/work/magi` is `magi`, because that is what a
-/// person calls it. A directory with no name -- the root -- falls back to something rather than
-/// to an empty half of a name.
+/// The working directory's own name: the last component, not the path, and never empty.
 fn folder() -> String {
     std::env::current_dir()
         .ok()
@@ -109,10 +76,7 @@ const GREEK: [&str; 24] = [
     "psi", "omega",
 ];
 
-/// A name for this session.
-///
-/// Drawn from the clock, which is enough: this distinguishes the handful of magi sessions somebody has
-/// open, not the rows of a database.
+/// A name for this session, drawn from the clock.
 fn name() -> String {
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -120,29 +84,14 @@ fn name() -> String {
     from_seed(seed)
 }
 
-/// A name none of `taken` is already listening under.
-///
-/// **Naming belongs here, not to a harness.** A harness that named itself would be choosing out
-/// of a namespace it cannot see: two started in the same second draw the same clock, and the
-/// collision surfaces only as one of them failing to bind — by which point it has already told
-/// somebody what it is called.
-///
-/// The taken names are a parameter rather than read from the directory, which is where they
-/// come from. Picking a name and knowing which names are in use are two different things, and
-/// having this read the directory made a module about *what a session is called* depend on the
-/// module about *where sessions listen* — which depends on this one back.
-/// [`crate::directory::free_in`] is the pair of them.
-///
-/// Still a guess, deliberately. The look and the bind are not one act, so two callers a
-/// microsecond apart can still agree on a name; what this removes is the *likely* collision,
-/// and the bind settles the rest.
+/// A name none of `taken` is already listening under. The taken names are a parameter rather
+/// than read from the directory, so this module and [`crate::directory::free_in`] do not depend
+/// on each other; still a guess, because the look and the bind are not one act.
 #[must_use]
 pub fn free_of(project: &str, taken: &[String]) -> Identity {
     let from = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.subsec_nanos() as usize);
-    // Every pair, walking on from wherever the clock landed, so a busy project moves through the
-    // space rather than retrying the same handful of names.
     let picked = (0..GREEK.len() * (GREEK.len() - 1))
         .map(|step| from_seed(from.wrapping_add(step)))
         .find(|name| !taken.contains(name))
@@ -154,24 +103,8 @@ pub fn free_of(project: &str, taken: &[String]) -> Identity {
     }
 }
 
-/// A secret to hand a session being started, which a `stop` has to quote back.
-///
-/// **Not a name.** A name is public — it is on the directory, every sibling can read it, and it
-/// is meant to be. This is the opposite: the one thing that distinguishes the harness that
-/// started a session from every other party that can see it exists, and the whole of what makes
-/// `stop` refusable. It never goes to disk and never into a transcript.
-///
-/// Read from the kernel, because a secret derived from a clock is one anybody who knows roughly
-/// when the session started can produce. Sixteen bytes as hex: long enough that guessing is not
-/// a strategy, short enough to sit in an environment variable.
-///
-/// Straight from `/dev/urandom` rather than through a crate. This is Linux-only software and
-/// that file is the kernel's answer; a dependency here would be one more edge on the graph for
-/// four lines that cannot be got wrong.
-///
-/// # Panics
-/// If the kernel will not produce randomness, which is not a condition to carry on under —
-/// continuing would mean minting a predictable secret and calling it one.
+/// A secret to hand a session being started, which a `stop` has to quote back: sixteen bytes of
+/// `/dev/urandom` as hex, never written to disk or into a transcript.
 #[must_use]
 pub fn secret() -> String {
     use std::io::Read;
@@ -182,17 +115,11 @@ pub fn secret() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The name a seed picks, so the shape can be tested without waiting for a clock.
-///
-/// Always a pair — `delta-rho`, never `delta`. One word looks like a placeholder and reads as
-/// though the second half went missing, and a single alphabet runs out at two dozen, which is
-/// few enough that somebody with several projects open would meet a collision. The two never
-/// match, because `rho-rho` reads as a bug in whatever printed it.
+/// The name a seed picks, always a pair of different words — `delta-rho`, never `delta` and
+/// never `rho-rho`.
 #[must_use]
 fn from_seed(seed: usize) -> String {
     let first = seed % GREEK.len();
-    // Offset from the first rather than chosen independently, so the two can never land on the
-    // same word without throwing away the seeds that would have.
     let apart = 1 + (seed / GREEK.len()) % (GREEK.len() - 1);
     format!("{}-{}", GREEK[first], GREEK[(first + apart) % GREEK.len()])
 }
@@ -216,8 +143,6 @@ mod tests {
 
     #[test]
     fn a_name_with_the_role_left_out_still_reads() {
-        // What an older session, or somebody writing a frame by hand, sends. Refusing it would
-        // break the one thing a name is for.
         let short = Identity::read("magi/delta-rho").expect("a name");
         assert_eq!(short.project, "magi");
         assert_eq!(short.id, "delta-rho");
@@ -234,14 +159,12 @@ mod tests {
     #[test]
     fn a_config_may_name_the_project_and_an_empty_name_is_not_a_name() {
         assert_eq!(Identity::here(Some("chosen")).project, "chosen");
-        // Otherwise `magi.project = ""` produces `/main/delta-rho`, which reads as a bug.
         assert_eq!(Identity::here(Some("   ")).project, folder());
         assert_eq!(Identity::here(None).project, folder());
     }
 
     #[test]
     fn the_project_is_the_folder_rather_than_the_path() {
-        // `/home/you/work/magi` is `magi`, because that is what a person calls it.
         assert!(!folder().contains('/'), "{}", folder());
         assert!(!folder().is_empty());
     }
@@ -260,7 +183,6 @@ mod tests {
 
     #[test]
     fn the_two_halves_are_never_the_same_word() {
-        // `rho-rho` reads as a bug in whatever printed it.
         for seed in 0..2000 {
             let id = from_seed(seed);
             let (first, second) = id.split_once('-').expect("a pair");
@@ -270,7 +192,6 @@ mod tests {
 
     #[test]
     fn there_are_enough_of_them_to_go_round() {
-        // Two dozen was few enough that somebody with several projects open would collide.
         let mut seen: Vec<String> = (0..600).map(from_seed).collect();
         seen.sort_unstable();
         seen.dedup();
@@ -279,7 +200,6 @@ mod tests {
 
     #[test]
     fn a_name_never_contains_the_separator_it_is_joined_with() {
-        // Otherwise `project/role/id` cannot be split back into three.
         for seed in 0..1000 {
             assert!(!from_seed(seed).contains('/'), "{}", from_seed(seed));
         }

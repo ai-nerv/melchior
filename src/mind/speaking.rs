@@ -1,16 +1,13 @@
-//! The mind on the command line, in either encoding.
+//! The mind on the command line, in either encoding: JSON to read, CBOR to keep a signature
+//! byte-for-byte.
 //!
-//! Two ways in and the same answers out of both. A sibling with a Lua VM dials the socket and
-//! gets JSON, because the family's stub cannot decode anything else. A sibling that would rather
-//! spawn than dial runs this, and picks: JSON to read, CBOR to keep a signature byte-for-byte.
-//!
-//! The reply is the family's shape either way — `{"ok":true,"n":N,"result":[…]}` — because a
-//! caller should not need a second parser to find out that a call was refused. A refusal is a
-//! reply with `ok:false`, and the exit status stays zero: a non-zero exit is how a program says
-//! it did not run, and melchior answering "no" is not that.
+//! The reply is the family's shape either way — `{"ok":true,"n":N,"result":[…]}`. A refusal is a
+//! reply with `ok:false` and the exit status stays zero, a non-zero exit being reserved for
+//! melchior not running at all.
 
 use crate::mind::catalog::Catalog;
 use crate::mind::wire::{Ask, Said};
+use crate::wire::{Fault, Reply};
 use std::io::Write;
 
 /// Which encoding an answer goes out in.
@@ -35,40 +32,30 @@ impl As {
 }
 
 /// Write one reply in the family's shape.
-///
-/// # Errors
-/// When the answer will not encode, or stdout will not take it.
 pub fn reply<T: serde::Serialize>(
     out: &mut impl Write,
     how: As,
     values: &[T],
 ) -> std::io::Result<()> {
-    let body = serde_json::json!({
-        "ok": true,
-        "family": crate::wire::FAMILY,
-        "n": values.len(),
-        "result": values.iter().map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null)).collect::<Vec<_>>(),
-    });
-    emit(out, how, &body)
+    let rows = values
+        .iter()
+        .map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null))
+        .collect();
+    emit(out, how, &Reply::rows(rows))
 }
 
 /// Write one refusal, which is a reply and not an error.
-///
-/// # Errors
-/// When stdout will not take it.
-pub fn refuse(out: &mut impl Write, how: As, why: &str, fault: &str) -> std::io::Result<()> {
-    let body = serde_json::json!({
-        "ok": false,
-        "family": crate::wire::FAMILY,
-        "error": why,
-        "fault": fault,
-    });
-    emit(out, how, &body)
+pub fn refuse(out: &mut impl Write, how: As, why: &str, fault: Fault) -> std::io::Result<()> {
+    emit(out, how, &Reply::no(why, fault))
 }
 
-fn emit(out: &mut impl Write, how: As, body: &serde_json::Value) -> std::io::Result<()> {
+/// The one place a command-line answer becomes bytes, so both doors carry the same [`Reply`].
+fn emit(out: &mut impl Write, how: As, body: &Reply) -> std::io::Result<()> {
     match how {
-        As::Json => writeln!(out, "{body}"),
+        As::Json => {
+            let line = serde_json::to_string(body).map_err(std::io::Error::other)?;
+            writeln!(out, "{line}")
+        }
         As::Cbor => {
             let mut bytes = Vec::new();
             ciborium::into_writer(body, &mut bytes).map_err(std::io::Error::other)?;
@@ -78,9 +65,6 @@ fn emit(out: &mut impl Write, how: As, body: &serde_json::Value) -> std::io::Res
 }
 
 /// `melchior models` — what this machine could talk to.
-///
-/// # Errors
-/// When the answer will not be written.
 pub fn models(flags: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
     let how = As::asked(flags);
     let mut out = std::io::stdout().lock();
@@ -96,7 +80,37 @@ pub fn models(flags: &std::collections::BTreeMap<String, String>) -> std::io::Re
             }
             reply(&mut out, how, &cards)
         }
-        Err(why) => refuse(&mut out, how, &why.to_string(), "refused"),
+        Err(why) => refuse(&mut out, how, &why.to_string(), Fault::Refused),
+    }
+}
+
+/// `melchior card --model provider/model` — one model in full, for a card to be drawn from.
+pub fn card(flags: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
+    let how = As::asked(flags);
+    let mut out = std::io::stdout().lock();
+    let Some(asked) = flags.get("model") else {
+        return refuse(
+            &mut out,
+            how,
+            "which model: --model provider/model",
+            Fault::Refused,
+        );
+    };
+    match Catalog::load(&Catalog::dir()) {
+        Ok(catalog) => match catalog.find(asked) {
+            Some((provider, model)) => reply(
+                &mut out,
+                how,
+                &[crate::mind::describing::describe(provider, model)],
+            ),
+            None => refuse(
+                &mut out,
+                how,
+                &format!("{asked} is not in the catalog"),
+                Fault::Refused,
+            ),
+        },
+        Err(why) => refuse(&mut out, how, &why.to_string(), Fault::Refused),
     }
 }
 
@@ -105,9 +119,6 @@ pub fn models(flags: &std::collections::BTreeMap<String, String>) -> std::io::Re
 /// The request arrives on stdin, in the encoding named by the flags. Every [`Said`] is written
 /// as it arrives — one line of JSON, or one CBOR value — so a caller sees the answer forming
 /// rather than waiting for the whole of it.
-///
-/// # Errors
-/// When the request will not decode, or the answer will not be written.
 pub fn ask(flags: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
     let how = As::asked(flags);
     let mut out = std::io::stdout().lock();
@@ -124,7 +135,7 @@ pub fn ask(flags: &std::collections::BTreeMap<String, String>) -> std::io::Resul
             &mut out,
             how,
             &format!("that is not an ask: {why}"),
-            "refused",
+            Fault::Refused,
         );
     };
 
@@ -145,9 +156,6 @@ pub fn ask(flags: &std::collections::BTreeMap<String, String>) -> std::io::Resul
 }
 
 /// Write one [`Said`] as it happens.
-///
-/// # Errors
-/// When stdout will not take it.
 pub fn stream(out: &mut impl Write, how: As, said: &Said) -> std::io::Result<()> {
     match how {
         As::Json => {
@@ -164,19 +172,71 @@ pub fn stream(out: &mut impl Write, how: As, said: &Said) -> std::io::Result<()>
 }
 
 /// `melchior needs` — what this sibling wants to be told.
-///
-/// # Errors
-/// When the answer will not be written.
 pub fn needs(flags: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
     let how = As::asked(flags);
     let mut out = std::io::stdout().lock();
     reply(&mut out, how, &crate::mind::setup::needs())
 }
 
-/// `melchior configure` — read config Lua on stdin and apply it.
+/// `melchior acknowledge` — clear the packages under `site/pack/`, so their declarations may run
+/// until the file they were cleared for changes.
+pub fn acknowledge(flags: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
+    let how = As::asked(flags);
+    let dir = crate::mind::catalog::Catalog::dir();
+    let files: Vec<(std::path::PathBuf, String)> =
+        crate::mind::plugins::runtimepath(&crate::mind::plugins::Roots::at(&dir))
+            .into_iter()
+            .filter(|(_, trust)| trust.needs_acknowledging())
+            .filter_map(|(path, _)| {
+                std::fs::read_to_string(&path)
+                    .ok()
+                    .map(|source| (path, source))
+            })
+            .collect();
+
+    let manifest = crate::mind::acknowledged::manifest_in(&dir);
+    let mut out = std::io::stdout().lock();
+    match crate::mind::acknowledged::acknowledge(&manifest, &files) {
+        Ok(_) => reply(
+            &mut out,
+            how,
+            &files
+                .iter()
+                .map(|(path, _)| serde_json::json!({ "acknowledged": path.display().to_string() }))
+                .collect::<Vec<_>>(),
+        ),
+        Err(why) => refuse(&mut out, how, &why, Fault::Refused),
+    }
+}
+/// `melchior verbs` — what this instance answers.
 ///
-/// # Errors
-/// When the chunk cannot be read, or the answer cannot be written.
+/// In the family reply shape, so another program can parse the self-description.
+pub fn verbs(flags: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
+    let how = As::asked(flags);
+    let mut out = std::io::stdout().lock();
+    // The registrar surface rides on the self-description and nowhere else.
+    let mut body = Reply::rows(doors());
+    body.surface = Some(crate::wire::SURFACE);
+    emit(&mut out, how, &body)
+}
+
+/// Every verb this program answers, one row per verb per door. Three tables, not one: a verb
+/// reachable on two doors is two rows, because what a caller needs is where to knock and a
+/// deduplicated name says nothing about that.
+fn doors() -> Vec<serde_json::Value> {
+    crate::wire::CLI_VERBS
+        .iter()
+        .map(|(verb, about)| serde_json::json!({ "verb": verb, "about": about, "door": "cli" }))
+        .chain(crate::wire::VERBS.iter().map(
+            |(verb, about)| serde_json::json!({ "verb": verb, "about": about, "door": "socket" }),
+        ))
+        .chain(crate::verbs::VERBS.iter().map(
+            |(verb, about)| serde_json::json!({ "verb": verb, "about": about, "door": "tool" }),
+        ))
+        .collect()
+}
+
+/// `melchior configure` — read config Lua on stdin and apply it.
 pub fn configure(flags: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
     let how = As::asked(flags);
     let mut out = std::io::stdout().lock();
@@ -192,7 +252,7 @@ pub fn configure(flags: &std::collections::BTreeMap<String, String>) -> std::io:
         Ok(applied) => reply(&mut out, how, &[applied]),
         // A chunk that will not run is a refusal, not a crash: the coordinator sent something,
         // and what it needs back is which part was wrong.
-        Err(why) => refuse(&mut out, how, &why, "refused"),
+        Err(why) => refuse(&mut out, how, &why, Fault::Refused),
     }
 }
 
@@ -227,7 +287,7 @@ mod tests {
     #[test]
     fn a_refusal_is_a_reply_and_says_which_kind() {
         let mut out = Vec::new();
-        refuse(&mut out, As::Json, "no such model", "refused").expect("write");
+        refuse(&mut out, As::Json, "no such model", Fault::Refused).expect("write");
         let value: serde_json::Value = serde_json::from_slice(&out).expect("decode");
         assert_eq!(value["ok"], serde_json::json!(false));
         assert_eq!(value["fault"], serde_json::json!("refused"));
@@ -268,22 +328,92 @@ mod tests {
 }
 
 #[cfg(test)]
+mod door_tests {
+    use super::*;
+
+    fn rows() -> Vec<serde_json::Value> {
+        doors()
+    }
+
+    fn on(door: &str) -> Vec<String> {
+        rows()
+            .into_iter()
+            .filter(|row| row["door"] == serde_json::json!(door))
+            .filter_map(|row| row["verb"].as_str().map(ToOwned::to_owned))
+            .collect()
+    }
+
+    #[test]
+    fn every_row_names_one_of_the_three_doors_and_says_what_it_does() {
+        for row in rows() {
+            let door = row["door"].as_str().expect("a door");
+            assert!(
+                ["cli", "socket", "tool"].contains(&door),
+                "`{door}` is not a door FAMILY.md knows: {row}"
+            );
+            assert!(row["verb"].as_str().is_some_and(|v| !v.is_empty()), "{row}");
+            assert!(
+                row["about"].as_str().is_some_and(|v| !v.is_empty()),
+                "{row}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_tool_door_is_advertised_whole() {
+        // The eleven coordination verbs were dispatched and named on no door at all.
+        let listed = on("tool");
+        for (verb, _) in crate::verbs::VERBS {
+            assert!(
+                listed.iter().any(|named| named == verb),
+                "`{verb}` is answered by the tool and advertised nowhere: {listed:?}"
+            );
+        }
+        assert_eq!(listed.len(), crate::verbs::VERBS.len());
+    }
+
+    #[test]
+    fn each_door_advertises_its_own_table_and_nothing_is_deduplicated_away() {
+        assert_eq!(on("cli").len(), crate::wire::CLI_VERBS.len());
+        assert_eq!(on("socket").len(), crate::wire::VERBS.len());
+        // The verbs on more than one door: each is listed once per door it is actually on.
+        for verb in ["verbs", "needs", "inbox", "role", "stop", "status", "adopt"] {
+            let doors: Vec<&str> = ["cli", "socket", "tool"]
+                .into_iter()
+                .filter(|door| on(door).iter().any(|named| named == verb))
+                .collect();
+            assert!(
+                doors.len() > 1,
+                "`{verb}` is on one door only, so this test is watching the wrong verb"
+            );
+        }
+    }
+
+    #[test]
+    fn a_verb_a_door_does_not_answer_is_not_listed_on_it() {
+        // The tool's own vocabulary is not reachable by `melchior crew` and never claims to be.
+        for verb in ["crew", "claim", "claims", "release", "whoami", "announce"] {
+            assert!(!on("cli").contains(&(*verb).to_owned()), "{verb}");
+            assert!(!on("socket").contains(&(*verb).to_owned()), "{verb}");
+            assert!(on("tool").contains(&(*verb).to_owned()), "{verb}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod family_tests {
     use super::*;
 
     #[test]
     fn a_one_shot_reply_says_which_wire_it_is() {
-        // The socket has carried this since the version check landed; these did not, so the only
-        // replies in the family with no version on them were the ones a coordinator reads first.
-        // A missing `family` is taken for a peer older than the check — exactly the wrong thing
-        // to say about the current build.
+        // A missing `family` is taken for a peer older than the version check.
         let mut out = Vec::new();
         reply(&mut out, As::Json, &["a"]).expect("write");
         let value: serde_json::Value = serde_json::from_slice(&out).expect("decode");
         assert_eq!(value["family"], serde_json::json!(crate::wire::FAMILY));
 
         let mut refused = Vec::new();
-        refuse(&mut refused, As::Json, "no", "refused").expect("write");
+        refuse(&mut refused, As::Json, "no", Fault::Refused).expect("write");
         let value: serde_json::Value = serde_json::from_slice(&refused).expect("decode");
         assert_eq!(
             value["family"],

@@ -1,60 +1,28 @@
-//! The family's framing: four bytes of length, then the body — in JSON or in CBOR.
-//!
-//! Not `magi_ipc`, which is what the UI and the daemon speak to each other. That is CBOR
-//! inside an `Envelope` carrying a protocol version, and it is right for two halves of one
-//! program that ship together — a peer from another build should be turned away at the
-//! boundary rather than after its fields have been read.
-//!
-//! This socket is the opposite case. Anything may knock on it: another magi, a sibling tool,
-//! somebody with `socat` working out why a message never arrived. So it speaks what the family
-//! agreed and what [`crate::wire`] documents — a big-endian `u32`, then the body, and nothing
-//! wrapped around it.
-//!
-//! **JSON by default, CBOR when that is what turned up.** One shape in two encodings: a reply
-//! goes back in whichever the call arrived in, decided from the body's first byte rather than
-//! negotiated. The person with `socat` still gets text, because that is what they sent.
-//!
-//! **This was the bug this file exists to fix.** The socket was framed with `magi_ipc` and
-//! documented as JSON, which is the failure the family's own guidance names first: it works
-//! perfectly when magi talks to magi, and no sibling can say a word to it. Nothing inside the
-//! tool that owns it can see that — every test passes, both ends agree — and it presents much
-//! later as "that peer never answers".
-//!
-//! Both a blocking and an asynchronous half, because the two ends really are different: the
-//! listener lives in a UI that must not block, and the caller is a tool peer whose whole job is
-//! one round trip.
+//! The family's framing: a big-endian `u32` of length, then the body, with nothing wrapped
+//! around it — not the `magi_ipc` envelope the UI and the daemon speak to each other. Anything
+//! may knock on this socket, so it speaks what [`crate::wire`] documents. JSON by default and
+//! CBOR when that is what turned up: a reply goes back in whichever encoding the call arrived
+//! in, decided from the body's first byte rather than negotiated. Both a blocking and an
+//! asynchronous half, since the listener lives in a UI that must not block and the caller is a
+//! peer whose whole job is one round trip.
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::io::{Read, Write};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-/// The largest frame either end will read or write.
-///
-/// A message between instances is a sentence, not a payload. Small on purpose: the socket is
-/// reachable by anything running as this user, and an unbounded read is a way to make a session
-/// allocate until it dies.
+/// The largest frame either end will read or write: the socket is reachable by anything running
+/// as this user, and an unbounded read is a way to make a session allocate until it dies.
 pub const MOST: usize = 1 << 20;
 
-/// Which encoding a body is in.
-///
-/// One shape, two encodings. JSON is what the family agreed and what somebody with `socat` can
-/// read; CBOR is the same message for a caller that is only going to parse it.
-///
-/// **Copied rather than shared**, like the framing around it — a crate held in common would be a
-/// dependency between repositories, and this family has none. Each copy is small enough to read
-/// in one sitting and is tested where it lives.
-///
-/// **Nothing is negotiated.** A body says which it is in its first byte: JSON's top level here is
-/// an object or an array, so it begins `{` or `[`; CBOR's is a map or an array, whose first byte
-/// is `0x80`–`0xBF`. The ranges do not overlap. So a reply goes back in whatever the call arrived
-/// in, and a peer that has never heard of CBOR is unaffected.
+/// Which encoding a body is in. Nothing is negotiated: a body says which it is in its first
+/// byte, since JSON's top level here is an object or an array and so begins `{` or `[`, while
+/// CBOR's is a map or an array, whose first byte is `0x80`–`0xBF`. The ranges do not overlap.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Wire {
     /// Text. The default, and what every peer understands.
     #[default]
     Json,
-    /// Bytes, for a caller that is not going to read it.
     Cbor,
 }
 
@@ -69,9 +37,6 @@ impl Wire {
     }
 
     /// Read `body` as `T`, in whichever encoding it is.
-    ///
-    /// # Errors
-    /// When the body is not that shape.
     pub fn read_any<T: DeserializeOwned>(body: &[u8]) -> std::io::Result<T> {
         match Self::of(body) {
             Self::Json => serde_json::from_slice(body).map_err(std::io::Error::other),
@@ -80,9 +45,6 @@ impl Wire {
     }
 
     /// Encode `value` in this encoding.
-    ///
-    /// # Errors
-    /// When the value will not encode.
     pub fn encode<T: Serialize>(self, value: &T) -> std::io::Result<Vec<u8>> {
         match self {
             Self::Json => serde_json::to_vec(value).map_err(std::io::Error::other),
@@ -123,10 +85,7 @@ pub async fn read<T: DeserializeOwned, R: AsyncRead + Unpin>(from: &mut R) -> st
     read_wire(from).await.map(|(value, _)| value)
 }
 
-/// The same, saying which encoding it arrived in.
-///
-/// What a server needs in order to answer in kind: the encoding is a property of the bytes that
-/// turned up, not of anything either end was told beforehand.
+/// The same, saying which encoding it arrived in, which is what a server needs to answer in kind.
 pub async fn read_wire<T: DeserializeOwned, R: AsyncRead + Unpin>(
     from: &mut R,
 ) -> std::io::Result<(T, Wire)> {
@@ -146,9 +105,6 @@ pub async fn write<T: Serialize, W: AsyncWrite + Unpin>(
 }
 
 /// Write one message in `how`.
-///
-/// # Errors
-/// When the value will not encode, or the stream will not take it.
 pub async fn write_as<T: Serialize, W: AsyncWrite + Unpin>(
     to: &mut W,
     how: Wire,
@@ -173,9 +129,6 @@ pub fn write_to<T: Serialize, W: Write>(to: &mut W, value: &T) -> std::io::Resul
 }
 
 /// Write one message in `how`, to a blocking stream.
-///
-/// # Errors
-/// When the value will not encode, or the stream will not take it.
 pub fn write_to_as<T: Serialize, W: Write>(
     to: &mut W,
     how: Wire,
@@ -185,7 +138,6 @@ pub fn write_to_as<T: Serialize, W: Write>(
     to.flush()
 }
 
-/// What goes on the wire is what the documentation says goes on the wire.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,8 +145,6 @@ mod tests {
 
     #[test]
     fn a_frame_is_four_bytes_of_length_and_then_json() {
-        // The whole point of the file. Somebody with `socat` and this documentation has to be
-        // able to read what comes out, or the family contract is a comment.
         let out = framed(
             Wire::Json,
             &Call {
@@ -212,13 +162,7 @@ mod tests {
 
     #[test]
     fn nothing_is_wrapped_around_the_body() {
-        // No envelope and no length repeated inside: a sibling reads the object it was promised
-        // or the contract was never real.
-        //
-        // `family` is a field of that object, not a wrapper around it — and it is here because
-        // "no version" turned out to mean four implementations that already disagree about the
-        // same reply, with nothing to say so. See `wire::FAMILY`. A reader that does not know
-        // the field ignores it, which is what makes adding it safe.
+        // `family` is a field of the object, not a wrapper around it. See `wire::FAMILY`.
         let out = framed(Wire::Json, &Reply::done()).expect("frames");
         let body: serde_json::Value = serde_json::from_slice(&out[4..]).expect("decodes");
         let keys: Vec<&str> = body
@@ -255,8 +199,6 @@ mod tests {
 
     #[test]
     fn a_frame_claiming_more_than_the_cap_is_refused_before_anything_is_allocated() {
-        // The socket is reachable by anything running as this user, and a length field is the
-        // cheapest way to ask a session to allocate until it dies.
         let huge = u32::try_from(MOST + 1).expect("fits").to_be_bytes();
         assert!(expecting(huge).is_err());
         assert!(expecting(u32::MAX.to_be_bytes()).is_err());
@@ -304,7 +246,6 @@ mod encoding_tests {
 
     #[tokio::test]
     async fn a_frame_is_read_back_in_whichever_it_was_written() {
-        // What the socket does: written one way, read without being told which way.
         for how in [Wire::Json, Wire::Cbor] {
             let mut buffer = Vec::new();
             write_as(&mut buffer, how, &Reply::done())

@@ -206,13 +206,33 @@ local function be32(s)
   return s:byte(1) * 16777216 + s:byte(2) * 65536 + s:byte(3) * 256 + s:byte(4)
 end
 
--- Read exactly `n` bytes, however many reads that takes.
-local function exactly(handle, n)
+-- Take the connection down, and say why it went.
+--
+-- Nothing in a reply says which call it answers: the two ends are held in step by position alone,
+-- one reply per call in the order the calls were made. So a call whose reply was abandoned — a
+-- read timeout, a frame read in half — has left an answer on the wire that would be read as the
+-- *next* call's, and every answer after that would belong to the call before it. The connection
+-- goes instead, and the handle with it, so the guard at the top of `Session:call` refuses the
+-- next one rather than something further down indexing a nil. Dial again.
+--
+-- See FAMILY.md, "A caller that abandons a call abandons the connection".
+local function adrift(session, why)
+  if session.handle then
+    session.handle:close()
+    session.handle = nil
+  end
+  return (why or "the connection failed")
+    .. " — this connection is closed, because a reply left on the wire would answer the next call"
+end
+
+-- Read exactly `n` bytes, however many reads that takes. Every read this library does is here, so
+-- a failure taking the connection with it is settled once and a reader written later inherits it.
+local function exactly(session, n)
   local parts, have = {}, 0
   while have < n do
-    local chunk, why = handle:recv(n - have)
-    if not chunk then return nil, why end
-    if #chunk == 0 then return nil, "the session closed the connection" end
+    local chunk, why = session.handle:recv(n - have)
+    if not chunk then return nil, adrift(session, why) end
+    if #chunk == 0 then return nil, adrift(session, "the session closed the connection") end
     parts[#parts + 1] = chunk
     have = have + #chunk
   end
@@ -234,12 +254,14 @@ Session.__index = Session
 function Session:call(name, ...)
   if not self.handle then return nil, "this connection is closed" end
   local request = encode({ call = name, args = { ... }, from = self.from, token = self.token })
+  -- A send that failed may still have put part of the frame on the wire, and the far end reads
+  -- what follows as the rest of it.
   local sent, why = self.handle:send(frame(request))
-  if not sent then return nil, why end
+  if not sent then return nil, adrift(self, why) end
 
-  local head, gone = exactly(self.handle, 4)
+  local head, gone = exactly(self, 4)
   if not head then return nil, gone end
-  local body, cut = exactly(self.handle, be32(head))
+  local body, cut = exactly(self, be32(head))
   if not body then return nil, cut end
 
   local reply = decode(body)
@@ -268,14 +290,48 @@ local SURFACE = {
   "verbs", "client",
   "identity", "kin", "status", "inbox", "needs",
   "tell",
+  -- What a session is for. Answered for the session itself and for the one that started it,
+  -- and for nobody else -- and it is worth nothing to either of them: no wall, no reach and no
+  -- verb reads a role, which is the only reason a session may name itself.
+  "role",
+  -- The adoption handshake, both halves. `adopt` puts the question and a person answers it;
+  -- `adopted` is that answer coming back, and is believed only from the session the directory
+  -- already calls this one's parent.
+  "adopt", "adopted",
+  -- A session's own: every other caller is refused. Attached anyway, because the caller that
+  -- may ask is the harness holding this very session, and it reaches it through this library.
+  "mint", "minted",
   -- The one act the far end cannot decline, so the one that has to prove itself: it carries the
   -- secret the session was started with, and a session nobody started holds none.
   "stop",
+  -- The model's coordination vocabulary, the same surface `melchior tool` runs on the command
+  -- line: `them.tool({ verb = "…", … })`. A session's own only, and answered as it because the far
+  -- end takes who is calling from the kernel. This is how a harness reaches it through the library.
+  "tool",
 }
+
+-- The verbs that answer one row per thing rather than one row that is the answer.
+--
+-- `result` is the rows and `n` is how many, so a listing arrives here as N return values. Gathered
+-- back into a table, because `#them.inbox()` is what a caller asking for an inbox wants and is
+-- what `ipairs` reads. Every other verb answers one value and is handed over untouched.
+local LISTINGS = {
+  verbs = true, needs = true, inbox = true,
+}
+
+--- Gather a listing verb's rows into one table, leaving every other verb alone.
+local function gathered(verb, ...)
+  if not LISTINGS[verb] then return ... end
+  local out = table.pack(...)
+  -- A refusal is `nil, why` and passes through as it stands.
+  if out.n > 0 and out[1] == nil then return ... end
+  out.n = nil
+  return out
+end
 
 local function attach(session)
   for _, verb in ipairs(SURFACE) do
-    session[verb] = function(...) return session:call(verb, ...) end
+    session[verb] = function(...) return gathered(verb, session:call(verb, ...)) end
   end
   return session
 end
@@ -441,7 +497,7 @@ function M.fetch(where, verb, ...)
   if not session then return nil, why end
   local answers = table.pack(session:call(verb, ...))
   session:close()
-  return table.unpack(answers, 1, answers.n)
+  return gathered(verb, table.unpack(answers, 1, answers.n))
 end
 
 --- This file's own source, as the session it is talking to has it.

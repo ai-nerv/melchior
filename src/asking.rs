@@ -1,23 +1,6 @@
-//! Reaching another instance.
-//!
-//! The other half of [`crate::serving`], and deliberately blocking. The caller is a tool peer
-//! whose whole existence is one round trip — it has no UI to keep responsive and no turn to
-//! yield to — and a blocking socket there is a dozen lines where an async one would be a
-//! runtime, a spawn and a channel to carry the answer back out of it.
-//!
-//! # One connection, several calls
-//!
-//! [`Held`] stays open until it is dropped. Closing after each call is the tempting
-//! simplification and it is the one the family's own guidance warns about: a client that holds a
-//! connection is the obvious way to write one, and it dies on its *second* call with a broken
-//! pipe. `list`, `status` on each of them, then `send` to one is four calls and one connection.
-//!
-//! # Every call says who is making it
-//!
-//! Not as courtesy — [`crate::answering`] refuses anything but `verbs` without it, because
-//! every other verb is about that session and a stranger has no standing to ask. The name is
-//! taken at face value; what it buys is a *relation*, which is read off the directory at the
-//! far end and is not the caller's to claim.
+//! Reaching another instance: the other half of [`crate::serving`], and deliberately blocking.
+//! [`Held`] stays open across calls — a client that closes after each one dies on its second with
+//! a broken pipe. Every call names its caller, or the far end answers `verbs` and nothing else.
 
 use crate::framing;
 use crate::identity::Identity;
@@ -27,12 +10,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
-/// How long to wait for a connection, and then for each answer.
-///
-/// A session mid-turn answers its socket from another task, so this is not "how long a turn
-/// takes" — it is how long a *healthy* peer can take to notice a frame. Long enough to survive
-/// a loaded machine, short enough that a wedged instance does not hold a tool call open until
-/// the model gives up on it.
+/// How long to wait for a connection, and then for each answer from a healthy peer.
 const PATIENCE: Duration = Duration::from_secs(10);
 
 /// An open connection to one instance.
@@ -40,27 +18,29 @@ pub struct Held {
     stream: UnixStream,
     /// Who this session is, put on every call.
     me: String,
+    /// Whether a call went out whose reply was never read to the end. One reply per call and
+    /// nothing in a reply that says which call it answers, so an abandoned one is still in the
+    /// stream: the next call would read it as its own answer, and every answer after that would
+    /// belong to the call before it. See FAMILY.md.
+    adrift: bool,
 }
 
 impl Held {
     /// Open a connection to whatever is listening at `path`.
     pub fn at(path: &Path, me: &Identity) -> std::io::Result<Self> {
         let stream = UnixStream::connect(path)?;
-        // Both directions: a peer that accepted and then never answered would otherwise hold
-        // this open for as long as it felt like, and the tool call with it.
+        // Both directions: a peer that accepted and never answered would hold this open, and the
+        // tool call with it.
         stream.set_read_timeout(Some(PATIENCE))?;
         stream.set_write_timeout(Some(PATIENCE))?;
         Ok(Self {
             stream,
             me: me.full(),
+            adrift: false,
         })
     }
 
-    /// Make one call and read its answer.
-    ///
-    /// A refusal comes back as a [`Reply`] with `ok: false`, not as an error: that is the
-    /// family's shape, and it is the difference between "no such call: nope", which says what
-    /// to fix, and "connection reset", which does not.
+    /// Make one call and read its answer. A refusal comes back as a [`Reply`] with `ok: false`.
     pub fn call(&mut self, verb: &str, args: Vec<serde_json::Value>) -> std::io::Result<Reply> {
         self.ask(Call {
             call: verb.to_owned(),
@@ -70,11 +50,8 @@ impl Held {
         })
     }
 
-    /// The same, carrying the secret the far end was started with.
-    ///
-    /// Only `stop` needs one. Kept separate rather than an `Option` on every call so a verb
-    /// cannot pick up a secret by accident, and so the one place a secret is sent is one line
-    /// that can be read.
+    /// The same, carrying the secret the far end was started with. Only `stop` needs one; kept
+    /// separate so a verb cannot pick one up by accident.
     pub fn call_with(
         &mut self,
         verb: &str,
@@ -89,10 +66,31 @@ impl Held {
         })
     }
 
-    /// Write one call, read one reply.
+    /// Write one call, read one reply. A call that did not get its whole answer takes the
+    /// connection with it: what it is still owed arrives on this stream and nowhere else, and
+    /// reading it means waiting for a call this side has already given up on.
     fn ask(&mut self, call: Call) -> std::io::Result<Reply> {
-        framing::write_to(&mut Writing(&self.stream), &call)?;
-        framing::read_from(&mut Reading(&self.stream))
+        if self.adrift {
+            return Err(std::io::Error::other(
+                "this connection is closed: a reply left on the wire would answer the next call",
+            ));
+        }
+        // Set before the write, not after: a request half written is one the far end will finish
+        // reading out of whatever is sent next.
+        self.adrift = true;
+        let answered = framing::write_to(&mut Writing(&self.stream), &call)
+            .and_then(|()| framing::read_from(&mut Reading(&self.stream)));
+        match answered {
+            Ok(reply) => {
+                self.adrift = false;
+                Ok(reply)
+            }
+            Err(why) => {
+                // So the far end learns too, rather than answering into a socket nobody reads.
+                let _ = self.stream.shutdown(std::net::Shutdown::Both);
+                Err(why)
+            }
+        }
     }
 }
 
@@ -101,10 +99,10 @@ struct Writing<'a>(&'a UnixStream);
 
 impl Write for Writing<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        (&*self.0).write(buf)
+        self.0.write(buf)
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        (&*self.0).flush()
+        self.0.flush()
     }
 }
 
@@ -113,22 +111,18 @@ struct Reading<'a>(&'a UnixStream);
 
 impl Read for Reading<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        (&*self.0).read(buf)
+        self.0.read(buf)
     }
 }
 
-/// Whether anything is actually listening as `them`.
-///
-/// A socket file outlives the process that made it, so the directory says who *was* here. This
-/// is the cheapest question that distinguishes a running session from a crash's leftovers, and
-/// it is worth asking before a message is reported as delivered.
+/// Whether anything is actually listening as `them`. A socket file outlives the process that made
+/// it, so the directory only says who *was* here.
 #[must_use]
 pub fn answers(where_it_is: &Path, me: &Identity) -> bool {
     match Held::at(where_it_is, me) {
         Ok(_) => true,
         Err(why) => {
-            // The only place the reason survives. The caller wants a yes or a no, and "the
-            // socket is stale" and "the peer accepted and then hung up" are the same no.
+            // The only place the reason survives: the caller wants a yes or a no.
             crate::noted!(
                 "asking: nothing answers at {}: {why}",
                 where_it_is.display()
@@ -138,7 +132,20 @@ pub fn answers(where_it_is: &Path, me: &Identity) -> bool {
     }
 }
 
-/// A refusal is a reply, and a caller always says who it is.
+/// The phase `them` reports off its `status`, or `None` when it does not answer or does not say —
+/// so a reader like `crew` can show what each agent is doing, not only that it is there.
+#[must_use]
+pub fn phase(where_it_is: &Path, me: &Identity) -> Option<String> {
+    let mut held = Held::at(where_it_is, me).ok()?;
+    let reply = held.call("status", Vec::new()).ok()?;
+    reply
+        .result
+        .first()?
+        .get("phase")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,11 +160,10 @@ mod tests {
 
     #[test]
     fn a_call_carries_the_caller_s_name() {
-        // Without it the far end answers `verbs` and refuses everything else, which presents as
-        // "that instance does not work" rather than as a client that forgot to introduce itself.
         let held = Held {
             // Any fd will do: nothing is written, and building the frame is what is under test.
             stream: UnixStream::pair().expect("a pair").0,
+            adrift: false,
             me: me().full(),
         };
         let call = Call {
@@ -172,10 +178,10 @@ mod tests {
 
     #[test]
     fn a_round_trip_over_a_real_socket_pair_reads_back() {
-        // The framing and the two halves of one stream, over something a kernel made.
         let (mine, theirs) = UnixStream::pair().expect("a pair");
         let mut held = Held {
             stream: mine,
+            adrift: false,
             me: me().full(),
         };
         let answering = std::thread::spawn(move || {
@@ -195,9 +201,52 @@ mod tests {
     }
 
     #[test]
+    fn a_call_that_did_not_get_its_answer_takes_the_connection_with_it() {
+        let (mine, theirs) = UnixStream::pair().expect("a pair");
+        let mut held = Held {
+            stream: mine,
+            adrift: false,
+            me: me().full(),
+        };
+        let (wrote, written) = std::sync::mpsc::channel::<()>();
+        let (done, finish) = std::sync::mpsc::channel::<()>();
+        let answering = std::thread::spawn(move || {
+            let _: Call = framing::read_from(&mut Reading(&theirs)).expect("the first call");
+            // A header past what this socket reads, with the connection still open on both
+            // sides: the shape a timeout has, reachable in no time at all.
+            (&theirs).write_all(&[0xff_u8; 4]).expect("a header");
+            wrote.send(()).ok();
+            // What that call was still owed, arriving after the caller has given up on it.
+            let _ = framing::write_to(
+                &mut Writing(&theirs),
+                &Reply::of(serde_json::json!("the answer to the first call")),
+            );
+            wrote.send(()).ok();
+            // Held open to the end, so a second call that went out would be answered rather than
+            // failing on a socket that had simply gone.
+            finish.recv().ok();
+        });
+
+        let gave_up = held
+            .call("status", Vec::new())
+            .expect_err("that reply cannot be read");
+        written.recv().expect("the header is written");
+        written.recv().expect("the abandoned reply is written");
+
+        let told = held
+            .call("status", Vec::new())
+            .expect_err("the second call must not be answered by the first call's reply");
+        assert!(
+            told.to_string().contains("closed"),
+            "left with `{told}` after `{gave_up}`"
+        );
+        done.send(()).ok();
+        answering.join().expect("the far end finished");
+    }
+
+    #[test]
     fn nothing_listening_is_an_error_rather_than_a_wait() {
-        // A path, not a name. Turning a name into a path is `directory::dial`'s job now, and
-        // this module no longer knows that sessions have names at all.
+        // A path, not a name: turning a name into a path is `directory::dial`'s job.
         assert!(!answers(std::path::Path::new("/no/such/socket"), &me()));
     }
 }

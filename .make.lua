@@ -220,16 +220,27 @@ make.alias("c", "compile")
 make.recipe{
   name = "gates",
   desc = "the architectural gates",
+  -- Globbed rather than listed. This named four gates one by one, and `tests.yml` globs and says
+  -- in as many words that a gate added to `scripts/` and forgotten here would be invisible --
+  -- which is what happened to `gate-sandbox` and `gate-independent` the moment they were written.
+  -- The three skipped have recipes of their own: two re-run the whole suite and one needs a built
+  -- binary, so a failure in them is attributable rather than reported as "the gates".
   run = function()
+    local mine = oslo.run{ "sh", "-c", "ls scripts/gate-*.sh", capture = true }
+    assert(mine.ok, "could not list scripts/")
+    local apart = { ["gate-hermetic"] = true, ["gate-family"] = true, ["gate-no-llm"] = true, ["gate-role"] = true }
     local failed = {}
-    for _, name in ipairs({ "gate-cycles", "gate-file-size", "gate-modules", "gate-wire" }) do
-      -- Executed, not handed to `sh`: the shebang is the portability contract, and CI runs
-      -- these on a machine whose /bin/sh is dash.
-      local result = oslo.run{ "scripts/" .. name .. ".sh", capture = true }
-      print((result.ok and "\u{2713}  %s" or "\u{2717}  %s"):format(name))
-      if not result.ok then
-        failed[#failed + 1] = name
-        print(((result.out or "") .. (result.err or "")))
+    for path in (mine.out or ""):gmatch("[^\n]+") do
+      local name = path:match("([^/]+)%.sh$")
+      if name and not apart[name] then
+        -- Executed, not handed to `sh`: the shebang is the portability contract, and CI runs
+        -- these on a machine whose /bin/sh is dash.
+        local result = oslo.run{ path, capture = true }
+        print((result.ok and "\u{2713}  %s" or "\u{2717}  %s"):format(name))
+        if not result.ok then
+          failed[#failed + 1] = name
+          print(((result.out or "") .. (result.err or "")))
+        end
       end
     end
     assert(#failed == 0, ("%d gate(s) failed"):format(#failed))
@@ -279,6 +290,38 @@ make.recipe{
 make.recipe{
   name = "verify",
   desc = "the whole local gate",
-  deps = { "fmt-check", "check", "test", "check-all", "test-all", "clippy", "rustdoc", "gates", "gate-hermetic", "machete" },
+  deps = { "fmt-check", "check", "test", "check-all", "test-all", "clippy", "rustdoc", "gates", "gate-hermetic", "gate-family", "gate-role", "machete" },
 }
 make.alias("v", "verify")
+
+-- The family contract: does this binary answer what FAMILY.md says every family program answers?
+--
+-- Its own recipe because it needs a *built binary* rather than a grep over the source, and
+-- because it is the one gate that would equally catch a fifth program written by somebody else.
+-- The two rules a reader cannot check are the ones it exists for: everything advertised is
+-- dispatched, and everything dispatched is advertised.
+make.recipe{
+  name = "gate-family",
+  desc = "the binary answers the family contract",
+  deps = { "build" },
+  run = function()
+    local where = "target/x86_64-unknown-linux-musl/release/melchior"
+    if not oslo.fs.exists(where) then where = "target/release/melchior" end
+    local ran = oslo.run{ "scripts/gate-family.sh", where  }
+    assert(ran.ok, "gate-family failed")
+  end,
+}
+
+-- The role, as against the family contract: what this program is *for*, not how it talks. See
+-- ROLES.md. Core verbs fail the gate; extensions are reported and do not.
+make.recipe{
+  name = "gate-role",
+  desc = "the binary fills the model role",
+  deps = { "build" },
+  run = function()
+    local where = "target/x86_64-unknown-linux-musl/release/melchior"
+    if not oslo.fs.exists(where) then where = "target/release/melchior" end
+    local ran = oslo.run{ "scripts/gate-role.sh", "model", where }
+    assert(ran.ok, "gate-role failed")
+  end,
+}

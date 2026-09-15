@@ -1,95 +1,36 @@
-//! What one instance says to another.
+//! What one instance says to another: every magi both listens and dials, and both halves are
+//! these types. Three transports, one encoding — argv answers one JSON object on stdout, a pipe
+//! carries newline-delimited JSON both ways, and a socket carries four bytes of big-endian
+//! length then JSON.
 //!
-//! **Mirrored on purpose.** Every magi both listens and dials, and both halves are these types:
-//! a main agent asking a fork what it is doing, and the fork asking back, are the same frames
-//! travelling the other way. There is no supervisor vocabulary and no worker vocabulary,
-//! because the moment there were two an agent could be one but not the other, and a subagent
-//! that cannot ask its parent a question is a subagent that has to guess.
-//!
-//! # The shape is the family's, not magi's
-//!
-//! ```text
-//! -> {"call":"status","args":[]}
-//! <- {"ok":true,"n":1,"result":[{"busy":false,…}]}
-//! ```
-//!
-//! Four-byte big-endian length, then the body. `result` is a **list** and `n` says how long it
-//! is, which matters more than it looks: hexe, oslo and aeon answer in exactly this shape, and a
-//! sibling that unpacks a list would read a bare value as *nothing at all*. `session()` would
-//! come back empty rather than wrong, and an empty answer looks like an empty session — so the
-//! bug presents as "that peer has no state" for as long as it takes somebody to put `socat` on
-//! the socket. It is settled here before either side ships.
-//!
-//! A refused call is a **reply**, not a dropped connection: `{"ok":false,"error":…}`. The caller
-//! then sees magi's error rather than a transport error, and "no such call: nope" says what to
-//! fix where "connection reset" does not.
-//!
-//! # How this family talks
-//!
-//! Three transports, two shapes, one encoding. Written out here because it was written out
-//! nowhere: four wires had grown four different ways to say the same thing — `say`/`heard`,
-//! `to`/`from`, `message`, and a call envelope — and nothing anywhere said which was meant.
-//!
-//! **Three transports, and the choice between them is about what is being asked.**
-//!
-//! | | |
-//! |---|---|
-//! | **argv** | a question with an answer and nothing to hold open. One JSON object on stdout. |
-//! | **pipe** | a parent and the child it started. Newline-delimited JSON, both directions. |
-//! | **socket** | anything may knock. Four bytes of big-endian length, then JSON. |
-//!
-//! JSON is on all three. It is the *encoding*, not a transport, and naming it as one is how the
-//! diagram of this family came to have "argv + json" on an edge.
-//!
-//! **Two shapes, and the difference is whether anybody is waiting.**
-//!
-//! A **call** is answered:
+//! Two shapes. A call is answered, and carries the revision it is written in:
 //!
 //! ```text
 //! -> {"call":"status","args":[]}
 //! <- {"ok":true,"family":1,"n":1,"result":[{"busy":false}]}
 //! ```
 //!
-//! An **event** is not:
+//! An event is not:
 //!
 //! ```text
 //! {"event":"listening","at":"…"}
 //! ```
 //!
-//! `result` is a **list** and `n` says how long it is: a sibling that unpacks a list would read
-//! a bare value as *nothing at all*, so an answer would come back empty rather than wrong — and
-//! an empty answer looks like an empty session. `family` says which revision of this the reply
-//! is written in; a reader refuses a number it does not know and tolerates one it predates.
-//!
-//! A refused call is a **reply**, not a dropped connection. The caller then sees the far end's
-//! error rather than a transport error, and "no such call: nope" says what to fix where
-//! "connection reset" does not.
-//!
-//! **The tag key is `event`, everywhere, in both directions.** `scripts/gate-wire.sh` refuses
-//! any other, because the failure mode is silent: casper is another checkout with its own copy
-//! of these frames, so when two spellings drift nothing fails — the surface simply stops being
-//! answered.
+//! `result` is a list and `n` says how long it is: a sibling that unpacks a list reads a bare
+//! value as nothing at all. A reader refuses a `family` it does not know and tolerates one it
+//! predates. A refused call is a reply, `{"ok":false,"error":…,"fault":…}`, not a drop. The
+//! tag key is `event` everywhere, in both directions; `scripts/gate-wire.sh` refuses any other.
 
 use serde::{Deserialize, Serialize};
 
-/// One call, as it arrives.
-///
-/// `call` and `args` are the family shape and nothing else belongs in them. `from` and `token`
-/// are magi`s own, and both are optional so a sibling tool poking the socket with `socat` still
-/// gets an answer to `verbs` rather than a parse error.
+/// One call, as it arrives: `call` and `args` are the family shape, and `from` and `token` are
+/// melchior's own, both optional so a sibling poking the socket still gets an answer to `verbs`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Call {
-    /// Which verb.
     pub call: String,
-    /// Its arguments, in order.
     #[serde(default)]
     pub args: Vec<serde_json::Value>,
-    /// Who is calling, as `project/role/id`.
-    ///
-    /// Taken at face value for everything but `stop`. It has to be: this is one user talking to
-    /// itself in one directory, and a check that cannot be enforced reads like security to
-    /// whoever comes along next. What it buys is a *relation* — the answer to "may I" is worked
-    /// out from the directory, not from anything else in this frame.
+    /// Who is calling, as `project/role/id`, taken at face value for everything but `stop`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
     /// The secret handed down at spawn, for the one verb that needs proof.
@@ -97,103 +38,102 @@ pub struct Call {
     pub token: Option<String>,
 }
 
-/// Which revision of the family wire this speaks.
-///
-/// **There was no version anywhere, in four implementations that already disagree.** melchior's
-/// reply always carries `n`; balthasar's makes it optional and adds a `fault` field melchior has
-/// never had. Both are "the family wire". A consumer meeting an unexpected shape today learns
-/// about it as a missing field at the point of use, which reads as the peer being broken rather
-/// than as the peer being a different version.
-///
-/// Carried on the reply rather than negotiated, because there is already a handshake: every
-/// client asks `verbs` before it asks anything else, so the first answer of every connection
-/// says what it is talking to and nothing extra crosses the wire.
-///
-/// The number is duplicated in each sibling for the same reason the types are — a shared crate
-/// would be a dependency between repositories, and this family has none. It is bumped when a
-/// consumer that does not know about a change would misread a reply, not when a field is added
-/// that an older reader ignores.
+/// Which revision of the family wire this speaks, carried on every reply rather than negotiated,
+/// and bumped only when a consumer that does not know about a change would misread a reply.
 pub const FAMILY: u16 = 1;
 
-/// One reply, as it goes back.
-///
-/// Built through [`Reply::of`] and [`Reply::refused`] rather than by hand, so the `n`/`result`
-/// invariant holds in one place instead of at every call site that answers.
+/// The revision of the registrar surface a plugin file is written against — the registrar names,
+/// the fields each declaration owes, what a callback is handed — reported on `verbs` beside
+/// `family`, and bumped only when something already published stops working. See EXTENDING.md.
+pub const SURFACE: u16 = 1;
+
+/// Which kind of "no" an answer is. A refusal costs the caller a feature; a failure costs it the
+/// turn that just happened. Absent on the wire reads as [`Fault::Refused`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Fault {
+    Refused,
+    Failed,
+}
+
+/// One reply, as it goes back. Built through [`Reply::of`] and [`Reply::refused`] rather than by
+/// hand, so the `n`/`result` invariant holds in one place.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Reply {
-    /// Whether the call was answered.
     pub ok: bool,
-    /// Which revision of the wire this reply is written in. See [`FAMILY`].
-    ///
-    /// Defaulted on the way in, so a reply from a peer built before this existed reads as `0` —
-    /// "from before versions" — rather than failing to parse. A reader refuses a number it does
-    /// not know and tolerates one it predates.
-    #[serde(default = "family")]
+    /// See [`FAMILY`]. Missing reads as `0`, which is what a peer from before the field existed
+    /// is; defaulting it to the current revision would make that peer indistinguishable from one
+    /// that named this one.
+    #[serde(default)]
     pub family: u16,
+    /// See [`SURFACE`]. Only ever set on `verbs`: a fact about the program, not about the reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<u16>,
     /// How many values came back. Always `result.len()`.
     #[serde(default)]
     pub n: usize,
-    /// The values, in order.
     #[serde(default)]
     pub result: Vec<serde_json::Value>,
     /// Why not, when `ok` is false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-}
-
-/// The version a reply is stamped with when it does not say.
-///
-/// Serde needs a function; `FAMILY` is the answer.
-fn family() -> u16 {
-    FAMILY
+    /// Which kind of no. See [`Fault`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault: Option<Fault>,
 }
 
 impl Reply {
-    /// An answer of one value.
     #[must_use]
     pub fn of(value: serde_json::Value) -> Self {
+        Self::rows(vec![value])
+    }
+
+    /// An answer of several values. A listing is the rows, not one row that is the list.
+    #[must_use]
+    pub fn rows(values: Vec<serde_json::Value>) -> Self {
         Self {
             ok: true,
             family: FAMILY,
-            n: 1,
-            result: vec![value],
+            surface: None,
+            n: values.len(),
+            result: values,
             error: None,
+            fault: None,
         }
     }
 
     /// An answer of none, for a verb that does something rather than reporting something.
     #[must_use]
     pub fn done() -> Self {
-        Self {
-            ok: true,
-            family: FAMILY,
-            n: 0,
-            result: Vec::new(),
-            error: None,
-        }
+        Self::rows(Vec::new())
     }
 
     /// A refusal, which is still a reply.
     #[must_use]
     pub fn refused(why: impl Into<String>) -> Self {
+        Self::no(why, Fault::Refused)
+    }
+
+    /// A no of a given kind.
+    #[must_use]
+    pub fn no(why: impl Into<String>, fault: Fault) -> Self {
         Self {
             ok: false,
-            family: FAMILY,
-            n: 0,
-            result: Vec::new(),
             error: Some(why.into()),
+            fault: Some(fault),
+            ..Self::done()
         }
     }
 }
 
-/// The verbs an instance answers.
+/// The verbs an instance answers on the socket; [`CLI_VERBS`] is what the command line answers,
+/// and the two are not the same set. `mint`, `minted` and `stop` are listed here and refused to
+/// every caller but the session itself: a verb that is answered and unlisted breaks "advertised
+/// equals dispatched" from the side nobody checks.
 ///
-/// A named, small subset, and deliberately not a mirror of everything magi can do. Most of what
-/// a session knows is meaningless to a peer and some of it is dangerous — anything that runs a
-/// command is a remote shell wearing a friendly name, and none of that is in the first cut.
-///
-/// `verbs` is here from the first version because it cannot be added quietly later: a family
-/// where one tool can be asked what it speaks and another cannot has stopped being a family.
+/// `identity` and `tell` are this door's names for what [`crate::verbs`] calls `whoami` and
+/// `send`, and are not aliases of them: this door answers a program with a record, and that one
+/// answers a model with a paragraph that also names what the session started.
 pub const VERBS: &[(&str, &str)] = &[
     ("verbs", "what this instance answers"),
     (
@@ -204,7 +144,7 @@ pub const VERBS: &[(&str, &str)] = &[
     ("needs", "what a coordinator may tell it, as declarations"),
     (
         "kin",
-        "how the caller stands to it: parent, child, sibling, main, cousin",
+        "how the caller stands to it: parent, child, sibling, kin, main, cousin",
     ),
     (
         "status",
@@ -213,23 +153,40 @@ pub const VERBS: &[(&str, &str)] = &[
     ("inbox", "messages it has been sent and not yet acted on"),
     ("tell", "put a message of any sort in its inbox"),
     (
+        "role",
+        "say what it is for: its own, or its parent's word for it",
+    ),
+    (
+        "adopt",
+        "ask it to become this session's parent — a person there has to accept",
+    ),
+    (
+        "adopted",
+        "tell it a parent has taken it on, and hand over what that parent lends",
+    ),
+    (
+        "mint",
+        "name a child and mint the secret that will stop it — this session's own",
+    ),
+    (
+        "minted",
+        "the secrets this session minted for what it started, by id — this session's own",
+    ),
+    (
         "stop",
         "end it — only from the session that started it, with the secret it was given",
     ),
+    (
+        "tool",
+        "run the model coordination vocabulary; the call's one argument carries {verb, …}",
+    ),
 ];
 
-/// What a message is for.
-///
-/// One inbox, sorted by what each thing is, rather than a channel per kind. A worker that has
-/// to poll five queues to find out what is happening will poll four of them and miss the fifth,
-/// and the one it misses is always the urgent one.
-///
-/// The sort is what makes a surface out of a pipe: `attention` and `note` travel identically and
-/// mean entirely different things to whoever reads them, and only the sender knows which it is.
+/// What a message is for. One inbox, sorted by what each thing is, rather than a channel per
+/// kind; the sort travels on the wire in lowercase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Sort {
-    /// Something worth knowing, wanting nothing back.
     #[default]
     Note,
     /// A question, which expects an [`Sort::Answer`] quoting its id.
@@ -238,18 +195,15 @@ pub enum Sort {
     Answer,
     /// "I need you." The one that is allowed to interrupt.
     Attention,
-    /// "I am taking this piece of work."
     Claim,
-    /// "I am done with it, or I never started."
     Release,
-    /// "This is yours now" — a piece of work moved, not copied.
+    /// A piece of work moved, not copied.
     Handoff,
     /// Something is wrong and the sender cannot go on.
     Trouble,
 }
 
 impl Sort {
-    /// Read what somebody wrote, or `None` if it is not one of these.
     #[must_use]
     pub fn read(name: &str) -> Option<Self> {
         Some(match name {
@@ -265,17 +219,12 @@ impl Sort {
         })
     }
 
-    /// Whether this is meant to reach somebody who is mid-turn.
-    ///
-    /// Only two things are: being asked for help, and being told something has gone wrong.
-    /// Everything else waits, because an inbox that interrupts for every note is an inbox
-    /// nobody leaves switched on.
+    /// Whether this is meant to reach somebody who is mid-turn. Everything else waits.
     #[must_use]
     pub fn interrupts(self) -> bool {
         matches!(self, Self::Attention | Self::Trouble)
     }
 
-    /// Whether the sender is waiting for something back.
     #[must_use]
     pub fn expects_an_answer(self) -> bool {
         matches!(self, Self::Question)
@@ -285,28 +234,30 @@ impl Sort {
 /// A message from one instance to another.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Message {
-    /// This message, so an answer can quote it.
     pub id: String,
     /// Who sent it, as `project/role/id`.
     pub from: String,
-    /// What kind of thing it is.
     #[serde(default)]
     pub sort: Sort,
-    /// What they said.
     pub text: String,
     /// The message this one is about, for an answer or a release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub about: Option<String>,
+    /// How many times this piece of work has been handed on, for a [`Sort::Handoff`]. It rides
+    /// the message because a count kept locally would restart at zero on every pass and never
+    /// close a ring; zero for everything else, and defaulted on the way in.
+    #[serde(default, skip_serializing_if = "is_first")]
+    pub hops: u32,
     /// When, in milliseconds since the epoch.
     pub at: u64,
 }
 
+fn is_first(hops: &u32) -> bool {
+    *hops == 0
+}
+
 impl Message {
     /// A plain note from `from`.
-    ///
-    /// Everything real arrives over the socket, where the sort is part of what was sent and the
-    /// sender is worked out rather than given. This is for tests, and for a host that wants to
-    /// put something in an inbox without a round trip.
     #[must_use]
     pub fn new(from: &str, text: &str) -> Self {
         Self::sent(from, text, Sort::Note, None)
@@ -317,19 +268,23 @@ impl Message {
     pub fn sent(from: &str, text: &str, sort: Sort, about: Option<String>) -> Self {
         let at = now_ms();
         Self {
-            // The clock plus the sender, which is unique enough for something two processes
-            // exchange and short enough for a model to quote back without mistyping it.
             id: format!("{}-{at:x}", &from.replace('/', "-")),
             from: from.to_owned(),
             sort,
             text: text.to_owned(),
             about,
+            hops: 0,
             at,
         }
     }
+
+    /// The same, having been handed on this many times.
+    #[must_use]
+    pub fn carried(self, hops: u32) -> Self {
+        Self { hops, ..self }
+    }
 }
 
-/// Milliseconds since the epoch, for stamping something two processes exchange.
 #[must_use]
 pub fn now_ms() -> u64 {
     u64::try_from(
@@ -340,16 +295,12 @@ pub fn now_ms() -> u64 {
     .unwrap_or(0)
 }
 
-/// The shape is the family's, and a refusal is a reply.
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn a_reply_carries_a_list_and_says_how_long_it_is() {
-        // The thing that fails silently between siblings. A tool answering `{"result": value}`
-        // and one answering `{"result":[value],"n":1}` read each other as having returned
-        // nothing, and an empty answer looks like an empty session rather than an error.
         let reply = Reply::of(serde_json::json!({"busy": false}));
         let json = serde_json::to_value(&reply).expect("encodes");
         assert!(json["result"].is_array(), "result must be a list: {json}");
@@ -377,16 +328,51 @@ mod tests {
     }
 
     #[test]
+    fn surface_and_fault_are_absent_unless_they_are_the_answer() {
+        let plain = serde_json::to_value(Reply::done()).expect("encodes");
+        assert!(plain.get("surface").is_none(), "{plain}");
+        assert!(plain.get("fault").is_none(), "{plain}");
+
+        let mut described = Reply::rows(vec![serde_json::json!({"verb": "verbs"})]);
+        described.surface = Some(SURFACE);
+        let json = serde_json::to_value(&described).expect("encodes");
+        assert_eq!(json["surface"], serde_json::json!(SURFACE));
+        assert_eq!(
+            json["n"], 1,
+            "a listing is the rows, not one row that is a list"
+        );
+    }
+
+    #[test]
+    fn a_refusal_says_which_kind_of_no_it_is() {
+        let json = serde_json::to_value(Reply::refused("nope")).expect("encodes");
+        assert_eq!(json["fault"], serde_json::json!("refused"));
+        assert_eq!(json["n"], 0);
+        assert!(json["result"].is_array(), "result is never omitted: {json}");
+        let failed = serde_json::to_value(Reply::no("nope", Fault::Failed)).expect("encodes");
+        assert_eq!(failed["fault"], serde_json::json!("failed"));
+    }
+
+    #[test]
+    fn a_reply_from_a_peer_built_before_these_fields_still_reads() {
+        let older: Reply =
+            serde_json::from_str(r#"{"ok":true,"n":1,"result":[1]}"#).expect("reads");
+        assert_eq!(older.surface, None);
+        assert_eq!(older.fault, None);
+        assert_eq!(
+            older.family, 0,
+            "a peer that named no revision predates the field"
+        );
+    }
+
+    #[test]
     fn a_successful_reply_carries_no_error_field_at_all() {
-        // Rather than a null one: a client checking `error ~= nil` is the obvious way to write
-        // one, and a null that serialises would make every success look like a failure.
         let json = serde_json::to_value(Reply::done()).expect("encodes");
         assert!(json.get("error").is_none(), "{json}");
     }
 
     #[test]
     fn a_call_with_no_arguments_still_reads() {
-        // The wire omits an empty list, and a verb like `status` takes none.
         let call: Call = serde_json::from_str(r#"{"call":"status"}"#).expect("reads");
         assert_eq!(call.call, "status");
         assert!(call.args.is_empty());
@@ -415,34 +401,52 @@ mod tests {
 
     #[test]
     fn nothing_that_runs_a_command_is_in_the_first_cut() {
-        // A socket that runs commands is remote code execution with a friendly name.
+        // `tool` is exempt: no shell command, only the session's own vocabulary, and the caller is
+        // taken from the kernel (`serving::is_authority`) — as safe on the socket as `melchior tool`.
         for (name, _) in VERBS {
             assert!(
-                !["run", "shell", "exec", "eval", "tool"].contains(name),
+                !["run", "shell", "exec", "eval"].contains(name),
                 "{name} does not belong on a socket"
             );
         }
     }
 
     #[test]
+    fn a_hop_count_survives_the_wire_and_a_note_does_not_carry_one() {
+        let handed =
+            Message::sent("magi/main/beta-nu", "yours now", Sort::Handoff, None).carried(3);
+        let text = serde_json::to_string(&handed).expect("encodes");
+        assert_eq!(
+            serde_json::from_str::<Message>(&text)
+                .expect("decodes")
+                .hops,
+            3
+        );
+        let older = r#"{"id":"x","from":"magi/main/beta-nu","sort":"handoff","text":"y","at":1}"#;
+        assert_eq!(
+            serde_json::from_str::<Message>(older)
+                .expect("decodes")
+                .hops,
+            0
+        );
+        let note = serde_json::to_value(Message::new("magi/main/beta-nu", "fyi")).expect("encodes");
+        assert!(note.get("hops").is_none(), "{note}");
+    }
+
+    #[test]
     fn a_message_remembers_who_sent_it() {
-        // A message with no sender cannot be replied to, which is the whole point of mirroring.
         let message = Message::new("magi/main/alpha-rho", "stop what you are doing");
         assert_eq!(message.from, "magi/main/alpha-rho");
         assert!(message.at > 0, "and when it was sent");
     }
 }
 
-/// The client library and the surface it claims to speak are the same surface.
 #[cfg(test)]
 mod client_tests {
     use super::*;
 
-    /// The verbs the shipped Lua stub attaches to a session.
-    ///
-    /// Read line by line and comments dropped first, because the block explains itself and a
-    /// split on quotes reads the prose as verbs — which it did, and the failure was the test's
-    /// rather than the stub's.
+    /// The verbs the shipped Lua stub attaches to a session, with comment lines dropped first: a
+    /// split on quotes would otherwise read the prose as verbs.
     fn surface() -> Vec<String> {
         let source = crate::CLIENT;
         let from = source
@@ -461,9 +465,6 @@ mod client_tests {
 
     #[test]
     fn the_stub_speaks_every_verb_this_answers() {
-        // The failure the family's guidance names first, and it is silent: a client that does
-        // not know about a verb simply never calls it, and the surface quietly shrinks to
-        // whatever the oldest copy of this file knew about.
         let stub = surface();
         for (verb, _) in VERBS {
             assert!(
@@ -475,8 +476,6 @@ mod client_tests {
 
     #[test]
     fn the_stub_claims_nothing_this_does_not_answer() {
-        // The other direction, and worse: a verb a client offers and nothing answers fails at
-        // the far end, in somebody else's program, with a refusal they cannot act on.
         let known: Vec<&str> = VERBS.iter().map(|(verb, _)| *verb).collect();
         for verb in surface() {
             assert!(
@@ -488,8 +487,6 @@ mod client_tests {
 
     #[test]
     fn the_stub_is_shipped_whole_and_returns_its_module() {
-        // `include_str!` of the wrong path, or a file that got truncated, both present as a
-        // client that will not load — in the sibling, not here.
         assert!(crate::CLIENT.len() > 4_000, "that is not the whole file");
         assert!(crate::CLIENT.contains("local M = { _NAME = \"melchior\""));
         assert!(crate::CLIENT.trim_end().ends_with("return M"));
@@ -497,39 +494,24 @@ mod client_tests {
 
     #[test]
     fn the_stub_puts_a_caller_on_every_call() {
-        // Without it a session answers `verbs` and refuses everything else, which reads as
-        // "that instance is broken" rather than as a client that never introduced itself.
         assert!(crate::CLIENT.contains("from = self.from"));
     }
 }
 
-/// One session asking another to become its parent.
-///
-/// A *request*, not a message, because it is answered by a person rather than read by a model.
-/// It sits pending until the session it was put to says yes or no, and the answer changes what
-/// the asker is — so it cannot travel as a note somebody might merely have seen.
-///
-/// # Why the asker volunteers
-///
-/// The request runs downhill: a session asks to *become a child*, it never claims to be somebody
-/// else's parent. Consent then sits with the party that gives something up — the prospective
-/// parent, who is being asked to take responsibility for another session and to lend it what it
-/// is allowed to do. A verb that let one session declare itself another's master would put the
-/// decision with whoever spoke first.
+/// One session asking another to become its parent: a request rather than a message, answered by
+/// a person, and it only ever runs downhill — a session asks to become a child, it never claims
+/// to be somebody else's parent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
-    /// This request, so an answer names one and not merely "the last thing asked".
     pub id: String,
     /// Who is asking, as `project/role/id`.
     pub from: String,
-    /// Why, in their words. The person answering has no other way to know.
     pub why: String,
     /// When, in milliseconds since the epoch.
     pub at: u64,
 }
 
 impl Request {
-    /// One from `from`, made now.
     #[must_use]
     pub fn made(from: &str, why: &str) -> Self {
         let at = now_ms();
@@ -541,3 +523,29 @@ impl Request {
         }
     }
 }
+
+/// What the command line answers, as against [`VERBS`], which is the socket.
+pub const CLI_VERBS: &[(&str, &str)] = &[
+    ("verbs", "what this program answers, on each of its doors"),
+    (
+        "client",
+        "the Lua client library for its surface, as source",
+    ),
+    ("needs", "what a coordinator may tell it, as declarations"),
+    ("configure", "take that configuration, as Lua on stdin"),
+    ("models", "what this machine could talk to"),
+    (
+        "card",
+        "one model in full: its limits, prices, scores and who serves it",
+    ),
+    ("ask", "run a turn; an Ask on stdin"),
+    ("serve", "bind this session's socket and answer for it"),
+    ("fork", "start a child session, named and vouched for"),
+    ("auth", "sign in to a provider that takes more than a key"),
+    ("tool", "the agent surface, as a harness calls it"),
+    ("brief", "what this session should know about its siblings"),
+    (
+        "acknowledge",
+        "clear the installed packages, so their declarations may run",
+    ),
+];

@@ -41,7 +41,8 @@ Two walls, and no setting opens either past what it says:
 - **the project wall** — a session sees only its own project's directory. Not "should not":
   another project's sessions are not refused, they are somewhere this one never lists.
 - **the instance wall** — a main is its instance's front door; the subagents behind it are
-  private. `melchior.talk` widens this to siblings, or to everything in the project, and nothing
+  private. `melchior.talk` widens this to the rest of the run a session belongs to — siblings,
+  and anything else started under the same root — or to everything in the project, and nothing
   widens it further.
 
 ## Commands

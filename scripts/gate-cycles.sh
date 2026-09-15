@@ -33,6 +33,31 @@ fi
 
 found=""
 for src in $roots; do
+  # Files reached only by a `#[cfg(test)] mod x;`. The attribute that makes them test code sits in
+  # the *declaring* file, so nothing in the file itself says so and a scan of the file alone reads
+  # a fixture's imports as the crate's architecture. `src/directory/adopting.rs` is one: it uses
+  # `crate::scratch`, and `crate::scratch` uses `crate::directory`.
+  testonly=$(
+    find "$src" -name '*.rs' -not -path '*/target/*' | sort | while IFS= read -r file; do
+      dir=$(dirname "$file")
+      base=$(basename "$file" .rs)
+      case "$base" in mod | lib | main) ;; *) dir="$dir/$base" ;; esac
+      awk -v D="$dir" -v P="$(dirname "$file")" '
+        /^[ \t]*#\[cfg\(test\)\]/ { pending = 1; path = ""; next }
+        pending && /^[ \t]*#\[path[ \t]*=/ {
+          match($0, /"[^"]*"/); path = substr($0, RSTART + 1, RLENGTH - 2); next
+        }
+        pending && /^[ \t]*(pub )?mod [a-z_0-9]+[ \t]*;/ {
+          match($0, /mod [a-z_0-9]+/); name = substr($0, RSTART + 4, RLENGTH - 4)
+          if (path != "") print P "/" path
+          else { print D "/" name ".rs"; print D "/" name "/mod.rs" }
+          pending = 0; next
+        }
+        pending { pending = 0 }
+      ' "$file"
+    done | sort -u
+  )
+
   report=$(
     # The top-level modules of this crate: `src/<name>.rs` and `src/<name>/`, minus the roots.
     names=$(
@@ -42,29 +67,45 @@ for src in $roots; do
       } | sort -u
     )
 
-    # One `from to` edge per line, over code with comments and test bodies removed.
+    # One `from to` edge per line, over code with comments and test bodies removed. File by file:
+    # the skip state must not survive the end of a file, because the last item in one is regularly
+    # a `#[cfg(test)] mod x;` and the next file is not part of it.
     for name in $names; do
       files=$(find "$src/$name.rs" "$src/$name" -name '*.rs' 2>/dev/null || true)
       [ -n "$files" ] || continue
-      # shellcheck disable=SC2086
-      cat $files | awk '
-        # Drop a `#[cfg(test)]` item entirely, by counting braces from its opening one.
-        /^[ \t]*#\[cfg\(test\)\]/ { skipping = 1; depth = 0; started = 0 }
-        skipping {
-          n = gsub(/\{/, "{"); depth += n
-          n = gsub(/\}/, "}"); depth -= n
-          if (n > 0 || depth > 0) started = 1
-          if (started && depth <= 0) skipping = 0
-          next
-        }
-        { sub(/\/\/.*$/, ""); print }
-      ' | grep -o 'crate::[a-z_][a-z0-9_]*' | sed 's/crate:://' | sort -u \
-      | while IFS= read -r to; do
-          [ "$to" = "$name" ] && continue
-          echo "$names" | grep -qx "$to" || continue
-          printf '%s %s\n' "$name" "$to"
-        done
-    done
+      for file in $files; do
+        printf '%s\n' "$testonly" | grep -qxF "$file" && continue
+        awk '
+          # Comments first, and string literals with them: a `format!("{{")` counts as a brace
+          # otherwise, and the count is what says where a test body ends.
+          {
+            line = $0
+            sub(/\/\/.*$/, "", line)
+            gsub(/"([^"\\]|\\.)*"/, "\"\"", line)
+            gsub(/'"'"'([^'"'"'\\]|\\.)*'"'"'/, "@", line)
+          }
+          # A `#[cfg(test)]` item is dropped whole. Braced, that is to its closing brace; unbraced
+          # -- `#[cfg(test)] mod x;`, a `use`, a `const` -- it is to the semicolon, and reading it
+          # as braced swallowed every line up to the next braced item anywhere after it.
+          line ~ /^[ \t]*#\[cfg\(test\)\]/ { skipping = 1; depth = 0; started = 0; next }
+          skipping {
+            t = line; opened = gsub(/\{/, "", t)
+            t = line; closed = gsub(/\}/, "", t)
+            depth += opened - closed
+            if (opened > 0) started = 1
+            if (started) { if (depth <= 0) skipping = 0; next }
+            if (index(line, ";") > 0) skipping = 0
+            next
+          }
+          { print line }
+        ' "$file" | grep -o 'crate::[a-z_][a-z0-9_]*' | sed 's/crate:://' | sort -u \
+        | while IFS= read -r to; do
+            [ "$to" = "$name" ] && continue
+            echo "$names" | grep -qx "$to" || continue
+            printf '%s %s\n' "$name" "$to"
+          done
+      done
+    done | sort -u
   )
 
   # What is left after every leaf is peeled off, from both ends. A node nothing leads into
