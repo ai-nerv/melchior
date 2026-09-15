@@ -203,6 +203,7 @@ fn carried(delta: Delta) -> Said {
         Delta::ToolCallArgs(args) => Said::ToolCallArgs { args },
         Delta::Usage(usage) => Said::Spent { usage },
         Delta::Stop(reason) => Said::Stop { reason },
+        Delta::Served(provider) => Said::Served { provider },
     }
 }
 

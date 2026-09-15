@@ -41,6 +41,8 @@ pub enum Delta {
     ToolCallArgs(String),
     Stop(StopReason),
     Usage(Usage),
+    /// Which of a router's upstreams answered, when the router said.
+    Served(String),
 }
 
 #[derive(Debug, Default)]

@@ -232,6 +232,9 @@ impl Client {
             finish.as_deref().unwrap_or("none said"),
             upstream.as_deref().unwrap_or("not said")
         );
+        if let Some(upstream) = upstream {
+            on_delta(Delta::Served(upstream));
+        }
         finished(stopped, &provider.id)
     }
 }
