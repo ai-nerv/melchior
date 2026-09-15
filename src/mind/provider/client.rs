@@ -221,9 +221,10 @@ impl Client {
     }
 }
 
-/// Keep the last two events' data, short.
+/// Keep the last two events' data, each by its end: that is where a finish reason and the usage sit.
 fn kept(tail: &mut Vec<String>, data: &str) {
-    tail.push(data.chars().take(120).collect());
+    let chars: Vec<char> = data.chars().collect();
+    tail.push(chars[chars.len().saturating_sub(160)..].iter().collect());
     if tail.len() > 2 {
         tail.remove(0);
     }
@@ -298,6 +299,26 @@ async fn credential(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_last_two_events_are_kept_by_their_ends() {
+        let mut tail = Vec::new();
+        for data in [
+            "first",
+            "second",
+            &format!("{}\"finish_reason\":\"stop\"}}", "x".repeat(300)),
+        ] {
+            kept(&mut tail, data);
+        }
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0], "second");
+        assert!(
+            tail[1].ends_with("\"finish_reason\":\"stop\"}"),
+            "{}",
+            tail[1]
+        );
+        assert!(tail[1].chars().count() <= 160);
+    }
 
     #[test]
     fn a_stream_that_never_stopped_is_retried_not_kept() {
