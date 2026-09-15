@@ -330,6 +330,7 @@ mod tests {
             compat: None,
             models: Vec::new(),
             discover: false,
+            avoid: Vec::new(),
         }];
         discover(&mut providers);
         assert!(providers[0].models.is_empty());
@@ -350,6 +351,7 @@ mod tests {
             }),
             models: Vec::new(),
             discover: true,
+            avoid: Vec::new(),
         };
         let model = joined(parse(&bare()).remove(0), &provider);
         assert_eq!(model.provider, "router");

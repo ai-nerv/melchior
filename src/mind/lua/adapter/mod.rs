@@ -298,6 +298,7 @@ mod thinking_tests {
             thinking: Some(level),
             max_tokens: None,
             provider: None,
+            avoid: Vec::new(),
         }
     }
 

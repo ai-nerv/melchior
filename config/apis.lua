@@ -98,6 +98,11 @@ do -- openai-completions
       body.usage = { include = true }
       -- A provider the person chose is asked first; the rest stay behind it as fallbacks.
       if opts.provider then body.provider = { order = { opts.provider } } end
+      -- Upstreams this provider is never served by, fallbacks included.
+      if opts.avoid and #opts.avoid > 0 then
+        body.provider = body.provider or {}
+        body.provider.ignore = opts.avoid
+      end
     end
 
     if ctx.tools and #ctx.tools > 0 then

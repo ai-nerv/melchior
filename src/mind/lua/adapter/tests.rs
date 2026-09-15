@@ -312,6 +312,21 @@ fn openrouter_routes_freely_when_no_provider_is_chosen() {
 }
 
 #[test]
+fn openrouter_never_uses_an_avoided_upstream() {
+    let options = Options {
+        provider: Some("StreamLake".into()),
+        avoid: vec!["OpenInference".into()],
+        ..Options::default()
+    };
+    let body = adapter("openai-completions").request(&routed(), &plain_context(), &options);
+    assert_eq!(
+        body["provider"],
+        serde_json::json!({ "order": ["StreamLake"], "ignore": ["OpenInference"] }),
+        "{body}"
+    );
+}
+
+#[test]
 fn completions_honours_a_declared_dialect() {
     let mut m = plain_model();
     m.compat = Some(crate::mind::provider::compat::Compat {

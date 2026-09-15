@@ -137,6 +137,7 @@ async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
                 schema: s.schema.clone(),
             }),
         provider: asked.wants.provider.clone(),
+        avoid: provider.avoid.clone(),
     };
     let call = Call {
         adapter: &adapter,

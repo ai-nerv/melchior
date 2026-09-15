@@ -65,6 +65,9 @@ melchior.provider("openrouter", {
   -- Four hundred and counting. Six were listed here and they were a generation behind, which
   -- reads from the inside as OpenRouter being broken rather than the list being old.
   discover = true,
+  -- Upstreams never to be served by: OpenInference answers long DeepSeek V4 sessions as if the
+  -- conversation were gone.
+  avoid = { "OpenInference" },
 })
 
 melchior.provider("deepseek", {
