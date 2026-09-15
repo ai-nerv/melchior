@@ -193,6 +193,7 @@ impl Client {
         let mut parser = sse::Parser::new();
         let mut state = crate::mind::provider::api::StreamState::default();
         let mut stopped = false;
+        let mut said = String::new();
         // The last events, said when the stream ends: whether a finish came before the end is what
         // tells an answer from one the provider cut off.
         let mut tail: Vec<String> = Vec::new();
@@ -205,6 +206,9 @@ impl Client {
                 kept(&mut tail, &event.data);
                 for delta in adapter.on_event(&mut state, &event) {
                     stopped |= matches!(delta, Delta::Stop(_));
+                    if let Delta::Text(text) = &delta {
+                        said.push_str(text);
+                    }
                     on_delta(delta);
                 }
             }
@@ -213,6 +217,9 @@ impl Client {
             kept(&mut tail, &event.data);
             for delta in adapter.on_event(&mut state, &event) {
                 stopped |= matches!(delta, Delta::Stop(_));
+                if let Delta::Text(text) = &delta {
+                    said.push_str(text);
+                }
                 on_delta(delta);
             }
         }
@@ -232,10 +239,12 @@ impl Client {
             finish.as_deref().unwrap_or("none said"),
             upstream.as_deref().unwrap_or("not said")
         );
-        if let Some(upstream) = upstream {
+        let outcome = finished(stopped, &provider.id).and_then(|()| unleaked(&said, &provider.id));
+        // Only an answer that came through whole makes its upstream the one asked first.
+        if let (Ok(()), Some(upstream)) = (&outcome, upstream) {
             on_delta(Delta::Served(upstream));
         }
-        finished(stopped, &provider.id)
+        outcome
     }
 }
 
@@ -271,6 +280,22 @@ fn finished(stopped: bool, provider: &str) -> Result<(), ProviderError> {
     Err(ProviderError::new(
         RetryClass::Transport,
         format!("{provider} closed the stream without saying it had finished"),
+    ))
+}
+
+/// A model that wrote its tool call as text in its own markup, which the router passed on as an
+/// answer and nothing downstream can run: asked again, as a stream cut off would be.
+fn unleaked(said: &str, provider: &str) -> Result<(), ProviderError> {
+    if !["<｜DSML｜", "<｜tool▁call"]
+        .iter()
+        .any(|mark| said.contains(mark))
+    {
+        return Ok(());
+    }
+    crate::noted!("ask: {provider} wrote a tool call as text");
+    Err(ProviderError::new(
+        RetryClass::Transport,
+        format!("{provider} wrote a tool call as text"),
     ))
 }
 
@@ -331,6 +356,14 @@ async fn credential(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tool_call_written_as_text_is_asked_again() {
+        let leaked = "Let me look.\n\n<｜DSML｜tool_cinvoke name=\"shell\">";
+        let why = unleaked(leaked, "openrouter").expect_err("a leaked call is not an answer");
+        assert!(matches!(why.class, RetryClass::Transport), "{why:?}");
+        assert!(unleaked("I wrote the doc.", "openrouter").is_ok());
+    }
 
     #[test]
     fn the_finish_a_provider_named_is_found_in_any_spelling() {
