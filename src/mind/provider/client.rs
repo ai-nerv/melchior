@@ -217,14 +217,20 @@ impl Client {
             }
         }
         let finish = tail.iter().rev().find_map(|data| reason_in(data));
+        // Which of a router's upstreams served it: speeds differ by tenfold between them.
+        let upstream = tail
+            .iter()
+            .rev()
+            .find_map(|data| value_in(data, "provider"));
         let last: String = {
             let chars: Vec<char> = tail.last().map(|d| d.chars().collect()).unwrap_or_default();
             chars[chars.len().saturating_sub(80)..].iter().collect()
         };
         crate::noted!(
-            "ask: {} stream ended, finish {}, last {last:?}",
+            "ask: {} stream ended, finish {}, upstream {}, last {last:?}",
             provider.id,
-            finish.as_deref().unwrap_or("none said")
+            finish.as_deref().unwrap_or("none said"),
+            upstream.as_deref().unwrap_or("not said")
         );
         finished(stopped, &provider.id)
     }
@@ -232,17 +238,17 @@ impl Client {
 
 /// The finish a provider named in one event, in any of the spellings the dialects use.
 fn reason_in(data: &str) -> Option<String> {
-    [
-        "\"finish_reason\":\"",
-        "\"stop_reason\":\"",
-        "\"finishReason\":\"",
-    ]
-    .iter()
-    .find_map(|key| {
-        let from = data.find(key)? + key.len();
-        let len = data[from..].find('"')?;
-        Some(data[from..from + len].to_owned())
-    })
+    ["finish_reason", "stop_reason", "finishReason"]
+        .iter()
+        .find_map(|key| value_in(data, key))
+}
+
+/// A string field of an event, by name, without parsing the rest of it.
+fn value_in(data: &str, key: &str) -> Option<String> {
+    let key = format!("\"{key}\":\"");
+    let from = data.find(&key)? + key.len();
+    let len = data[from..].find('"')?;
+    Some(data[from..from + len].to_owned())
 }
 
 /// Keep the last two events' data, bounded.
@@ -336,6 +342,9 @@ mod tests {
             Some("STOP")
         );
         assert_eq!(reason_in("[DONE]"), None);
+        let routed =
+            r#"{"id":"gen-1","provider":"StreamLake","model":"deepseek/deepseek-v4-flash"}"#;
+        assert_eq!(value_in(routed, "provider").as_deref(), Some("StreamLake"));
         let mut tail = Vec::new();
         for data in ["first", "second", "third"] {
             kept(&mut tail, data);
