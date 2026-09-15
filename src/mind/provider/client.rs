@@ -192,6 +192,7 @@ impl Client {
 
         let mut parser = sse::Parser::new();
         let mut state = crate::mind::provider::api::StreamState::default();
+        let mut stopped = false;
         let mut body = response.bytes_stream();
         while let Some(chunk) = body.next().await {
             let chunk =
@@ -199,17 +200,31 @@ impl Client {
             let text = String::from_utf8_lossy(&chunk);
             for event in parser.push(&text) {
                 for delta in adapter.on_event(&mut state, &event) {
+                    stopped |= matches!(delta, Delta::Stop(_));
                     on_delta(delta);
                 }
             }
         }
         if let Some(event) = parser.finish() {
             for delta in adapter.on_event(&mut state, &event) {
+                stopped |= matches!(delta, Delta::Stop(_));
                 on_delta(delta);
             }
         }
-        Ok(())
+        finished(stopped, &provider.id)
     }
+}
+
+/// A stream that closed without a stop was cut off, whatever it had sent: an error the caller
+/// retries, rather than half an answer taken for a whole one.
+fn finished(stopped: bool, provider: &str) -> Result<(), ProviderError> {
+    if stopped {
+        return Ok(());
+    }
+    Err(ProviderError::new(
+        RetryClass::Transport,
+        format!("{provider} closed the stream without saying it had finished"),
+    ))
 }
 
 /// The first line of an error body, bounded.
@@ -269,6 +284,13 @@ async fn credential(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stream_that_never_stopped_is_retried_not_kept() {
+        assert!(finished(true, "p").is_ok());
+        let cut = finished(false, "p").expect_err("a cut-off stream");
+        assert!(cut.class.is_retryable(), "{}", cut.message);
+    }
 
     #[test]
     fn an_error_body_is_reduced_to_a_sentence() {
