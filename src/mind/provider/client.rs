@@ -216,15 +216,38 @@ impl Client {
                 on_delta(delta);
             }
         }
-        crate::noted!("ask: {} stream ended after {tail:?}", provider.id);
+        let finish = tail.iter().rev().find_map(|data| reason_in(data));
+        let last: String = {
+            let chars: Vec<char> = tail.last().map(|d| d.chars().collect()).unwrap_or_default();
+            chars[chars.len().saturating_sub(80)..].iter().collect()
+        };
+        crate::noted!(
+            "ask: {} stream ended, finish {}, last {last:?}",
+            provider.id,
+            finish.as_deref().unwrap_or("none said")
+        );
         finished(stopped, &provider.id)
     }
 }
 
-/// Keep the last two events' data, each by its end: that is where a finish reason and the usage sit.
+/// The finish a provider named in one event, in any of the spellings the dialects use.
+fn reason_in(data: &str) -> Option<String> {
+    [
+        "\"finish_reason\":\"",
+        "\"stop_reason\":\"",
+        "\"finishReason\":\"",
+    ]
+    .iter()
+    .find_map(|key| {
+        let from = data.find(key)? + key.len();
+        let len = data[from..].find('"')?;
+        Some(data[from..from + len].to_owned())
+    })
+}
+
+/// Keep the last two events' data, bounded.
 fn kept(tail: &mut Vec<String>, data: &str) {
-    let chars: Vec<char> = data.chars().collect();
-    tail.push(chars[chars.len().saturating_sub(160)..].iter().collect());
+    tail.push(data.chars().take(4_000).collect());
     if tail.len() > 2 {
         tail.remove(0);
     }
@@ -301,23 +324,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_last_two_events_are_kept_by_their_ends() {
+    fn the_finish_a_provider_named_is_found_in_any_spelling() {
+        let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"cost":0.1}}"#;
+        assert_eq!(reason_in(chunk).as_deref(), Some("stop"));
+        assert_eq!(
+            reason_in(r#"{"delta":{"stop_reason":"end_turn"}}"#).as_deref(),
+            Some("end_turn")
+        );
+        assert_eq!(
+            reason_in(r#"{"finishReason":"STOP"}"#).as_deref(),
+            Some("STOP")
+        );
+        assert_eq!(reason_in("[DONE]"), None);
         let mut tail = Vec::new();
-        for data in [
-            "first",
-            "second",
-            &format!("{}\"finish_reason\":\"stop\"}}", "x".repeat(300)),
-        ] {
+        for data in ["first", "second", "third"] {
             kept(&mut tail, data);
         }
-        assert_eq!(tail.len(), 2);
-        assert_eq!(tail[0], "second");
-        assert!(
-            tail[1].ends_with("\"finish_reason\":\"stop\"}"),
-            "{}",
-            tail[1]
-        );
-        assert!(tail[1].chars().count() <= 160);
+        assert_eq!(tail, ["second", "third"]);
     }
 
     #[test]
