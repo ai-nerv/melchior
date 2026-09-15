@@ -120,7 +120,17 @@ do -- openai-completions
     end
 
     local level = opts.thinking
-    if level then
+    if level == "off" then
+      -- Said out loud: a model that reasons by default goes on reasoning unless told not to.
+      local format = compat.thinking_format
+      if format == "openrouter" then
+        body.reasoning = { enabled = false }
+      elseif format == "deepseek" or format == "zai" then
+        body.thinking = { type = "disabled" }
+      elseif format == "qwen" then
+        body.enable_thinking = false
+      end
+    elseif level then
       local format = compat.thinking_format
       if format == "openrouter" then
         body.reasoning = { effort = level }

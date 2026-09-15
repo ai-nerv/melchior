@@ -15,13 +15,23 @@ pub(super) struct Status {
     pub spent: Vec<serde_json::Value>,
 }
 
+std::thread_local! {
+    /// Peers that refused this session their status. The policy does not change mid-run, so they
+    /// are not asked again every two seconds only to refuse again.
+    static REFUSED: std::cell::RefCell<std::collections::BTreeSet<String>> =
+        const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+}
+
 /// A peer's status, asked of its own socket. `None` when it did not answer within the dial's
-/// patience — that peer simply reads as idle rather than stalling the roster.
+/// patience, or refused — that peer simply reads as idle rather than stalling the roster.
 pub(super) fn status_of(
     project: &str,
     id: &str,
     me: &melchior::identity::Identity,
 ) -> Option<Status> {
+    if REFUSED.with(|refused| refused.borrow().contains(id)) {
+        return None;
+    }
     let them = melchior::identity::Identity {
         project: project.to_owned(),
         role: String::new(),
@@ -31,6 +41,10 @@ pub(super) fn status_of(
         .ok()?
         .call("status", Vec::new())
         .ok()?;
+    if !reply.ok {
+        REFUSED.with(|refused| refused.borrow_mut().insert(id.to_owned()));
+        return None;
+    }
     reply.result.first().map(read)
 }
 

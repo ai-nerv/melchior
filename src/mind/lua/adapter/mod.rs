@@ -105,8 +105,9 @@ fn effective_thinking(model: &Model, options: &Options) -> Option<String> {
         return None;
     }
     let level = options.thinking?;
+    // Said rather than left out: a model that reasons by default goes on reasoning unless told not to.
     if level == crate::mind::model::ThinkingLevel::Off {
-        return None;
+        return Some("off".to_owned());
     }
     match model.thinking.get(&level) {
         // Named: this model calls that level something else.
@@ -332,9 +333,11 @@ mod thinking_tests {
     }
 
     #[test]
-    fn off_is_not_a_level_to_ask_for() {
-        let asked = asked(&model(true, BTreeMap::new()), &wanting(ThinkingLevel::Off));
-        assert!(asked.get("thinking").is_none(), "{asked}");
+    fn off_is_said_to_a_model_that_reasons_so_it_can_stop() {
+        let reasons = asked(&model(true, BTreeMap::new()), &wanting(ThinkingLevel::Off));
+        assert_eq!(reasons["thinking"], "off", "{reasons}");
+        let plain = asked(&model(false, BTreeMap::new()), &wanting(ThinkingLevel::Off));
+        assert!(plain.get("thinking").is_none(), "{plain}");
     }
 
     #[test]

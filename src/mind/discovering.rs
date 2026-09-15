@@ -47,14 +47,19 @@ pub fn discover(providers: &mut [Provider]) {
         if let Some(found) = found {
             provider.models = found
                 .into_iter()
-                .map(|mut model| {
-                    model.provider = provider.id.clone();
-                    model.api = provider.api;
-                    model
-                })
+                .map(|model| joined(model, provider))
                 .collect();
         }
     }
+}
+
+/// A discovered model as its provider serves it: the provider's id, protocol and dialect. Without
+/// the dialect it spoke plain OpenAI, and a reasoning level, off included, never reached the provider.
+fn joined(mut model: Model, provider: &crate::mind::provider::endpoint::Provider) -> Model {
+    model.provider.clone_from(&provider.id);
+    model.api = provider.api;
+    model.compat = Some(model.compat.unwrap_or_default().over(provider.compat));
+    model
 }
 
 /// A cached catalog, and whether it is still worth using without asking again.
@@ -328,5 +333,29 @@ mod tests {
         }];
         discover(&mut providers);
         assert!(providers[0].models.is_empty());
+    }
+
+    #[test]
+    fn a_discovered_model_speaks_its_providers_dialect() {
+        use crate::mind::provider::compat::{Compat, ThinkingFormat, resolve};
+        let provider = crate::mind::provider::endpoint::Provider {
+            id: "router".into(),
+            name: "Router".into(),
+            base_url: None,
+            api: crate::mind::provider::model::Api::OpenAiCompletions,
+            auth: crate::mind::provider::endpoint::Auth::None,
+            compat: Some(Compat {
+                thinking_format: Some(ThinkingFormat::OpenRouter),
+                ..Compat::default()
+            }),
+            models: Vec::new(),
+            discover: true,
+        };
+        let model = joined(parse(&bare()).remove(0), &provider);
+        assert_eq!(model.provider, "router");
+        assert_eq!(
+            resolve(model.compat).thinking_format,
+            ThinkingFormat::OpenRouter
+        );
     }
 }
