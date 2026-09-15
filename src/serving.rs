@@ -126,23 +126,26 @@ async fn talk(stream: tokio::net::UnixStream, serving: Serving) -> std::io::Resu
         let caller = caller_of(&call, peer, &about);
         let began = std::time::Instant::now();
         let (reply, then) = answer(&call, &about, caller.as_ref());
-        crate::noted!(
-            "serve: {} from {} → {} in {}ms",
-            call.call,
-            caller.as_ref().map_or_else(
-                || call.from.clone().unwrap_or_else(|| "?".to_owned()),
-                |them| format!("{}/{}", them.project, them.id)
-            ),
-            if reply.ok {
-                "ok".to_owned()
-            } else {
-                format!(
-                    "refused: {}",
-                    crate::noted::short(reply.error.as_deref().unwrap_or_default())
-                )
-            },
-            began.elapsed().as_millis()
-        );
+        // A `status` answered is the roster's two-second poll: a change in it is logged as `roster`.
+        if call.call != "status" || !reply.ok {
+            crate::noted!(
+                "serve: {} from {} → {} in {}ms",
+                call.call,
+                caller.as_ref().map_or_else(
+                    || call.from.clone().unwrap_or_else(|| "?".to_owned()),
+                    |them| format!("{}/{}", them.project, them.id)
+                ),
+                if reply.ok {
+                    "ok".to_owned()
+                } else {
+                    format!(
+                        "refused: {}",
+                        crate::noted::short(reply.error.as_deref().unwrap_or_default())
+                    )
+                },
+                began.elapsed().as_millis()
+            );
+        }
         framing::write_as(&mut writer, wire, &reply).await?;
         match then {
             Then::Nothing => {}
