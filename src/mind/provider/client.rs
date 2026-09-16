@@ -198,7 +198,11 @@ impl Client {
         // tells an answer from one the provider cut off.
         let mut tail: Vec<String> = Vec::new();
         let mut body = response.bytes_stream();
-        while let Some(chunk) = body.next().await {
+        loop {
+            let Ok(next) = tokio::time::timeout(QUIET, body.next()).await else {
+                return Err(hung(&provider.id));
+            };
+            let Some(chunk) = next else { break };
             let chunk =
                 chunk.map_err(|e| ProviderError::new(RetryClass::Transport, e.to_string()))?;
             let text = String::from_utf8_lossy(&chunk);
@@ -269,6 +273,20 @@ fn kept(tail: &mut Vec<String>, data: &str) {
     if tail.len() > 2 {
         tail.remove(0);
     }
+}
+
+/// How long a started stream may say nothing before it is taken as hung. Long, because a very
+/// large prompt nothing has cached is read in silence before the first token.
+const QUIET: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// A provider that took the request and then said nothing at all: asked again, since a turn that
+/// waits on it waits for as long as it stays quiet.
+fn hung(provider: &str) -> ProviderError {
+    crate::noted!("ask: {provider} sent nothing for {}s", QUIET.as_secs());
+    ProviderError::new(
+        RetryClass::Transport,
+        format!("{provider} sent nothing for {}s", QUIET.as_secs()),
+    )
 }
 
 /// A stream that closed without a stop was cut off, whatever it had sent: an error the caller
@@ -356,6 +374,13 @@ async fn credential(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stream_that_says_nothing_at_all_is_asked_again() {
+        let why = hung("openrouter");
+        assert!(matches!(why.class, RetryClass::Transport), "{why:?}");
+        assert!(why.to_string().contains("180"), "{why}");
+    }
 
     #[test]
     fn a_tool_call_written_as_text_is_asked_again() {
