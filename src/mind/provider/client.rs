@@ -243,7 +243,9 @@ impl Client {
             finish.as_deref().unwrap_or("none said"),
             upstream.as_deref().unwrap_or("not said")
         );
-        let outcome = finished(stopped, &provider.id).and_then(|()| unleaked(&said, &provider.id));
+        let outcome = finished(stopped, &provider.id)
+            .and_then(|()| unleaked(&said, &provider.id))
+            .and_then(|()| completed(finish.as_deref(), &provider.id));
         // Only an answer that came through whole makes its upstream the one asked first.
         if let (Ok(()), Some(upstream)) = (&outcome, upstream) {
             on_delta(Delta::Served(upstream));
@@ -287,6 +289,19 @@ fn hung(provider: &str) -> ProviderError {
         RetryClass::Transport,
         format!("{provider} sent nothing for {}s", QUIET.as_secs()),
     )
+}
+
+/// A provider that ended the stream saying the generation failed. The turn has no answer to show
+/// for it, so it is asked again rather than taken as done; `length` and `stop` are real endings.
+fn completed(finish: Option<&str>, provider: &str) -> Result<(), ProviderError> {
+    if !finish.is_some_and(|reason| reason.eq_ignore_ascii_case("error")) {
+        return Ok(());
+    }
+    crate::noted!("ask: {provider} ended the stream with an error");
+    Err(ProviderError::new(
+        RetryClass::Transport,
+        format!("{provider} ended the stream with an error"),
+    ))
 }
 
 /// A stream that closed without a stop was cut off, whatever it had sent: an error the caller
@@ -374,6 +389,15 @@ async fn credential(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stream_that_finishes_with_an_error_is_asked_again() {
+        let why = completed(Some("error"), "openrouter").expect_err("an error is no answer");
+        assert!(matches!(why.class, RetryClass::Transport), "{why:?}");
+        for real in [Some("stop"), Some("length"), Some("tool_calls"), None] {
+            assert!(completed(real, "openrouter").is_ok(), "{real:?}");
+        }
+    }
 
     #[test]
     fn a_stream_that_says_nothing_at_all_is_asked_again() {
