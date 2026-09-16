@@ -172,11 +172,15 @@ impl Client {
         }
         let body = adapter.request(model, context, options);
 
-        let response = request
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| ProviderError::new(RetryClass::Transport, e.to_string()))?;
+        // Bounded like the body below: a provider that takes the request and never answers at all
+        // holds the turn open for as long as it stays quiet.
+        let sent = tokio::time::timeout(QUIET, request.json(&body).send()).await;
+        let response = match sent {
+            Ok(sent) => {
+                sent.map_err(|e| ProviderError::new(RetryClass::Transport, e.to_string()))?
+            }
+            Err(_) => return Err(hung(&provider.id)),
+        };
 
         let status = response.status();
         if !status.is_success() {
