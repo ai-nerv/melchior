@@ -120,6 +120,9 @@ make.recipe{ name = "build", desc = "the binary",
              end }
 make.alias("b", "build")
 
+make.recipe{ name = "family-path", desc = "the binary selected by the build recipe",
+             run = function() print("NERV_BINARY=target/release/" .. NAME) end }
+
 make.recipe{
   name = "install",
   desc = ("install the binary to %s/bin, and config/ where it reads it"):format(PREFIX),
@@ -180,6 +183,9 @@ make.alias("r", "run")
 make.recipe{ name = "test", desc = "the suite",
              run = function() sh.cargo("test", "--all-targets") end }
 make.alias("t", "test")
+
+make.recipe{ name = "test-streaming", desc = "provider byte and response boundaries",
+             run = function() sh.cargo("test", "--lib", "mind::provider::") end }
 
 make.recipe{ name = "test-all", desc = "the suite, with every feature on",
              run = function() sh.cargo("test", "--all-targets", "--all-features") end }

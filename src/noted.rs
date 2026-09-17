@@ -51,7 +51,7 @@ pub fn line(at: std::time::SystemTime, pid: u32, args: std::fmt::Arguments<'_>) 
     format!("{} {PROGRAM}[{pid}] {said}", stamp(at))
 }
 
-/// A value cut to fit a line: one line, and no longer than [`SHORT`] characters.
+/// A value cut to fit a line: one line, and no longer than `SHORT` characters.
 #[must_use]
 pub fn short(text: &str) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");

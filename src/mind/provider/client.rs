@@ -2,9 +2,13 @@
 //! a protocol comes from an [`Adapter`], and what it knows of a vendor from the catalog.
 
 use crate::mind::provider::api::{Adapter, Delta, Options};
+use crate::mind::provider::control;
 use crate::mind::provider::endpoint::{Auth, Provider};
 use crate::mind::provider::model::Model;
 use crate::mind::provider::retry::RetryClass;
+
+#[cfg(test)]
+mod streaming;
 
 /// How many times a request is made before the failure is the answer.
 const MAX_ATTEMPTS: u32 = 4;
@@ -58,6 +62,7 @@ pub struct Client {
     http: reqwest::Client,
     /// The first backoff delay; each later one grows from it.
     base_delay: std::time::Duration,
+    control: control::Limits,
 }
 
 impl Default for Client {
@@ -86,6 +91,7 @@ impl Client {
                 .build()
                 .unwrap_or_default(),
             base_delay: crate::mind::provider::retry::BASE,
+            control: control::LIMITS,
         }
     }
 
@@ -176,21 +182,27 @@ impl Client {
         // holds the turn open for as long as it stays quiet.
         let sent = tokio::time::timeout(QUIET, request.json(&body).send()).await;
         let response = match sent {
-            Ok(sent) => {
-                sent.map_err(|e| ProviderError::new(RetryClass::Transport, e.to_string()))?
-            }
+            Ok(sent) => sent.map_err(|e| {
+                ProviderError::new(RetryClass::Transport, e.without_url().to_string())
+            })?,
             Err(_) => return Err(hung(&provider.id)),
         };
 
         let status = response.status();
         if !status.is_success() {
-            // A context-window overflow arrives as an ordinary 400, and only the body tells it
-            // apart from a malformed request, so the class is read from both.
-            let detail = response.text().await.unwrap_or_default();
+            let deadline = tokio::time::Instant::now() + self.control.timeout;
+            let detail = control::read(response, self.control, deadline)
+                .await
+                .map_err(|why| {
+                    ProviderError::new(
+                        RetryClass::of_status(status.as_u16()),
+                        format!("{} returned {status}: {why}", provider.id),
+                    )
+                })?;
             let class = RetryClass::of(status.as_u16(), &detail);
             return Err(ProviderError::new(
                 class,
-                format!("{} returned {status}: {}", provider.id, first_line(&detail)),
+                format!("{} returned {status} ({class:?})", provider.id),
             ));
         }
 
@@ -207,21 +219,26 @@ impl Client {
                 return Err(hung(&provider.id));
             };
             let Some(chunk) = next else { break };
-            let chunk =
-                chunk.map_err(|e| ProviderError::new(RetryClass::Transport, e.to_string()))?;
-            let text = String::from_utf8_lossy(&chunk);
-            for event in parser.push(&text) {
-                kept(&mut tail, &event.data);
-                for delta in adapter.on_event(&mut state, &event) {
-                    stopped |= matches!(delta, Delta::Stop(_));
-                    if let Delta::Text(text) = &delta {
-                        said.push_str(text);
+            let chunk = chunk.map_err(|e| {
+                ProviderError::new(RetryClass::Transport, e.without_url().to_string())
+            })?;
+            parser
+                .feed(&chunk, |event| {
+                    kept(&mut tail, &event.data);
+                    for delta in adapter.on_event(&mut state, &event) {
+                        stopped |= matches!(delta, Delta::Stop(_));
+                        if let Delta::Text(text) = &delta {
+                            said.push_str(text);
+                        }
+                        on_delta(delta);
                     }
-                    on_delta(delta);
-                }
-            }
+                })
+                .map_err(|why| ProviderError::new(RetryClass::Transport, why.to_string()))?;
         }
-        if let Some(event) = parser.finish() {
+        if let Some(event) = parser
+            .finish()
+            .map_err(|why| ProviderError::new(RetryClass::Transport, why.to_string()))?
+        {
             kept(&mut tail, &event.data);
             for delta in adapter.on_event(&mut state, &event) {
                 stopped |= matches!(delta, Delta::Stop(_));
@@ -237,16 +254,7 @@ impl Client {
             .iter()
             .rev()
             .find_map(|data| value_in(data, "provider"));
-        let last: String = {
-            let chars: Vec<char> = tail.last().map(|d| d.chars().collect()).unwrap_or_default();
-            chars[chars.len().saturating_sub(80)..].iter().collect()
-        };
-        crate::noted!(
-            "ask: {} stream ended, finish {}, upstream {}, last {last:?}",
-            provider.id,
-            finish.as_deref().unwrap_or("none said"),
-            upstream.as_deref().unwrap_or("not said")
-        );
+        crate::noted!("ask: {} stream ended, stop {stopped}", provider.id);
         let outcome = finished(stopped, &provider.id)
             .and_then(|()| unleaked(&said, &provider.id))
             .and_then(|()| completed(finish.as_deref(), &provider.id));
@@ -336,16 +344,6 @@ fn unleaked(said: &str, provider: &str) -> Result<(), ProviderError> {
     ))
 }
 
-/// The first line of an error body, bounded.
-fn first_line(text: &str) -> String {
-    text.lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("")
-        .chars()
-        .take(300)
-        .collect()
-}
-
 /// The credential to send, renewed if it was about to expire. The exchange is not retried: if the
 /// provider will not renew, signing in again is the only thing that helps.
 async fn credential(
@@ -361,7 +359,19 @@ async fn credential(
         return Ok(provider.auth.resolve());
     };
 
-    let mut store = crate::mind::provider::oauth::Store::load()?;
+    let store = crate::mind::provider::oauth::Store::load()?;
+    let tokens = store
+        .get(&provider.id)
+        .ok_or_else(|| crate::mind::provider::oauth::Error::NotSignedIn(provider.id.clone()))?;
+    if !tokens.is_stale(crate::mind::provider::oauth::now()) {
+        return Ok(Some(tokens.access.clone()));
+    }
+
+    // Claim this provider before spending its refresh token, so that two processes do not both
+    // rotate it, and then look again: whoever held the claim may have just renewed it.
+    let id = provider.id.clone();
+    let _held = off_thread(move || crate::mind::provider::oauth::hold(&id)).await?;
+    let store = crate::mind::provider::oauth::Store::load()?;
     let tokens = store
         .get(&provider.id)
         .ok_or_else(|| crate::mind::provider::oauth::Error::NotSignedIn(provider.id.clone()))?;
@@ -384,10 +394,27 @@ async fn credential(
     )
     .await?;
     let access = renewed.access.clone();
-    store.put(&provider.id, renewed);
-    // Best effort: a token that works but could not be written costs a refresh next time.
-    let _ = store.save();
+    let id = provider.id.clone();
+    // Reported rather than ignored: a rotated refresh token that was not written is one the
+    // provider has already retired, which signs the person out at the next start.
+    off_thread(move || {
+        crate::mind::provider::oauth::Store::amend(|store| store.renew(&id, renewed)).map(drop)
+    })
+    .await?;
     Ok(Some(access))
+}
+
+/// Credential work touches the filesystem and waits on a lock another process may hold, neither of
+/// which belongs on a thread that is driving requests.
+async fn off_thread<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, crate::mind::provider::oauth::Error> + Send + 'static,
+) -> Result<T, crate::mind::provider::oauth::Error> {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(done) => done,
+        Err(why) => Err(crate::mind::provider::oauth::Error::Refused(format!(
+            "credentials could not be reached: {why}"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -446,13 +473,6 @@ mod tests {
         assert!(finished(true, "p").is_ok());
         let cut = finished(false, "p").expect_err("a cut-off stream");
         assert!(cut.class.is_retryable(), "{}", cut.message);
-    }
-
-    #[test]
-    fn an_error_body_is_reduced_to_a_sentence() {
-        assert_eq!(first_line("\n\noverloaded\ndetail\n"), "overloaded");
-        assert_eq!(first_line(&"x".repeat(1000)).len(), 300);
-        assert_eq!(first_line(""), "");
     }
 }
 

@@ -4,6 +4,9 @@
 //! framing in the spec — `field: value` lines, blank line ends an event, `\r`, `\n`, or `\r\n`
 //! all terminate — so there is one parser here and vendors differ in payload, not in framing.
 
+#[cfg(test)]
+mod partitions;
+
 /// One server-sent event.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Event {
@@ -16,10 +19,17 @@ pub struct Event {
 /// Accumulates bytes and yields whole events.
 #[derive(Debug, Default)]
 pub struct Parser {
-    buffer: String,
+    buffer: Vec<u8>,
     name: String,
     data: Vec<String>,
+    skip_lf: bool,
+    started: bool,
+    failed: bool,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the event stream contains malformed UTF-8")]
+pub struct InvalidUtf8;
 
 impl Parser {
     /// A parser with nothing buffered.
@@ -28,44 +38,66 @@ impl Parser {
         Self::default()
     }
 
-    /// Feed a chunk and take whatever events it completed.
-    ///
-    /// A chunk may split a line, a line may split a field, and an event may span chunks; only
-    /// a blank line completes one, so a partial tail stays buffered rather than being guessed
-    /// at.
-    pub fn push(&mut self, chunk: &str) -> Vec<Event> {
-        self.buffer.push_str(chunk);
+    /// Feed bytes, retaining partial UTF-8 lines and folding CRLF across chunks.
+    pub fn push(&mut self, chunk: impl AsRef<[u8]>) -> Result<Vec<Event>, InvalidUtf8> {
         let mut out = Vec::new();
+        self.feed(chunk, |event| out.push(event))?;
+        Ok(out)
+    }
 
-        while let Some(end) = self.buffer.find(['\n', '\r']) {
-            let line: String = self.buffer[..end].to_owned();
-            // A `\r\n` is one terminator, not two, and dropping only the `\r` would leave a
-            // blank line that falsely ends the event.
-            let skip = if self.buffer[end..].starts_with("\r\n") {
-                2
-            } else {
-                1
-            };
-            self.buffer.drain(..end + skip);
-
-            if line.is_empty() {
-                if let Some(event) = self.take() {
-                    out.push(event);
-                }
+    /// Deliver each completed event before inspecting subsequent bytes, including malformed tails.
+    pub fn feed(
+        &mut self,
+        chunk: impl AsRef<[u8]>,
+        mut emit: impl FnMut(Event),
+    ) -> Result<(), InvalidUtf8> {
+        if self.failed {
+            return Err(InvalidUtf8);
+        }
+        for &byte in chunk.as_ref() {
+            if std::mem::take(&mut self.skip_lf) && byte == b'\n' {
                 continue;
             }
-            self.field(&line);
+            if byte == b'\r' || byte == b'\n' {
+                self.skip_lf = byte == b'\r';
+                if let Some(event) = self.line()? {
+                    emit(event);
+                }
+            } else {
+                self.buffer.push(byte);
+            }
         }
-        out
+        Ok(())
     }
 
     /// Take whatever is buffered, for a stream that ended without a final blank line.
-    pub fn finish(&mut self) -> Option<Event> {
-        let trailing = std::mem::take(&mut self.buffer);
-        if !trailing.is_empty() {
-            self.field(&trailing);
+    pub fn finish(&mut self) -> Result<Option<Event>, InvalidUtf8> {
+        if self.failed {
+            return Err(InvalidUtf8);
         }
-        self.take()
+        if !self.buffer.is_empty() {
+            let _ = self.line()?;
+        }
+        self.skip_lf = false;
+        Ok(self.take())
+    }
+
+    fn line(&mut self) -> Result<Option<Event>, InvalidUtf8> {
+        let bytes = std::mem::take(&mut self.buffer);
+        let text = String::from_utf8(bytes).map_err(|_| {
+            self.failed = true;
+            InvalidUtf8
+        })?;
+        let line = if std::mem::replace(&mut self.started, true) {
+            text.as_str()
+        } else {
+            text.strip_prefix('\u{feff}').unwrap_or(&text)
+        };
+        if line.is_empty() {
+            return Ok(self.take());
+        }
+        self.field(line);
+        Ok(None)
     }
 
     fn field(&mut self, line: &str) {
@@ -103,9 +135,9 @@ mod tests {
         let mut parser = Parser::new();
         let mut out = Vec::new();
         for chunk in chunks {
-            out.extend(parser.push(chunk));
+            out.extend(parser.push(chunk).expect("valid UTF-8"));
         }
-        out.extend(parser.finish());
+        out.extend(parser.finish().expect("valid tail"));
         out
     }
 

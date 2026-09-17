@@ -71,9 +71,8 @@ pub async fn login(id: &str) -> Result<()> {
     )
     .await?;
 
-    let mut store = Store::load()?;
-    store.put(id, tokens);
-    store.save()?;
+    let _held = oauth::hold(id)?;
+    Store::amend(|store| store.put(id, tokens))?;
     println!(
         "Signed in to {service}. Credentials are in {}.",
         oauth::path().display()
@@ -83,9 +82,10 @@ pub async fn login(id: &str) -> Result<()> {
 
 /// Forget a provider's credentials.
 pub fn logout(id: &str) -> Result<()> {
-    let mut store = Store::load()?;
-    if store.forget(id) {
-        store.save()?;
+    let _held = oauth::hold(id)?;
+    let mut forgotten = false;
+    Store::amend(|store| forgotten = store.forget(id))?;
+    if forgotten {
         println!("Signed out of {id}.");
     } else {
         println!("Not signed in to {id}.");
