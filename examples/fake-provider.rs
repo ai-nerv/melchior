@@ -13,7 +13,17 @@ struct Turn {
     /// Which requests this answers. Absent, the turn is taken in order.
     #[serde(default)]
     when: Option<When>,
+    #[serde(default)]
     events: Vec<Event>,
+    /// Refuse instead of answering, the way a provider does: a status and what it said.
+    #[serde(default)]
+    refuse: Option<Refusal>,
+}
+
+#[derive(serde::Deserialize)]
+struct Refusal {
+    status: u16,
+    message: String,
 }
 
 /// What a turn answers. Named on shape rather than on wording: a system prompt is written for a
@@ -152,12 +162,12 @@ async fn chunk(socket: &mut tokio::net::TcpStream, text: &str) -> std::io::Resul
         .await
 }
 
-async fn refuse(socket: &mut tokio::net::TcpStream, why: &str) -> std::io::Result<()> {
+async fn refuse(socket: &mut tokio::net::TcpStream, status: u16, why: &str) -> std::io::Result<()> {
     let body = serde_json::json!({"error": {"message": why}}).to_string();
     socket
         .write_all(
             format!(
-                "HTTP/1.1 500 Fake\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status} Fake\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             )
             .as_bytes(),
@@ -213,14 +223,14 @@ async fn main() -> std::io::Result<()> {
         match chosen {
             Some(at) => {
                 used[at] = !rule(at);
-                stream(&mut socket, &turns[at]).await?;
+                match &turns[at].refuse {
+                    Some(no) => refuse(&mut socket, no.status, &no.message).await?,
+                    None => stream(&mut socket, &turns[at]).await?,
+                }
             }
             None => {
-                refuse(
-                    &mut socket,
-                    &format!("no turn was scripted for request {asked}"),
-                )
-                .await?
+                let why = format!("no turn was scripted for request {asked}");
+                refuse(&mut socket, 500, &why).await?
             }
         }
         asked += 1;
