@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 const HELPER: &str = "MELCHIOR_OAUTH_HELPER_STORE";
 const PROVIDER: &str = "MELCHIOR_OAUTH_HELPER_PROVIDER";
 const READY: &str = "MELCHIOR_OAUTH_HELPER_READY";
+const RENEW: &str = "MELCHIOR_OAUTH_HELPER_RENEW";
 const NAME: &str = "mind::provider::oauth::persistence::a_second_process";
 
 fn store() -> Store {
@@ -70,7 +71,15 @@ fn a_second_process() {
     if let Some(ready) = std::env::var_os(READY) {
         let held = hold_within(&at, &provider, Duration::from_secs(5)).expect("a claim");
         std::fs::write(PathBuf::from(ready), "held").expect("a marker");
-        std::thread::sleep(Duration::from_secs(30));
+        if std::env::var_os(RENEW).is_some() {
+            std::thread::sleep(Duration::from_millis(300));
+            Store::amend_within(&at, Duration::from_secs(20), |store| {
+                store.put(&provider, tokens(&provider));
+            })
+            .expect("amended");
+        } else {
+            std::thread::sleep(Duration::from_secs(30));
+        }
         drop(held);
         return;
     }
@@ -231,4 +240,25 @@ fn credential_writes_refuse_world_writable_directories() {
         .save_to(&dir.join("credentials.json"))
         .expect_err("a directory anybody can write to");
     assert!(why.to_string().contains("unsafe"), "{why}");
+}
+
+#[test]
+fn a_process_that_waited_for_a_claim_sees_what_the_holder_wrote() {
+    let dir = private("waited");
+    let path = dir.join("credentials.json");
+    let marker = dir.join("ready");
+    let mut child = second_process(&path, "test")
+        .env(READY, &marker)
+        .env(RENEW, "1")
+        .spawn()
+        .expect("a process");
+    waited_for(&marker);
+    let held = hold_within(&path, "test", Duration::from_secs(20)).expect("the released claim");
+    let store = Store::load_from(&path).expect("the store");
+    assert_eq!(
+        store.get("test").expect("tokens").access,
+        tokens("test").access
+    );
+    drop(held);
+    assert!(child.wait().expect("reaped").success());
 }
