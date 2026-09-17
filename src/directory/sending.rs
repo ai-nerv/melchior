@@ -36,7 +36,8 @@ pub fn sized(said: &str) -> Result<(), String> {
         return Err(format!(
             "that message is {held} characters and one may be {AT_MOST}. An inbox holds fifty of \
              these and a model reads all of them: say what the work is and where it is, not what \
-             is in it."
+             is in it. A result that long is a report, not a message: hand it in whole with verb \
+             `report`, and never cut it into several messages."
         ));
     }
     Ok(())

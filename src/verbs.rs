@@ -14,6 +14,7 @@ mod branching;
 mod claiming;
 pub mod doing;
 mod fanning;
+mod reporting;
 pub mod saying;
 mod standing;
 pub mod tasking;
@@ -172,6 +173,13 @@ pub const VERBS: &[(&str, &str)] = &[
         "announce",
         "put the same note in the inbox of everyone else in this session's run",
     ),
+    // A result is a report and not a message: any length, handed in once, read when wanted.
+    (
+        "report",
+        "hand in this session's result, whole and of any length, in `message` (or the path of a \
+         file holding it in `about`) — never cut it into messages. With `who`, read the report \
+         that agent handed in, a page at a time (`about` is the line to start from)",
+    ),
     (
         "task",
         "where something this session asked for has got to, by the handle `ask` gave back",
@@ -235,7 +243,7 @@ pub const VERBS: &[(&str, &str)] = &[
 /// so it cannot disagree with the schema.
 const ALONE: &[&str] = &[
     "help", "whoami", "list", "crew", "inbox", "claims", "claim", "release", "announce", "trouble",
-    "reply", "role", "task",
+    "reply", "role", "task", "report",
 ];
 
 /// Which verbs name a role, refused here rather than at the far end.
@@ -339,6 +347,7 @@ pub fn answer(arguments: &Value, standing: &Standing) -> Answer {
         "unwatch" => watching::unwatch(arguments, standing),
         // Derived, never stored.
         "task" => tasking::reported(arguments, standing),
+        "report" => reporting::report(arguments, standing),
         // The floor: a verb added to `ALONE` and not to the dispatch lands here silently, because
         // this is a match arm and not a missing function. The test below is what notices.
         _ if ALONE.contains(&verb) => Answer::said(format!(
