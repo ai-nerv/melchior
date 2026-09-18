@@ -119,6 +119,19 @@ fn usage_of(answer: &str) -> Option<serde_json::Value> {
         .next_back()
 }
 
+/// What the provider said went wrong, from its body or from inside a stream it answered 200 to.
+fn failure_of(answer: &str) -> Option<String> {
+    let whole = serde_json::from_str::<serde_json::Value>(answer).ok();
+    let events = answer
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok());
+    whole
+        .into_iter()
+        .chain(events)
+        .find_map(|event| event["error"]["message"].as_str().map(str::to_owned))
+}
+
 /// What to charge: the provider's own figure where it gives one, else the tokens at list price,
 /// else — nothing having been reported — the reservation, which is the most it could have been.
 fn charge(terms: &Terms, usage: Option<&serde_json::Value>, reserved: u64) -> u64 {
@@ -237,8 +250,11 @@ async fn serve(
 
     let answer = String::from_utf8_lossy(&answer);
     let usage = usage_of(&answer);
-    // A request the provider refused outright was not charged for; anything else is.
-    let micros = if usage.is_none() && !(200..300).contains(&status) {
+    let failure = failure_of(&answer);
+    // A request refused outright, or failed inside its stream with nothing used, was not charged
+    // for; anything else is.
+    let refused = !(200..300).contains(&status) || failure.is_some();
+    let micros = if usage.is_none() && refused {
         0
     } else {
         charge(terms, usage.as_ref(), reserved)
@@ -246,6 +262,7 @@ async fn serve(
     let row = serde_json::json!({
         "micros": micros, "reserved": reserved, "status": status,
         "ms": began.elapsed().as_millis() as u64, "usage": usage, "model": terms.model,
+        "error": failure,
     });
     settle(terms, &id, &row);
     if let Some(path) = &terms.record

@@ -65,6 +65,8 @@ fn mentions_length(message: &str) -> bool {
         "input is too long",
         "reduce the length",
         "exceeds the maximum",
+        "exceeds maximum",
+        "maximum input length",
     ];
     let message = message.to_ascii_lowercase();
     PHRASES.iter().any(|phrase| message.contains(phrase))
@@ -141,6 +143,7 @@ mod tests {
             "context_length_exceeded",
             "prompt is too long: 250000 tokens > 200000 maximum",
             "Please reduce the length of the messages",
+            "Upstream error from DeepInfra: Requested input length 35327 exceeds maximum input length 32767",
         ] {
             assert_eq!(RetryClass::of(400, said), RetryClass::Overflow, "{said}");
         }

@@ -348,8 +348,21 @@ fn unfailed(tail: &[String], provider: &str) -> Result<(), ProviderError> {
         .map(|upstream| format!(" through {upstream}"))
         .unwrap_or_default();
     crate::noted!("ask: {provider}{through} failed mid-stream: {said}{code}");
+    // Classed by what was said, as a refusal with a status is: an upstream that timed out is
+    // asked again, and one that says the prompt is too long wants a smaller prompt, not another try.
+    let class = match error["code"]
+        .as_u64()
+        .and_then(|code| u16::try_from(code).ok())
+    {
+        Some(status) => match RetryClass::of(status, said) {
+            RetryClass::Overflow => RetryClass::Overflow,
+            class if class.is_retryable() => class,
+            _ => RetryClass::Transport,
+        },
+        None => RetryClass::Transport,
+    };
     Err(ProviderError::new(
-        RetryClass::Transport,
+        class,
         format!("{provider}{through} failed mid-stream: {said}{code}"),
     ))
 }
@@ -517,12 +530,24 @@ mod tests {
     fn an_upstream_failing_inside_the_stream_is_said_as_it_was_said() {
         let failed = r#"{"id":"gen-1","model":"unknown","provider":"Novita","choices":[],"error":{"code":504,"message":"The operation was aborted","metadata":{"error_type":"timeout"}}}"#;
         let why = unfailed(&[failed.to_owned()], "openrouter").expect_err("a failed stream");
-        assert_eq!(why.class, RetryClass::Transport);
+        assert_eq!(why.class, RetryClass::Overload);
         for part in ["Novita", "The operation was aborted", "504"] {
             assert!(why.message.contains(part), "{part}: {}", why.message);
         }
         let fine = r#"{"choices":[{"delta":{"content":"an error occurred to me"}}]}"#;
         assert!(unfailed(&[fine.to_owned()], "openrouter").is_ok());
+    }
+
+    #[test]
+    fn an_overflow_said_inside_the_stream_is_an_overflow() {
+        let long = r#"{"provider":"DeepInfra","choices":[],"error":{"code":400,"message":"Upstream error from DeepInfra: Requested input length 35327 exceeds maximum input length 32767"}}"#;
+        let why = unfailed(&[long.to_owned()], "openrouter").expect_err("too long");
+        assert_eq!(why.class, RetryClass::Overflow, "{}", why.message);
+        // Anything else said mid-stream is still asked again: the request was taken, so it was
+        // not malformed, whatever status the upstream's own failure carried.
+        let odd = r#"{"choices":[],"error":{"code":400,"message":"upstream hiccup"}}"#;
+        let why = unfailed(&[odd.to_owned()], "openrouter").expect_err("failed");
+        assert_eq!(why.class, RetryClass::Transport);
     }
 }
 
