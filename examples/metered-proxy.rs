@@ -37,10 +37,15 @@ fn reservation(terms: &Terms, body: &str, asked: &serde_json::Value) -> u64 {
 }
 
 /// Every line of the ledger added up: what was settled, and what was reserved and never settled.
-/// A request that died in flight stays counted at its reservation, which errs toward the cap.
+/// A request that died in flight stays counted at its reservation, which errs toward the cap. A
+/// `corrected` line replaces what its request was settled at: the ledger is only ever added to,
+/// so a charge that turns out wrong is put right by a line that says so.
 fn committed(ledger: &str) -> u64 {
     let mut open: BTreeMap<String, u64> = BTreeMap::new();
-    let mut settled = 0;
+    // What each request was last settled at, so a correction takes that back and no more: an id
+    // seen twice is two requests of two runs, and both were paid for.
+    let mut last: BTreeMap<String, u64> = BTreeMap::new();
+    let mut settled = 0u64;
     for line in ledger.lines() {
         let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -54,6 +59,11 @@ fn committed(ledger: &str) -> u64 {
             Some("settled") => {
                 open.remove(&id);
                 settled += micros;
+                last.insert(id, micros);
+            }
+            Some("corrected") => {
+                settled = settled - last.get(&id).copied().unwrap_or(0).min(settled) + micros;
+                last.insert(id, micros);
             }
             _ => {}
         }
@@ -323,7 +333,15 @@ async fn main() -> std::io::Result<()> {
     println!("PORT={}", listener.local_addr()?.port());
     std::io::stdout().flush()?;
 
-    let run = std::process::id();
+    // The hour it started as well as the process: a process id comes round again, and a ledger
+    // that outlives its runs must not take two requests for one.
+    let run = format!(
+        "{}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs()),
+        std::process::id()
+    );
     let mut count = 0u64;
     loop {
         let (mut socket, _) = listener.accept().await?;
