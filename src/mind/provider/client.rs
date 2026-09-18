@@ -255,7 +255,8 @@ impl Client {
             .rev()
             .find_map(|data| value_in(data, "provider"));
         crate::noted!("ask: {} stream ended, stop {stopped}", provider.id);
-        let outcome = finished(stopped, &provider.id)
+        let outcome = unfailed(&tail, &provider.id)
+            .and_then(|()| finished(stopped, &provider.id))
             .and_then(|()| unleaked(&said, &provider.id))
             .and_then(|()| completed(finish.as_deref(), &provider.id));
         // Only an answer that came through whole makes its upstream the one asked first.
@@ -313,6 +314,43 @@ fn completed(finish: Option<&str>, provider: &str) -> Result<(), ProviderError> 
     Err(ProviderError::new(
         RetryClass::Transport,
         format!("{provider} ended the stream with an error"),
+    ))
+}
+
+/// A router that took the request and then said, inside the stream, that the upstream it chose
+/// had failed. Said as it was said: "closed the stream" names the symptom and hides the cause,
+/// and which upstream it was is what the next attempt needs to know to go elsewhere.
+fn unfailed(tail: &[String], provider: &str) -> Result<(), ProviderError> {
+    let Some(error) = tail
+        .iter()
+        .rev()
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+        .find_map(|event| {
+            event
+                .get("error")
+                .filter(|e| e.is_object())
+                .cloned()
+                .map(|e| (e, event))
+        })
+    else {
+        return Ok(());
+    };
+    let (error, event) = error;
+    let said = error["message"]
+        .as_str()
+        .unwrap_or("an error with no message");
+    let code = error["code"]
+        .as_u64()
+        .map(|code| format!(" ({code})"))
+        .unwrap_or_default();
+    let through = event["provider"]
+        .as_str()
+        .map(|upstream| format!(" through {upstream}"))
+        .unwrap_or_default();
+    crate::noted!("ask: {provider}{through} failed mid-stream: {said}{code}");
+    Err(ProviderError::new(
+        RetryClass::Transport,
+        format!("{provider}{through} failed mid-stream: {said}{code}"),
     ))
 }
 
@@ -473,6 +511,18 @@ mod tests {
         assert!(finished(true, "p").is_ok());
         let cut = finished(false, "p").expect_err("a cut-off stream");
         assert!(cut.class.is_retryable(), "{}", cut.message);
+    }
+
+    #[test]
+    fn an_upstream_failing_inside_the_stream_is_said_as_it_was_said() {
+        let failed = r#"{"id":"gen-1","model":"unknown","provider":"Novita","choices":[],"error":{"code":504,"message":"The operation was aborted","metadata":{"error_type":"timeout"}}}"#;
+        let why = unfailed(&[failed.to_owned()], "openrouter").expect_err("a failed stream");
+        assert_eq!(why.class, RetryClass::Transport);
+        for part in ["Novita", "The operation was aborted", "504"] {
+            assert!(why.message.contains(part), "{part}: {}", why.message);
+        }
+        let fine = r#"{"choices":[{"delta":{"content":"an error occurred to me"}}]}"#;
+        assert!(unfailed(&[fine.to_owned()], "openrouter").is_ok());
     }
 }
 
