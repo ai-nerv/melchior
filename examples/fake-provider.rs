@@ -61,6 +61,11 @@ enum Event {
         arguments: String,
     },
     Finish(String),
+    /// Text, sent the way a bad network sends it: CRLF line endings, and the bytes of one
+    /// character split across two chunks.
+    Split(String),
+    /// Hang up here, with the answer unfinished and nothing to say it ended.
+    Drop,
     Usage {
         input: u64,
         output: u64,
@@ -92,6 +97,11 @@ impl Event {
                 serde_json::Value::Null,
             ),
             Self::Finish(reason) => choice(serde_json::json!({}), serde_json::json!(reason)),
+            Self::Split(text) => choice(
+                serde_json::json!({"content": text}),
+                serde_json::Value::Null,
+            ),
+            Self::Drop => serde_json::Value::Null,
             Self::Usage { input, output } => serde_json::json!({
                 "choices": [],
                 "usage": {"prompt_tokens": input, "completion_tokens": output}
@@ -149,6 +159,27 @@ async fn stream(socket: &mut tokio::net::TcpStream, turn: &Turn) -> std::io::Res
         )
         .await?;
     for event in &turn.events {
+        match event {
+            Event::Drop => return socket.shutdown().await,
+            Event::Split(_) => {
+                let bytes = format!("data: {}\r\n\r\n", event.payload()).into_bytes();
+                // Inside the first character that is more than one byte, or the middle.
+                let at = bytes
+                    .iter()
+                    .position(|byte| *byte >= 0x80)
+                    .map_or(bytes.len() / 2, |first| first + 1);
+                for part in [&bytes[..at], &bytes[at..]] {
+                    let mut framed = format!("{:x}\r\n", part.len()).into_bytes();
+                    framed.extend_from_slice(part);
+                    framed.extend_from_slice(b"\r\n");
+                    socket.write_all(&framed).await?;
+                    socket.flush().await?;
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                continue;
+            }
+            _ => {}
+        }
         chunk(socket, &format!("data: {}\n\n", event.payload())).await?;
     }
     chunk(socket, "data: [DONE]\n\n").await?;
