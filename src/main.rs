@@ -604,7 +604,8 @@ fn name_of(sort: melchior::wire::Sort) -> String {
 
 /// A [`Heard::Signal`] for each watched agent whose phase changed since the last roster. Watched is
 /// this session's children (peers whose parent is `me`) and its parent — the mechanical edges a
-/// coordinator reacts to. Only a real change fires, and a peer that reports no phase never does.
+/// coordinator reacts to. Only a real change fires, a peer that reports no phase never does, and
+/// one that vanishes mid-work is signalled as `lost`.
 fn signal_changes(
     me: &str,
     my_parent: Option<&str>,
@@ -612,31 +613,37 @@ fn signal_changes(
     was: &[Peer],
     now: &[Peer],
 ) -> Vec<Heard> {
-    let before: std::collections::BTreeMap<&str, Option<&str>> = was
-        .iter()
-        .map(|p| (p.id.as_str(), p.phase.as_deref()))
-        .collect();
+    let kin_of = |peer: &Peer| {
+        if peer.parent.as_deref() == Some(me) {
+            Some("child")
+        } else if Some(peer.id.as_str()) == my_parent {
+            Some("parent")
+        } else {
+            watched.contains(&peer.id).then_some("watched")
+        }
+    };
+    let signal = |peer: &Peer, kin: &str, kind: &str| Heard::Signal {
+        from: peer.id.clone(),
+        kind: kind.to_owned(),
+        kin: kin.to_owned(),
+        cause: peer.cause.clone(),
+    };
     let mut out = Vec::new();
     for peer in now {
-        let kin = if peer.parent.as_deref() == Some(me) {
-            "child"
-        } else if Some(peer.id.as_str()) == my_parent {
-            "parent"
-        } else if watched.contains(&peer.id) {
-            "watched"
-        } else {
+        let (Some(kin), Some(phase)) = (kin_of(peer), peer.phase.as_deref()) else {
             continue;
         };
-        let Some(phase) = peer.phase.as_deref() else {
-            continue;
-        };
-        if before.get(peer.id.as_str()).copied().flatten() != Some(phase) {
-            out.push(Heard::Signal {
-                from: peer.id.clone(),
-                kind: phase.to_owned(),
-                kin: kin.to_owned(),
-                cause: peer.cause.clone(),
-            });
+        let before = was.iter().find(|p| p.id == peer.id);
+        if before.and_then(|p| p.phase.as_deref()) != Some(phase) {
+            out.push(signal(peer, kin, phase));
+        }
+    }
+    // One that left the roster mid-work was killed, and would be waited on for ever.
+    for left in was.iter().filter(|p| !now.iter().any(|q| q.id == p.id)) {
+        if let Some(kin) = kin_of(left)
+            && !matches!(left.phase.as_deref(), Some("gone" | "finished"))
+        {
+            out.push(signal(left, kin, "lost"));
         }
     }
     out

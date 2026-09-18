@@ -178,3 +178,26 @@ fn an_explicitly_watched_stranger_signals() {
         vec![("far".to_owned(), "finished".to_owned())]
     );
 }
+
+#[test]
+fn a_child_that_vanishes_is_signalled_as_lost_once() {
+    let was = vec![peer("kid", Some("lead"), Some("working"))];
+    let watched = std::collections::BTreeSet::new();
+    let left = signal_changes("lead", None, &watched, &was, &[]);
+    assert_eq!(kinds(&left), vec![("kid".to_owned(), "lost".to_owned())]);
+    assert!(signal_changes("lead", None, &watched, &[], &[]).is_empty());
+}
+
+#[test]
+fn one_that_said_it_was_going_is_not_signalled_again() {
+    let was = vec![peer("kid", Some("lead"), Some("gone"))];
+    let watched = std::collections::BTreeSet::new();
+    assert!(signal_changes("lead", None, &watched, &was, &[]).is_empty());
+}
+
+#[test]
+fn one_that_finished_before_leaving_is_not_signalled_again() {
+    let was = vec![peer("kid", Some("lead"), Some("finished"))];
+    let watched = std::collections::BTreeSet::new();
+    assert!(signal_changes("lead", None, &watched, &was, &[]).is_empty());
+}
