@@ -36,6 +36,13 @@ struct When {
     /// A request whose body contains this.
     #[serde(default)]
     body: Option<String>,
+    /// A request whose body does not contain this: a lead's history quotes the brief it gave, so
+    /// the brief alone cannot tell a child from the lead that started it.
+    #[serde(default)]
+    without: Option<String>,
+    /// Answer one request and no more, so a second rule of the same shape answers the next.
+    #[serde(default)]
+    once: bool,
 }
 
 impl When {
@@ -47,6 +54,7 @@ impl When {
     fn holds(&self, body: &str, tools: usize) -> bool {
         self.tools.is_none_or(|n| n == tools)
             && self.body.as_deref().is_none_or(|b| body.contains(b))
+            && self.without.as_deref().is_none_or(|b| !body.contains(b))
     }
 }
 
@@ -214,11 +222,39 @@ async fn refuse(socket: &mut tokio::net::TcpStream, status: u16, why: &str) -> s
         .await
 }
 
+/// Which turn answers a request, chosen and marked under one lock so two requests arriving
+/// together are never handed the same turn.
+fn choose(turns: &[Turn], used: &mut [bool], body: &str) -> Option<usize> {
+    let tools = match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(asked) => asked
+            .get("tools")
+            .and_then(|t| t.as_array())
+            .map_or(0, Vec::len),
+        Err(_) => 0,
+    };
+    // A rule answers as often as it holds and is never used up, because helper jobs and a
+    // session's own turns arrive in no fixed order. The rest are handed out in turn.
+    let rule = |at: usize| turns[at].when.as_ref().is_some_and(When::is_rule);
+    let once = |at: usize| turns[at].when.as_ref().is_some_and(|w| w.once);
+    let named = (0..turns.len()).find(|&at| {
+        rule(at)
+            && !(used[at] && once(at))
+            && turns[at]
+                .when
+                .as_ref()
+                .is_some_and(|w| w.holds(body, tools))
+    });
+    let chosen = named.or_else(|| (0..turns.len()).find(|&at| !used[at] && !rule(at)))?;
+    used[chosen] = !rule(chosen) || once(chosen);
+    Some(chosen)
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
     let flags = flags();
     let script = flags.get("script").expect("--script <file>");
-    let turns: Vec<Turn> = serde_json::from_str(&std::fs::read_to_string(script)?)?;
+    let turns: std::sync::Arc<Vec<Turn>> =
+        std::sync::Arc::new(serde_json::from_str(&std::fs::read_to_string(script)?)?);
     let port: u16 = flags.get("port").map_or(0, |p| p.parse().unwrap_or(0));
     let record = flags.get("record").cloned();
 
@@ -226,52 +262,37 @@ async fn main() -> std::io::Result<()> {
     println!("PORT={}", listener.local_addr()?.port());
     std::io::Write::flush(&mut std::io::stdout())?;
 
-    let mut used = vec![false; turns.len()];
-    let mut asked = 0;
+    let used = std::sync::Arc::new(std::sync::Mutex::new(vec![false; turns.len()]));
     loop {
         let (mut socket, _) = listener.accept().await?;
-        let Some(body) = request(&mut socket).await? else {
-            continue;
-        };
-        if let Some(path) = &record {
-            use std::io::Write;
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)?;
-            writeln!(file, "{body}")?;
-        }
-        let tools = match serde_json::from_str::<serde_json::Value>(&body) {
-            Ok(asked) => asked
-                .get("tools")
-                .and_then(|t| t.as_array())
-                .map_or(0, Vec::len),
-            Err(_) => 0,
-        };
-        // A rule answers as often as it holds and is never used up, because helper jobs and a
-        // session's own turns arrive in no fixed order. The rest are handed out in turn.
-        let rule = |at: usize| turns[at].when.as_ref().is_some_and(When::is_rule);
-        let named = (0..turns.len()).find(|&at| {
-            rule(at)
-                && turns[at]
-                    .when
-                    .as_ref()
-                    .is_some_and(|w| w.holds(&body, tools))
-        });
-        let chosen = named.or_else(|| (0..turns.len()).find(|&at| !used[at] && !rule(at)));
-        match chosen {
-            Some(at) => {
-                used[at] = !rule(at);
-                match &turns[at].refuse {
-                    Some(no) => refuse(&mut socket, no.status, &no.message).await?,
-                    None => stream(&mut socket, &turns[at]).await?,
+        let (turns, used, record) = (turns.clone(), used.clone(), record.clone());
+        // Each on its own task, as a provider serves its customers: one answer held open must
+        // not keep everybody else waiting behind it.
+        tokio::spawn(async move {
+            let Ok(Some(body)) = request(&mut socket).await else {
+                return;
+            };
+            if let Some(path) = &record {
+                use std::io::Write;
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    let _ = writeln!(file, "{body}");
                 }
             }
-            None => {
-                let why = format!("no turn was scripted for request {asked}");
-                refuse(&mut socket, 500, &why).await?
-            }
-        }
-        asked += 1;
+            let chosen = used
+                .lock()
+                .ok()
+                .and_then(|mut used| choose(&turns, &mut used, &body));
+            let _ = match chosen.map(|at| &turns[at]) {
+                Some(turn) => match &turn.refuse {
+                    Some(no) => refuse(&mut socket, no.status, &no.message).await,
+                    None => stream(&mut socket, turn).await,
+                },
+                None => refuse(&mut socket, 500, "no turn was scripted for this request").await,
+            };
+        });
     }
 }
