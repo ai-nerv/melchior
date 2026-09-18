@@ -64,6 +64,8 @@ enum Event {
     /// Text, sent the way a bad network sends it: CRLF line endings, and the bytes of one
     /// character split across two chunks.
     Split(String),
+    /// Say nothing for this many milliseconds, with the answer still open.
+    Pause(u64),
     /// Hang up here, with the answer unfinished and nothing to say it ended.
     Drop,
     Usage {
@@ -102,6 +104,7 @@ impl Event {
                 serde_json::Value::Null,
             ),
             Self::Drop => serde_json::Value::Null,
+            Self::Pause(_) => serde_json::Value::Null,
             Self::Usage { input, output } => serde_json::json!({
                 "choices": [],
                 "usage": {"prompt_tokens": input, "completion_tokens": output}
@@ -161,6 +164,11 @@ async fn stream(socket: &mut tokio::net::TcpStream, turn: &Turn) -> std::io::Res
     for event in &turn.events {
         match event {
             Event::Drop => return socket.shutdown().await,
+            Event::Pause(ms) => {
+                socket.flush().await?;
+                tokio::time::sleep(std::time::Duration::from_millis(*ms)).await;
+                continue;
+            }
             Event::Split(_) => {
                 let bytes = format!("data: {}\r\n\r\n", event.payload()).into_bytes();
                 // Inside the first character that is more than one byte, or the middle.
