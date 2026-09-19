@@ -388,3 +388,70 @@ async fn successful_streams_outlive_control_deadlines_and_cancellation_closes_th
     }
     server.wait_for(&server.closed, 1).await;
 }
+
+#[test]
+fn what_a_dialect_keeps_for_itself_is_not_sent() {
+    let built = json!({"model": "m", "state": "s", "__scratch": {"fields": {"safe": {}}}});
+    let (sent, kept) = parted(built);
+    assert_eq!(sent, json!({"model": "m", "state": "s"}));
+    assert_eq!(kept, Some(json!({"fields": {"safe": {}}})));
+    assert_eq!(parted(json!({"model": "m"})), (json!({"model": "m"}), None));
+}
+
+#[tokio::test]
+async fn a_reply_that_is_one_document_reaches_the_dialect_whole_however_it_is_cut() {
+    // Not a stream: no `data:` line ever comes, so no event does. Cut in the middle of a
+    // multi-byte character to be sure it is put together before it is read.
+    let document = json!({
+        "answers": { "answer": { "type": "noul", "noul": 0.91 } },
+        "usage": { "input_tokens": 12, "output_tokens": 3, "cost": 0.000_002 },
+        "note": "café 🦀",
+    })
+    .to_string();
+    let bytes = document.as_bytes();
+    let at = bytes
+        .iter()
+        .position(|b| *b >= 0x80)
+        .expect("a wide character")
+        + 1;
+    let replies = vec![
+        reply(200, bytes),
+        vec![
+            headers(200),
+            chunk(&bytes[..at]),
+            Step::Pause(Duration::from_millis(1)),
+            chunk(&bytes[at..]),
+            Step::Bytes(b"0\r\n\r\n".to_vec()),
+        ],
+    ];
+    let server = Server::start(replies).await;
+    let deciding =
+        LuaAdapter::new(engine_with_builtins().expect("protocols"), "decisions").expect("adapter");
+    for _ in 0..2 {
+        let (provider, model, context, options) = (
+            provider(&server.url),
+            model(),
+            Context::default(),
+            Options::default(),
+        );
+        let mut events = Vec::new();
+        Client::new()
+            .stream(
+                &Call {
+                    adapter: &deciding,
+                    provider: &provider,
+                    model: &model,
+                    context: &context,
+                    options: &options,
+                },
+                |event| events.push(event),
+            )
+            .await
+            .expect("answered");
+        assert!(
+            events.contains(&Delta::Text("yes (0.91)".into())),
+            "{events:?}"
+        );
+        assert!(events.contains(&Delta::Stop(crate::mind::model::StopReason::EndTurn)));
+    }
+}

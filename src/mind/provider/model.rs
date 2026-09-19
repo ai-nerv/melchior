@@ -32,6 +32,8 @@ pub enum Api {
     BedrockConverseStream,
     /// Pi's own protocol, for a pi-compatible endpoint.
     PiMessages,
+    /// Models that answer typed questions about a state rather than write: one JSON document.
+    Decisions,
 }
 
 impl Api {
@@ -48,12 +50,13 @@ impl Api {
             Self::GoogleVertex => "google-vertex",
             Self::BedrockConverseStream => "bedrock-converse-stream",
             Self::PiMessages => "pi-messages",
+            Self::Decisions => "decisions",
         }
     }
 
     /// Every protocol magi knows.
     #[must_use]
-    pub const fn all() -> [Self; 9] {
+    pub const fn all() -> [Self; 10] {
         [
             Self::AnthropicMessages,
             Self::OpenAiCompletions,
@@ -64,6 +67,7 @@ impl Api {
             Self::GoogleVertex,
             Self::BedrockConverseStream,
             Self::PiMessages,
+            Self::Decisions,
         ]
     }
 }

@@ -266,8 +266,8 @@ fn a_stated_gap_explains_itself_rather_than_restating_the_name() {
 }
 
 #[test]
-fn magi_speaks_eight_of_the_nine_protocols_it_knows() {
+fn magi_speaks_nine_of_the_ten_protocols_it_knows() {
     let mut engine = engine_with_builtins().expect("builtins");
-    assert_eq!(engine.apis().len(), 8);
-    assert_eq!(Api::all().len(), 9);
+    assert_eq!(engine.apis().len(), 9);
+    assert_eq!(Api::all().len(), 10);
 }

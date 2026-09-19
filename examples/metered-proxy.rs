@@ -12,6 +12,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// What one run may do, fixed when it starts.
 struct Terms {
     upstream: String,
+    /// What is asked of the upstream: a chat completion unless told otherwise.
+    path: String,
     model: String,
     key: String,
     ledger: String,
@@ -215,7 +217,7 @@ async fn serve(
 
     let began = std::time::Instant::now();
     let sent = client
-        .post(format!("{}/chat/completions", terms.upstream))
+        .post(format!("{}{}", terms.upstream, terms.path))
         .bearer_auth(&terms.key)
         .header("Content-Type", "application/json")
         .body(body.clone())
@@ -319,6 +321,10 @@ async fn main() -> std::io::Result<()> {
     let key = std::env::var(need("key-env")).unwrap_or_default();
     let terms = std::sync::Arc::new(Terms {
         upstream: need("upstream").trim_end_matches('/').to_owned(),
+        path: flags
+            .get("path")
+            .cloned()
+            .unwrap_or_else(|| "/chat/completions".to_owned()),
         model: need("model"),
         key,
         ledger: need("ledger"),

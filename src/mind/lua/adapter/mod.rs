@@ -264,6 +264,8 @@ pub fn engine_with_builtins() -> Result<Engine, crate::mind::lua::LuaError> {
 }
 
 #[cfg(test)]
+mod deciding;
+#[cfg(test)]
 mod protocols;
 #[cfg(test)]
 mod support;

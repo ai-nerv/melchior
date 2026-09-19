@@ -176,7 +176,7 @@ impl Client {
         for (name, value) in adapter.headers(key.as_deref()) {
             request = request.header(name, value);
         }
-        let body = adapter.request(model, context, options);
+        let (body, kept_by_dialect) = parted(adapter.request(model, context, options));
 
         // Bounded like the body below: a provider that takes the request and never answers at all
         // holds the turn open for as long as it stays quiet.
@@ -208,6 +208,13 @@ impl Client {
 
         let mut parser = sse::Parser::new();
         let mut state = crate::mind::provider::api::StreamState::default();
+        if let Some(kept) = kept_by_dialect {
+            state.scratch = kept;
+        }
+        // A reply that is one JSON document and no stream yields no events; it is kept, within a
+        // bound, to be handed over whole once it is known that none came.
+        let mut whole: Vec<u8> = Vec::new();
+        let mut events = 0usize;
         let mut stopped = false;
         let mut said = String::new();
         // The last events, said when the stream ends: whether a finish came before the end is what
@@ -222,8 +229,12 @@ impl Client {
             let chunk = chunk.map_err(|e| {
                 ProviderError::new(RetryClass::Transport, e.without_url().to_string())
             })?;
+            if events == 0 && whole.len() + chunk.len() <= WHOLE {
+                whole.extend_from_slice(&chunk);
+            }
             parser
                 .feed(&chunk, |event| {
+                    events += 1;
                     kept(&mut tail, &event.data);
                     for delta in adapter.on_event(&mut state, &event) {
                         stopped |= matches!(delta, Delta::Stop(_));
@@ -239,6 +250,23 @@ impl Client {
             .finish()
             .map_err(|why| ProviderError::new(RetryClass::Transport, why.to_string()))?
         {
+            events += 1;
+            kept(&mut tail, &event.data);
+            for delta in adapter.on_event(&mut state, &event) {
+                stopped |= matches!(delta, Delta::Stop(_));
+                if let Delta::Text(text) = &delta {
+                    said.push_str(text);
+                }
+                on_delta(delta);
+            }
+        }
+        // No event at all, and what came is one JSON document: a dialect that answers whole
+        // rather than in a stream is handed it as one event, named for what it is.
+        if events == 0 && serde_json::from_slice::<serde_json::Value>(&whole).is_ok() {
+            let event = sse::Event {
+                name: "body".to_owned(),
+                data: String::from_utf8_lossy(&whole).into_owned(),
+            };
             kept(&mut tail, &event.data);
             for delta in adapter.on_event(&mut state, &event) {
                 stopped |= matches!(delta, Delta::Stop(_));
@@ -281,6 +309,18 @@ fn value_in(data: &str, key: &str) -> Option<String> {
     let len = data[from..].find('"')?;
     Some(data[from..from + len].to_owned())
 }
+
+/// A request as a dialect built it, apart from what the dialect kept for itself under
+/// `__scratch`: what it needs in order to read the reply, which is no part of what is sent.
+fn parted(mut body: serde_json::Value) -> (serde_json::Value, Option<serde_json::Value>) {
+    let kept = body
+        .as_object_mut()
+        .and_then(|fields| fields.remove("__scratch"));
+    (body, kept)
+}
+
+/// The most of a reply kept in case it turns out to be one document and no stream.
+const WHOLE: usize = 1 << 20;
 
 /// Keep the last two events' data, bounded.
 fn kept(tail: &mut Vec<String>, data: &str) {
