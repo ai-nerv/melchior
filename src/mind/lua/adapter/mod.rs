@@ -98,16 +98,21 @@ fn asked(model: &Model, options: &Options) -> serde_json::Value {
     value
 }
 
-/// What to ask this model for, or nothing when it does not reason: one sent `reasoning_effort`
-/// that has none answers 400.
+/// What to ask this model for. Nothing for a level a model that does not reason cannot use —
+/// one sent `reasoning_effort` that has none answers 400 — but `off` is always said, and each
+/// dialect turns it into that provider's own way of saying it rather than an effort.
 fn effective_thinking(model: &Model, options: &Options) -> Option<String> {
-    if !model.reasoning {
-        return None;
-    }
     let level = options.thinking?;
-    // Said rather than left out: a model that reasons by default goes on reasoning unless told not to.
+    // Said rather than left out, and said even where the catalog believes this model does not
+    // reason: that belief is the provider's word, and being wrong about it costs the whole
+    // answer. A helper asking for 1000 tokens spent 999 of them reasoning and returned nothing,
+    // because "off" was dropped here. Telling a model that cannot reason not to reason costs a
+    // field it ignores.
     if level == crate::mind::model::ThinkingLevel::Off {
         return Some("off".to_owned());
+    }
+    if !model.reasoning {
+        return None;
     }
     match model.thinking.get(&level) {
         // Named: this model calls that level something else.
@@ -335,12 +340,21 @@ mod thinking_tests {
         assert!(asked.get("thinking").is_none(), "{asked}");
     }
 
+    /// Off is said to every model, including one the catalog believes cannot reason.
+    ///
+    /// That belief is the provider's word copied into a declaration, and it is wrong often
+    /// enough to matter: a helper allowed 1000 tokens spent 999 of them reasoning and answered
+    /// nothing, on a model whose catalog entry said `reasoning = false`. A field a model
+    /// ignores costs nothing; the silence cost the whole answer.
     #[test]
-    fn off_is_said_to_a_model_that_reasons_so_it_can_stop() {
-        let reasons = asked(&model(true, BTreeMap::new()), &wanting(ThinkingLevel::Off));
-        assert_eq!(reasons["thinking"], "off", "{reasons}");
-        let plain = asked(&model(false, BTreeMap::new()), &wanting(ThinkingLevel::Off));
-        assert!(plain.get("thinking").is_none(), "{plain}");
+    fn off_is_said_to_every_model_so_one_that_reasons_can_stop() {
+        for reasons in [true, false] {
+            let asked = asked(
+                &model(reasons, BTreeMap::new()),
+                &wanting(ThinkingLevel::Off),
+            );
+            assert_eq!(asked["thinking"], "off", "reasoning = {reasons}: {asked}");
+        }
     }
 
     #[test]
