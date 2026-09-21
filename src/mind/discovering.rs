@@ -3,6 +3,7 @@
 //! cache is what load time reads, and a fetch happens only when it is missing or older than
 //! [`FRESH`], its failure leaving whatever the cache last held.
 
+use crate::mind::model::ThinkingLevel;
 use crate::mind::provider::endpoint::Provider;
 use crate::mind::provider::model::Model;
 use std::path::PathBuf;
@@ -47,14 +48,19 @@ pub fn discover(providers: &mut [Provider]) {
         if let Some(found) = found {
             provider.models = found
                 .into_iter()
-                .map(|mut model| {
-                    model.provider = provider.id.clone();
-                    model.api = provider.api;
-                    model
-                })
+                .map(|model| joined(model, provider))
                 .collect();
         }
     }
+}
+
+/// A discovered model as its provider serves it: the provider's id, protocol and dialect. Without
+/// the dialect it spoke plain OpenAI, and a reasoning level, off included, never reached the provider.
+fn joined(mut model: Model, provider: &crate::mind::provider::endpoint::Provider) -> Model {
+    model.provider.clone_from(&provider.id);
+    model.api = provider.api;
+    model.compat = Some(model.compat.unwrap_or_default().over(provider.compat));
+    model
 }
 
 /// A cached catalog, and whether it is still worth using without asking again.
@@ -183,9 +189,44 @@ fn one(entry: &serde_json::Value) -> Option<Model> {
         provider: String::new(),
         api: crate::mind::provider::model::Api::OpenAiCompletions,
         input: vec![crate::mind::provider::model::Modality::Text],
-        thinking: std::collections::BTreeMap::new(),
+        thinking: levels(entry),
         compat: None,
     })
+}
+
+/// What each thinking level is called here.
+///
+/// A model that must reason has no "off", and saying nothing is not the same as saying "off": with
+/// no effort named the provider applies its own default, which for these is usually the largest
+/// one. A helper given a thousand tokens then spends them all reasoning and answers nothing. So
+/// "off" becomes the least reasoning this model will do, which is a request it accepts and a bill
+/// the caller meant. `reasoning.mandatory` and `reasoning.supported_efforts` are its own words.
+fn levels(entry: &serde_json::Value) -> std::collections::BTreeMap<ThinkingLevel, Option<String>> {
+    let mut out = std::collections::BTreeMap::new();
+    let reasoning = entry.get("reasoning");
+    let mandatory = reasoning
+        .and_then(|it| it.get("mandatory"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if mandatory {
+        out.insert(ThinkingLevel::Off, Some(least(reasoning)));
+    }
+    out
+}
+
+/// The least reasoning a model offers, by name. Ranked here rather than taken in the order the
+/// provider happens to list them, which is nobody's idea of least-first.
+fn least(reasoning: Option<&serde_json::Value>) -> String {
+    const LEAST_FIRST: [&str; 6] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+    let offered: Vec<&str> = reasoning
+        .and_then(|it| it.get("supported_efforts"))
+        .and_then(serde_json::Value::as_array)
+        .map(|list| list.iter().filter_map(serde_json::Value::as_str).collect())
+        .unwrap_or_default();
+    LEAST_FIRST
+        .iter()
+        .find(|want| offered.contains(want))
+        .map_or_else(|| "low".to_owned(), |found| (*found).to_owned())
 }
 
 /// Whether the provider says this model can reason.
@@ -325,8 +366,94 @@ mod tests {
             compat: None,
             models: Vec::new(),
             discover: false,
+            avoid: Vec::new(),
         }];
         discover(&mut providers);
         assert!(providers[0].models.is_empty());
+    }
+
+    #[test]
+    fn a_discovered_model_speaks_its_providers_dialect() {
+        use crate::mind::provider::compat::{Compat, ThinkingFormat, resolve};
+        let provider = crate::mind::provider::endpoint::Provider {
+            id: "router".into(),
+            name: "Router".into(),
+            base_url: None,
+            api: crate::mind::provider::model::Api::OpenAiCompletions,
+            auth: crate::mind::provider::endpoint::Auth::None,
+            compat: Some(Compat {
+                thinking_format: Some(ThinkingFormat::OpenRouter),
+                ..Compat::default()
+            }),
+            models: Vec::new(),
+            discover: true,
+            avoid: Vec::new(),
+        };
+        let model = joined(parse(&bare()).remove(0), &provider);
+        assert_eq!(model.provider, "router");
+        assert_eq!(
+            resolve(model.compat).thinking_format,
+            ThinkingFormat::OpenRouter
+        );
+    }
+}
+
+#[cfg(test)]
+mod reasoning_tests {
+    use super::*;
+
+    fn card(reasoning: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "reasoning": reasoning })
+    }
+
+    #[test]
+    fn a_model_that_must_reason_takes_the_least_it_will_do_as_its_off() {
+        // Not "say nothing": with no effort named the provider applies `default_effort`, which
+        // here is `max`. A helper on a small budget then spends all of it reasoning.
+        let held = levels(&card(serde_json::json!({
+            "mandatory": true,
+            "default_effort": "max",
+            "supported_efforts": ["max", "high", "low"],
+        })));
+        assert_eq!(held.get(&ThinkingLevel::Off), Some(&Some("low".to_owned())));
+    }
+
+    #[test]
+    fn the_least_is_ranked_rather_than_taken_in_the_order_they_are_listed() {
+        // OpenRouter lists these largest-first, so the last one is not reliably the smallest.
+        assert_eq!(
+            least(Some(&serde_json::json!({
+                "supported_efforts": ["high", "medium", "low", "minimal"]
+            }))),
+            "minimal"
+        );
+        assert_eq!(
+            least(Some(&serde_json::json!({
+                "supported_efforts": ["max", "high"]
+            }))),
+            "high"
+        );
+    }
+
+    #[test]
+    fn a_model_that_names_no_efforts_still_gets_a_small_one() {
+        // Mandatory with nothing said about which levels it takes: anything is better than
+        // letting its own default stand.
+        let held = levels(&card(serde_json::json!({ "mandatory": true })));
+        assert_eq!(held.get(&ThinkingLevel::Off), Some(&Some("low".to_owned())));
+    }
+
+    #[test]
+    fn a_model_that_may_reason_keeps_its_off() {
+        let held = levels(&card(serde_json::json!({ "mandatory": false })));
+        assert!(held.is_empty(), "{held:?}");
+    }
+
+    #[test]
+    fn a_provider_that_says_nothing_about_it_is_left_alone() {
+        // Every provider but OpenRouter says nothing here, and silence must not take a level away.
+        assert!(levels(&serde_json::json!({})).is_empty());
+        assert!(levels(&card(serde_json::json!("yes"))).is_empty());
+        assert!(levels(&card(serde_json::json!({ "supported_efforts": ["low"] }))).is_empty());
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "melchior"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "One agent talking to another: naming, finding, reaching and refusing"
 license = "MIT"
@@ -20,7 +20,7 @@ path = "src/main.rs"
 # makes melchior an agent runtime rather than a message bus. What a harness needs still crosses as
 # data and as bytes on a pipe.
 [dependencies]
-rustix = { version = "0.38", features = ["process"] }
+rustix = { version = "0.38", features = ["process", "fs"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 # `signal` because the way a `serve` actually ends is a `SIGTERM` from the kernel, and a signal

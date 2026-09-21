@@ -98,14 +98,26 @@ fn asked(model: &Model, options: &Options) -> serde_json::Value {
     value
 }
 
-/// What to ask this model for, or nothing when it does not reason: one sent `reasoning_effort`
-/// that has none answers 400.
+/// What to ask this model for. Nothing for a level a model that does not reason cannot use —
+/// one sent `reasoning_effort` that has none answers 400 — but `off` is always said, and each
+/// dialect turns it into that provider's own way of saying it rather than an effort.
 fn effective_thinking(model: &Model, options: &Options) -> Option<String> {
-    if !model.reasoning {
-        return None;
-    }
     let level = options.thinking?;
+    // Said rather than left out, and said even where the catalog believes this model does not
+    // reason: that belief is the provider's word, and being wrong about it costs the whole
+    // answer. A helper asking for 1000 tokens spent 999 of them reasoning and returned nothing,
+    // because "off" was dropped here. Telling a model that cannot reason not to reason costs a
+    // field it ignores.
     if level == crate::mind::model::ThinkingLevel::Off {
+        // Unless this model has no "off": one that must reason takes the least it will do instead.
+        // Saying nothing would leave its own default standing, which is usually the largest.
+        return match model.thinking.get(&level) {
+            Some(Some(least)) => Some(least.clone()),
+            Some(None) => None,
+            None => Some("off".to_owned()),
+        };
+    }
+    if !model.reasoning {
         return None;
     }
     match model.thinking.get(&level) {
@@ -263,6 +275,8 @@ pub fn engine_with_builtins() -> Result<Engine, crate::mind::lua::LuaError> {
 }
 
 #[cfg(test)]
+mod deciding;
+#[cfg(test)]
 mod protocols;
 #[cfg(test)]
 mod support;
@@ -297,6 +311,7 @@ mod thinking_tests {
             thinking: Some(level),
             max_tokens: None,
             provider: None,
+            avoid: Vec::new(),
         }
     }
 
@@ -331,10 +346,39 @@ mod thinking_tests {
         assert!(asked.get("thinking").is_none(), "{asked}");
     }
 
+    /// Off is said to every model, including one the catalog believes cannot reason.
+    ///
+    /// That belief is the provider's word copied into a declaration, and it is wrong often
+    /// enough to matter: a helper allowed 1000 tokens spent 999 of them reasoning and answered
+    /// nothing, on a model whose catalog entry said `reasoning = false`. A field a model
+    /// ignores costs nothing; the silence cost the whole answer.
     #[test]
-    fn off_is_not_a_level_to_ask_for() {
-        let asked = asked(&model(true, BTreeMap::new()), &wanting(ThinkingLevel::Off));
+    fn a_model_that_must_reason_is_asked_for_the_least_rather_than_for_nothing() {
+        // The one exception to the rule below. Told to stop, it refuses the whole request; told
+        // nothing, it reasons as much as it likes and a helper's budget goes on that alone.
+        let mut map = BTreeMap::new();
+        map.insert(ThinkingLevel::Off, Some("low".to_owned()));
+        let asked = asked(&model(true, map), &wanting(ThinkingLevel::Off));
+        assert_eq!(asked["thinking"], "low", "{asked}");
+    }
+
+    #[test]
+    fn a_level_marked_absent_outright_is_still_not_asked_for() {
+        let mut map = BTreeMap::new();
+        map.insert(ThinkingLevel::Off, None);
+        let asked = asked(&model(true, map), &wanting(ThinkingLevel::Off));
         assert!(asked.get("thinking").is_none(), "{asked}");
+    }
+
+    #[test]
+    fn off_is_said_to_every_model_so_one_that_reasons_can_stop() {
+        for reasons in [true, false] {
+            let asked = asked(
+                &model(reasons, BTreeMap::new()),
+                &wanting(ThinkingLevel::Off),
+            );
+            assert_eq!(asked["thinking"], "off", "reasoning = {reasons}: {asked}");
+        }
     }
 
     #[test]

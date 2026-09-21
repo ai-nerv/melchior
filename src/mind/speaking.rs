@@ -78,9 +78,20 @@ pub fn models(flags: &std::collections::BTreeMap<String, String>) -> std::io::Re
                 let _ = only;
                 cards.retain(|card| card.ready);
             }
+            crate::noted!(
+                "models: {} cards, {} ready",
+                cards.len(),
+                cards.iter().filter(|card| card.ready).count()
+            );
             reply(&mut out, how, &cards)
         }
-        Err(why) => refuse(&mut out, how, &why.to_string(), Fault::Refused),
+        Err(why) => {
+            crate::noted!(
+                "models: refused — {}",
+                crate::noted::short(&why.to_string())
+            );
+            refuse(&mut out, how, &why.to_string(), Fault::Refused)
+        }
     }
 }
 
@@ -96,6 +107,7 @@ pub fn card(flags: &std::collections::BTreeMap<String, String>) -> std::io::Resu
             Fault::Refused,
         );
     };
+    crate::noted!("card: {asked}");
     match Catalog::load(&Catalog::dir()) {
         Ok(catalog) => match catalog.find(asked) {
             Some((provider, model)) => reply(
@@ -175,6 +187,7 @@ pub fn stream(out: &mut impl Write, how: As, said: &Said) -> std::io::Result<()>
 pub fn needs(flags: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
     let how = As::asked(flags);
     let mut out = std::io::stdout().lock();
+    crate::noted!("needs: asked");
     reply(&mut out, how, &crate::mind::setup::needs())
 }
 
@@ -249,10 +262,20 @@ pub fn configure(flags: &std::collections::BTreeMap<String, String>) -> std::io:
     let mut source = String::new();
     std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut source)?;
     match crate::mind::setup::configure(&source) {
-        Ok(applied) => reply(&mut out, how, &[applied]),
+        Ok(applied) => {
+            crate::noted!(
+                "configure: set {:?}, refused {}",
+                applied.set,
+                applied.refused.len()
+            );
+            reply(&mut out, how, &[applied])
+        }
         // A chunk that will not run is a refusal, not a crash: the coordinator sent something,
         // and what it needs back is which part was wrong.
-        Err(why) => refuse(&mut out, how, &why, Fault::Refused),
+        Err(why) => {
+            crate::noted!("configure: refused — {}", crate::noted::short(&why));
+            refuse(&mut out, how, &why, Fault::Refused)
+        }
     }
 }
 

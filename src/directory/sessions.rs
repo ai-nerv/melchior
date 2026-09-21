@@ -377,4 +377,34 @@ mod tests {
             "another run's agent is on the roster: {held:?}"
         );
     }
+
+    #[test]
+    fn a_child_is_on_the_roster_of_a_run_named_as_runs_are() {
+        // A run is `<root>-<started>`, never the root's bare id: a roster that walked up to the
+        // id and compared it with the run held nobody but the root.
+        let project = alone("named");
+        let _bound: Vec<_> = [
+            ("alpha-rho", "alpha-rho-1789480440"),
+            ("iota-mu", "alpha-rho-1789480440"),
+            ("beta-nu", "beta-nu-1789480441"),
+        ]
+        .into_iter()
+        .map(|(agent, run)| {
+            let me = id(&project, agent);
+            std::fs::write(session_at(&me), run).expect("the note");
+            std::os::unix::net::UnixListener::bind(super::super::listening_at(&me)).expect("bind")
+        })
+        .collect();
+        let child = crate::directory::home(&project).join("iota-mu.parent");
+        std::fs::write(child, "alpha-rho").expect("the parent note");
+
+        for asking in ["alpha-rho", "iota-mu"] {
+            let mut held: Vec<String> = crew(&whom(&project, asking))
+                .into_iter()
+                .map(|them| them.id)
+                .collect();
+            held.sort();
+            assert_eq!(held, ["alpha-rho", "iota-mu"], "asked by {asking}");
+        }
+    }
 }

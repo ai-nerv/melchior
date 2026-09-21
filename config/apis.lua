@@ -9,6 +9,18 @@
 -- dollars held against a one-line answer. `max_tokens` in the config says otherwise.
 local OUTPUT = 32000
 
+-- A schema as a provider that checks one will take it: without the `x-` hints a caller writes
+-- for the `decisions` protocol, which a strict checker refuses as words it does not know.
+local function plain(schema)
+  -- An empty one is handed back as it came: a copy would not say whether it was a list.
+  if type(schema) ~= "table" or next(schema) == nil then return schema end
+  local out = {}
+  for key, value in pairs(schema) do
+    if not (type(key) == "string" and key:sub(1, 2) == "x-") then out[key] = plain(value) end
+  end
+  return out
+end
+
 do -- openai-completions
   local M = {}
 
@@ -98,6 +110,11 @@ do -- openai-completions
       body.usage = { include = true }
       -- A provider the person chose is asked first; the rest stay behind it as fallbacks.
       if opts.provider then body.provider = { order = { opts.provider } } end
+      -- Upstreams this provider is never served by, fallbacks included.
+      if opts.avoid and #opts.avoid > 0 then
+        body.provider = body.provider or {}
+        body.provider.ignore = opts.avoid
+      end
     end
 
     if ctx.tools and #ctx.tools > 0 then
@@ -115,12 +132,22 @@ do -- openai-completions
     if opts.schema then
       body.response_format = {
         type = "json_schema",
-        json_schema = { name = opts.schema.name, schema = opts.schema.schema, strict = true },
+        json_schema = { name = opts.schema.name, schema = plain(opts.schema.schema), strict = true },
       }
     end
 
     local level = opts.thinking
-    if level then
+    if level == "off" then
+      -- Said out loud: a model that reasons by default goes on reasoning unless told not to.
+      local format = compat.thinking_format
+      if format == "openrouter" then
+        body.reasoning = { enabled = false }
+      elseif format == "deepseek" or format == "zai" then
+        body.thinking = { type = "disabled" }
+      elseif format == "qwen" then
+        body.enable_thinking = false
+      end
+    elseif level then
       local format = compat.thinking_format
       if format == "openrouter" then
         body.reasoning = { effort = level }
@@ -278,7 +305,7 @@ do -- openai-responses
         format = {
           type = "json_schema",
           name = opts.schema.name,
-          schema = opts.schema.schema,
+          schema = plain(opts.schema.schema),
           strict = true,
         },
       }
@@ -485,7 +512,7 @@ do -- anthropic-messages
         {
           name = opts.schema.name,
           description = "Answer by calling this with the requested value.",
-          input_schema = opts.schema.schema,
+          input_schema = plain(opts.schema.schema),
         },
       }
       body.tool_choice = { type = "tool", name = opts.schema.name }
@@ -637,7 +664,7 @@ do -- google
     if opts.schema then
       body.generationConfig = body.generationConfig or {}
       body.generationConfig.responseMimeType = "application/json"
-      body.generationConfig.responseSchema = opts.schema.schema
+      body.generationConfig.responseSchema = plain(opts.schema.schema)
     end
 
     if ctx.system then
@@ -851,4 +878,165 @@ do -- pi-messages
   end
 
   melchior.api("pi-messages", M)
+end
+
+do -- decisions
+  -- Models that decide rather than write: asked typed questions about a state, they answer each
+  -- with a value and how sure they are, in one JSON document and a third of a second. TypeSafe's
+  -- Jev is the first; OpenRouter serves it at `/api/alpha/decisions`, TypeSafe at `/v1/systemone`,
+  -- and both take the same body.
+  --
+  -- A caller asks as it asks any model: a system prompt, messages, and a JSON Schema for the
+  -- answer. The schema is what becomes the questions, one per property:
+  --
+  --   boolean                    a yes/no (`noul`), true at `x-threshold` or above (0.5)
+  --   string with `enum`         a `choice` among the values
+  --   number with `x-criteria`   a `score` on that rubric, lowest first
+  --   string without `enum`      not asked -- such a model writes nothing. Filled from
+  --                              `x-from = "<choice property>"` with what that choice means
+  --
+  -- `description` is the question put, and the system prompt stands in where there is none;
+  -- `x-criteria` says what each answer means (a table by value, or a list for a score). What
+  -- comes back is one JSON object of the schema's shape, with `_decided` beside it carrying the
+  -- probabilities, so a caller that only wants the answer reads it as it reads any other.
+  local M = {}
+
+  function M.endpoint(base_url, _model)
+    if base_url:match("/decisions$") or base_url:match("/systemone$") then return base_url end
+    return base_url .. "/decisions"
+  end
+
+  function M.headers(key)
+    if not key then return {} end
+    return { authorization = "Bearer " .. key }
+  end
+
+  -- Everything said, as the state to be judged. One message goes as it is; more are labelled.
+  local function state_of(ctx)
+    local said = {}
+    for _, m in ipairs(ctx.messages or {}) do
+      local text = {}
+      for _, c in ipairs(m.content or {}) do
+        if c.type == "text" and c.text ~= "" then text[#text + 1] = c.text end
+        if c.type == "tool_result" then text[#text + 1] = tostring(c.content or "") end
+      end
+      if #text > 0 then said[#said + 1] = { role = m.role, text = table.concat(text, "\n") } end
+    end
+    if #said == 1 then return said[1].text end
+    local lines = {}
+    for _, s in ipairs(said) do lines[#lines + 1] = s.role .. ": " .. s.text end
+    return table.concat(lines, "\n\n")
+  end
+
+  local function question(property, asked)
+    local put = property.description or asked
+    local means = property["x-criteria"]
+    if property.type == "boolean" then
+      return { type = "noul", instructions = put,
+               criteria = means or { ["true"] = "Yes", ["false"] = "No" } }
+    end
+    if property.enum then
+      local criteria = {}
+      for _, value in ipairs(property.enum) do
+        criteria[tostring(value)] = (means and means[tostring(value)]) or tostring(value)
+      end
+      return { type = "choice", instructions = put, criteria = criteria }
+    end
+    if (property.type == "number" or property.type == "integer") and type(means) == "table" then
+      return { type = "score", instructions = put, criteria = means }
+    end
+    return nil
+  end
+
+  function M.request(model, ctx, opts)
+    local asked = ctx.system or "Answer about the state."
+    local questions, shape = {}, { order = {}, fields = {} }
+    local properties = opts.schema and opts.schema.schema and opts.schema.schema.properties
+    if properties then
+      for name, property in pairs(properties) do
+        local q = question(property, asked)
+        if q then questions[name] = q end
+        shape.order[#shape.order + 1] = name
+        shape.fields[name] = {
+          threshold = property["x-threshold"] or 0.5,
+          from = property["x-from"],
+          means = property["x-criteria"],
+          written = q == nil,
+        }
+      end
+    else
+      -- Asked with no shape for the answer, there is one thing such a model can say: yes or no.
+      questions.answer = { type = "noul", instructions = asked,
+                           criteria = { ["true"] = "Yes", ["false"] = "No" } }
+      shape.plain = true
+    end
+    return {
+      model = model.id,
+      state = state_of(ctx),
+      questions = questions,
+      -- Kept for reading the reply by, and taken out of the body before it is sent.
+      __scratch = shape,
+    }
+  end
+
+  local function decided(answer)
+    if answer.type == "noul" then return { p = answer.noul } end
+    return { p = answer.probabilities, confidence = answer.confidence }
+  end
+
+  function M.on_event(state, event)
+    -- One document and not a stream: it arrives whole, under this name.
+    if event.name ~= "body" then return { scratch = state.scratch, usage = state.usage } end
+    local ok, d = pcall(function() return melchior.json.decode(event.data) end)
+    local shape = state.scratch or {}
+    if not ok or type(d) ~= "table" or type(d.answers) ~= "table" then
+      return { scratch = shape, usage = state.usage,
+               deltas = { { kind = "stop", reason = "error" } } }
+    end
+
+    local deltas = {}
+    local u = d.usage or {}
+    local usage = {
+      input = u.input_tokens or 0, output = u.output_tokens or 0,
+      cache_read = 0, cache_write = 0,
+      cost_micros = type(u.cost) == "number" and math.floor(u.cost * 1000000 + 0.5) or 0,
+    }
+    deltas[#deltas + 1] = { kind = "usage", usage = usage }
+
+    local text
+    if shape.plain then
+      local p = d.answers.answer and d.answers.answer.noul or 0
+      text = string.format("%s (%.2f)", p >= 0.5 and "yes" or "no", p)
+    else
+      local out, how = {}, {}
+      for name, field in pairs(shape.fields or {}) do
+        local answer = d.answers[name]
+        if answer then
+          how[name] = decided(answer)
+          if answer.type == "noul" then
+            out[name] = (answer.noul or 0) >= field.threshold
+          elseif answer.type == "choice" then
+            out[name] = answer.choice
+          else
+            out[name] = answer.score
+          end
+        end
+      end
+      -- What such a model cannot write is said for it: what the choice it made means.
+      for name, field in pairs(shape.fields or {}) do
+        if field.written then
+          local chosen = field.from and out[field.from]
+          local means = field.from and shape.fields[field.from] and shape.fields[field.from].means
+          out[name] = (chosen and means and means[tostring(chosen)]) or ""
+        end
+      end
+      out._decided = how
+      text = melchior.json.encode(out)
+    end
+    deltas[#deltas + 1] = { kind = "text", text = text }
+    deltas[#deltas + 1] = { kind = "stop", reason = "end_turn" }
+    return { scratch = shape, usage = usage, deltas = deltas }
+  end
+
+  melchior.api("decisions", M)
 end

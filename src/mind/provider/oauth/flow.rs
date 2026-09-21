@@ -6,6 +6,9 @@ use base64::Engine;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+mod bounded;
+
 /// The proof a sign-in is finished by whoever started it.
 #[derive(Debug, Clone)]
 pub struct Pkce {
@@ -185,26 +188,36 @@ pub async fn exchange(
     token_url: &str,
     form: &[(&str, &str)],
 ) -> Result<super::Tokens, super::Error> {
-    let response = http
-        .post(token_url)
-        .form(form)
-        .send()
+    exchange_with_limits(http, token_url, form, super::super::control::LIMITS).await
+}
+
+async fn exchange_with_limits(
+    http: &reqwest::Client,
+    token_url: &str,
+    form: &[(&str, &str)],
+    limits: super::super::control::Limits,
+) -> Result<super::Tokens, super::Error> {
+    use super::super::control;
+    let deadline = tokio::time::Instant::now() + limits.timeout;
+    let response = tokio::time::timeout_at(deadline, http.post(token_url).form(form).send())
         .await
-        .map_err(|e| super::Error::Refused(e.to_string()))?;
+        .map_err(|_| super::Error::Refused(control::Error::Timeout.to_string()))?
+        .map_err(|_| super::Error::Refused("the token endpoint could not be reached".into()))?;
 
     let status = response.status();
-    let body = response.text().await.unwrap_or_default();
+    let body = control::read(response, limits, deadline)
+        .await
+        .map_err(|why| super::Error::Refused(why.to_string()))?;
     if !status.is_success() {
         return Err(super::Error::Refused(format!(
-            "the token endpoint returned {status}: {}",
-            body.lines().next().unwrap_or_default()
+            "the token endpoint returned {status}"
         )));
     }
     let granted: Granted = serde_json::from_str(&body)
-        .map_err(|e| super::Error::Refused(format!("unreadable token reply: {e}")))?;
+        .map_err(|_| super::Error::Refused("unreadable token reply".into()))?;
     Ok(super::Tokens {
         access: granted.access_token,
         refresh: granted.refresh_token,
-        expires_at: super::now() + granted.expires_in.unwrap_or(ASSUMED_LIFETIME),
+        expires_at: super::now().saturating_add(granted.expires_in.unwrap_or(ASSUMED_LIFETIME)),
     })
 }

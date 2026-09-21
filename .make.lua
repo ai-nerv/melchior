@@ -120,6 +120,9 @@ make.recipe{ name = "build", desc = "the binary",
              end }
 make.alias("b", "build")
 
+make.recipe{ name = "family-path", desc = "the binary selected by the build recipe",
+             run = function() print("NERV_BINARY=target/release/" .. NAME) end }
+
 make.recipe{
   name = "install",
   desc = ("install the binary to %s/bin, and config/ where it reads it"):format(PREFIX),
@@ -154,14 +157,26 @@ make.recipe{
     -- nothing, so a listing like this prints the files and copies none of them.
     local found = oslo.run{ "find", "config", "-type", "f", "-name", "*.lua", capture = true }
     assert(found.ok, "could not list config/")
-    local copied = 0
+    local copied, back = 0, {}
     for file in (found.out or ""):gmatch("[^\n]+") do
       local into = CONFIG .. "/" .. file:gsub("^config/", "")
       assert(oslo.run{ "mkdir", "-p", (into:match("^(.*)/[^/]*$")) }.ok, "could not create " .. into)
-      assert(oslo.run{ "install", "-m", "644", file, into }.ok, "could not install " .. file)
-      copied = copied + 1
+      -- Whichever side was edited last wins, so an edit made to the installed copy comes back
+      -- here rather than being overwritten. `cp -p` keeps the time, so the two agree afterwards.
+      local differs = oslo.fs.stat(into) and not oslo.run{ "cmp", "-s", file, into }.ok
+      if differs and oslo.run{ "test", into, "-nt", file }.ok then
+        assert(oslo.run{ "cp", "-p", into, file }.ok, "could not bring back " .. into)
+        back[#back + 1] = file
+      else
+        assert(oslo.run{ "cp", "-p", file, into }.ok, "could not install " .. file)
+        assert(oslo.run{ "chmod", "644", into }.ok, "could not set the mode of " .. into)
+        copied = copied + 1
+      end
     end
     print(("%d files -> %s"):format(copied, CONFIG))
+    for _, file in ipairs(back) do
+      print(("   <- %s was newer in %s, and came back"):format(file, CONFIG))
+    end
   end,
 }
 
@@ -180,6 +195,9 @@ make.alias("r", "run")
 make.recipe{ name = "test", desc = "the suite",
              run = function() sh.cargo("test", "--all-targets") end }
 make.alias("t", "test")
+
+make.recipe{ name = "test-streaming", desc = "provider byte and response boundaries",
+             run = function() sh.cargo("test", "--lib", "mind::provider::") end }
 
 make.recipe{ name = "test-all", desc = "the suite, with every feature on",
              run = function() sh.cargo("test", "--all-targets", "--all-features") end }

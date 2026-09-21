@@ -83,6 +83,14 @@ pub fn root_of(project: &str, id: &str) -> Option<String> {
     top
 }
 
+/// The run `id`'s branch belongs to as the tree stands now: the walked-up root's own run, or its
+/// id when it left no note. A run is named `<id>-<started>`, so an ancestor's bare id compared
+/// against one put every child outside its own crew.
+#[must_use]
+pub fn run_of(project: &str, id: &str) -> Option<String> {
+    root_of(project, id).map(|top| sessions::session_in(project, &top).unwrap_or(top))
+}
+
 /// The deepest chain below `id` among the sessions listening in `project` — `0` when nothing
 /// answers to it. Used to check that grafting a branch on by adoption keeps the tree inside
 /// [`MAX_DEPTH`]. Ring-safe: the walk down is bounded by the same depth.
@@ -434,7 +442,7 @@ pub fn whom(project: &str, id: &str) -> Whom {
         id: id.to_owned(),
         parent: parent_note(project, id),
         session: sessions::session_in(project, id),
-        root: root_of(project, id),
+        root: run_of(project, id),
     }
 }
 

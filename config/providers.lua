@@ -65,6 +65,9 @@ melchior.provider("openrouter", {
   -- Four hundred and counting. Six were listed here and they were a generation behind, which
   -- reads from the inside as OpenRouter being broken rather than the list being old.
   discover = true,
+  -- Upstreams never to be served by: OpenInference answers long DeepSeek V4 sessions as if the
+  -- conversation were gone.
+  avoid = { "OpenInference" },
 })
 
 melchior.provider("deepseek", {
@@ -100,3 +103,20 @@ melchior.provider("ollama", {
   discover = true,
 })
 
+
+-- Models that decide rather than write, through OpenRouter's decisions endpoint and on the same
+-- key as everything else it serves. They are not in its model listing, so they are named here.
+-- Asked with a JSON Schema for the answer, which the `decisions` protocol turns into typed
+-- questions: see `apis.lua`. What suits them is a judgement a knowledgeable person makes in a
+-- few seconds -- is this command safe, which of these does this belong to -- in a third of a
+-- second and for next to nothing; what does not is anything that has to be written or worked out.
+melchior.provider("decisions", {
+  name = "OpenRouter decisions",
+  api = "decisions",
+  base_url = "https://openrouter.ai/api/alpha",
+  auth = { kind = "api-key", vars = { "OPENROUTER_API_KEY" } },
+  models = {
+    { id = "typesafe/jev-1.13", name = "TypeSafe Jev 1.13", context_window = 32000, max_tokens = 1024,
+      cost = { input = 0.042, output = 0.0 } },
+  },
+})

@@ -2,9 +2,13 @@
 //! a protocol comes from an [`Adapter`], and what it knows of a vendor from the catalog.
 
 use crate::mind::provider::api::{Adapter, Delta, Options};
+use crate::mind::provider::control;
 use crate::mind::provider::endpoint::{Auth, Provider};
 use crate::mind::provider::model::Model;
 use crate::mind::provider::retry::RetryClass;
+
+#[cfg(test)]
+mod streaming;
 
 /// How many times a request is made before the failure is the answer.
 const MAX_ATTEMPTS: u32 = 4;
@@ -58,6 +62,7 @@ pub struct Client {
     http: reqwest::Client,
     /// The first backoff delay; each later one grows from it.
     base_delay: std::time::Duration,
+    control: control::Limits,
 }
 
 impl Default for Client {
@@ -86,6 +91,7 @@ impl Client {
                 .build()
                 .unwrap_or_default(),
             base_delay: crate::mind::provider::retry::BASE,
+            control: control::LIMITS,
         }
     }
 
@@ -170,56 +176,263 @@ impl Client {
         for (name, value) in adapter.headers(key.as_deref()) {
             request = request.header(name, value);
         }
-        let body = adapter.request(model, context, options);
+        let (body, kept_by_dialect) = parted(adapter.request(model, context, options));
 
-        let response = request
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| ProviderError::new(RetryClass::Transport, e.to_string()))?;
+        // Bounded like the body below: a provider that takes the request and never answers at all
+        // holds the turn open for as long as it stays quiet.
+        let sent = tokio::time::timeout(QUIET, request.json(&body).send()).await;
+        let response = match sent {
+            Ok(sent) => sent.map_err(|e| {
+                ProviderError::new(RetryClass::Transport, e.without_url().to_string())
+            })?,
+            Err(_) => return Err(hung(&provider.id)),
+        };
 
         let status = response.status();
         if !status.is_success() {
-            // A context-window overflow arrives as an ordinary 400, and only the body tells it
-            // apart from a malformed request, so the class is read from both.
-            let detail = response.text().await.unwrap_or_default();
+            let deadline = tokio::time::Instant::now() + self.control.timeout;
+            let detail = control::read(response, self.control, deadline)
+                .await
+                .map_err(|why| {
+                    ProviderError::new(
+                        RetryClass::of_status(status.as_u16()),
+                        format!("{} returned {status}: {why}", provider.id),
+                    )
+                })?;
             let class = RetryClass::of(status.as_u16(), &detail);
             return Err(ProviderError::new(
                 class,
-                format!("{} returned {status}: {}", provider.id, first_line(&detail)),
+                format!("{} returned {status} ({class:?})", provider.id),
             ));
         }
 
         let mut parser = sse::Parser::new();
         let mut state = crate::mind::provider::api::StreamState::default();
-        let mut body = response.bytes_stream();
-        while let Some(chunk) = body.next().await {
-            let chunk =
-                chunk.map_err(|e| ProviderError::new(RetryClass::Transport, e.to_string()))?;
-            let text = String::from_utf8_lossy(&chunk);
-            for event in parser.push(&text) {
-                for delta in adapter.on_event(&mut state, &event) {
-                    on_delta(delta);
-                }
-            }
+        if let Some(kept) = kept_by_dialect {
+            state.scratch = kept;
         }
-        if let Some(event) = parser.finish() {
+        // A reply that is one JSON document and no stream yields no events; it is kept, within a
+        // bound, to be handed over whole once it is known that none came.
+        let mut whole: Vec<u8> = Vec::new();
+        let mut events = 0usize;
+        let mut stopped = false;
+        let mut said = String::new();
+        // The last events, said when the stream ends: whether a finish came before the end is what
+        // tells an answer from one the provider cut off.
+        let mut tail: Vec<String> = Vec::new();
+        let mut body = response.bytes_stream();
+        loop {
+            let Ok(next) = tokio::time::timeout(QUIET, body.next()).await else {
+                return Err(hung(&provider.id));
+            };
+            let Some(chunk) = next else { break };
+            let chunk = chunk.map_err(|e| {
+                ProviderError::new(RetryClass::Transport, e.without_url().to_string())
+            })?;
+            if events == 0 && whole.len() + chunk.len() <= WHOLE {
+                whole.extend_from_slice(&chunk);
+            }
+            parser
+                .feed(&chunk, |event| {
+                    events += 1;
+                    kept(&mut tail, &event.data);
+                    for delta in adapter.on_event(&mut state, &event) {
+                        stopped |= matches!(delta, Delta::Stop(_));
+                        if let Delta::Text(text) = &delta {
+                            said.push_str(text);
+                        }
+                        on_delta(delta);
+                    }
+                })
+                .map_err(|why| ProviderError::new(RetryClass::Transport, why.to_string()))?;
+        }
+        if let Some(event) = parser
+            .finish()
+            .map_err(|why| ProviderError::new(RetryClass::Transport, why.to_string()))?
+        {
+            events += 1;
+            kept(&mut tail, &event.data);
             for delta in adapter.on_event(&mut state, &event) {
+                stopped |= matches!(delta, Delta::Stop(_));
+                if let Delta::Text(text) = &delta {
+                    said.push_str(text);
+                }
                 on_delta(delta);
             }
         }
-        Ok(())
+        // No event at all, and what came is one JSON document: a dialect that answers whole
+        // rather than in a stream is handed it as one event, named for what it is.
+        if events == 0 && serde_json::from_slice::<serde_json::Value>(&whole).is_ok() {
+            let event = sse::Event {
+                name: "body".to_owned(),
+                data: String::from_utf8_lossy(&whole).into_owned(),
+            };
+            kept(&mut tail, &event.data);
+            for delta in adapter.on_event(&mut state, &event) {
+                stopped |= matches!(delta, Delta::Stop(_));
+                if let Delta::Text(text) = &delta {
+                    said.push_str(text);
+                }
+                on_delta(delta);
+            }
+        }
+        let finish = tail.iter().rev().find_map(|data| reason_in(data));
+        // Which of a router's upstreams served it: speeds differ by tenfold between them.
+        let upstream = tail
+            .iter()
+            .rev()
+            .find_map(|data| value_in(data, "provider"));
+        crate::noted!("ask: {} stream ended, stop {stopped}", provider.id);
+        let outcome = unfailed(&tail, &provider.id)
+            .and_then(|()| finished(stopped, &provider.id))
+            .and_then(|()| unleaked(&said, &provider.id))
+            .and_then(|()| completed(finish.as_deref(), &provider.id));
+        // Only an answer that came through whole makes its upstream the one asked first.
+        if let (Ok(()), Some(upstream)) = (&outcome, upstream) {
+            on_delta(Delta::Served(upstream));
+        }
+        outcome
     }
 }
 
-/// The first line of an error body, bounded.
-fn first_line(text: &str) -> String {
-    text.lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("")
-        .chars()
-        .take(300)
-        .collect()
+/// The finish a provider named in one event, in any of the spellings the dialects use.
+fn reason_in(data: &str) -> Option<String> {
+    ["finish_reason", "stop_reason", "finishReason"]
+        .iter()
+        .find_map(|key| value_in(data, key))
+}
+
+/// A string field of an event, by name, without parsing the rest of it.
+fn value_in(data: &str, key: &str) -> Option<String> {
+    let key = format!("\"{key}\":\"");
+    let from = data.find(&key)? + key.len();
+    let len = data[from..].find('"')?;
+    Some(data[from..from + len].to_owned())
+}
+
+/// A request as a dialect built it, apart from what the dialect kept for itself under
+/// `__scratch`: what it needs in order to read the reply, which is no part of what is sent.
+fn parted(mut body: serde_json::Value) -> (serde_json::Value, Option<serde_json::Value>) {
+    let kept = body
+        .as_object_mut()
+        .and_then(|fields| fields.remove("__scratch"));
+    (body, kept)
+}
+
+/// The most of a reply kept in case it turns out to be one document and no stream.
+const WHOLE: usize = 1 << 20;
+
+/// Keep the last two events' data, bounded.
+fn kept(tail: &mut Vec<String>, data: &str) {
+    tail.push(data.chars().take(4_000).collect());
+    if tail.len() > 2 {
+        tail.remove(0);
+    }
+}
+
+/// How long a started stream may say nothing before it is taken as hung. Long, because a very
+/// large prompt nothing has cached is read in silence before the first token.
+const QUIET: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// A provider that took the request and then said nothing at all: asked again, since a turn that
+/// waits on it waits for as long as it stays quiet.
+fn hung(provider: &str) -> ProviderError {
+    crate::noted!("ask: {provider} sent nothing for {}s", QUIET.as_secs());
+    ProviderError::new(
+        RetryClass::Transport,
+        format!("{provider} sent nothing for {}s", QUIET.as_secs()),
+    )
+}
+
+/// A provider that ended the stream saying the generation failed. The turn has no answer to show
+/// for it, so it is asked again rather than taken as done; `length` and `stop` are real endings.
+fn completed(finish: Option<&str>, provider: &str) -> Result<(), ProviderError> {
+    if !finish.is_some_and(|reason| reason.eq_ignore_ascii_case("error")) {
+        return Ok(());
+    }
+    crate::noted!("ask: {provider} ended the stream with an error");
+    Err(ProviderError::new(
+        RetryClass::Transport,
+        format!("{provider} ended the stream with an error"),
+    ))
+}
+
+/// A router that took the request and then said, inside the stream, that the upstream it chose
+/// had failed. Said as it was said: "closed the stream" names the symptom and hides the cause,
+/// and which upstream it was is what the next attempt needs to know to go elsewhere.
+fn unfailed(tail: &[String], provider: &str) -> Result<(), ProviderError> {
+    let Some(error) = tail
+        .iter()
+        .rev()
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+        .find_map(|event| {
+            event
+                .get("error")
+                .filter(|e| e.is_object())
+                .cloned()
+                .map(|e| (e, event))
+        })
+    else {
+        return Ok(());
+    };
+    let (error, event) = error;
+    let said = error["message"]
+        .as_str()
+        .unwrap_or("an error with no message");
+    let code = error["code"]
+        .as_u64()
+        .map(|code| format!(" ({code})"))
+        .unwrap_or_default();
+    let through = event["provider"]
+        .as_str()
+        .map(|upstream| format!(" through {upstream}"))
+        .unwrap_or_default();
+    crate::noted!("ask: {provider}{through} failed mid-stream: {said}{code}");
+    // Classed by what was said, as a refusal with a status is: an upstream that timed out is
+    // asked again, and one that says the prompt is too long wants a smaller prompt, not another try.
+    let class = match error["code"]
+        .as_u64()
+        .and_then(|code| u16::try_from(code).ok())
+    {
+        Some(status) => match RetryClass::of(status, said) {
+            RetryClass::Overflow => RetryClass::Overflow,
+            class if class.is_retryable() => class,
+            _ => RetryClass::Transport,
+        },
+        None => RetryClass::Transport,
+    };
+    Err(ProviderError::new(
+        class,
+        format!("{provider}{through} failed mid-stream: {said}{code}"),
+    ))
+}
+
+/// A stream that closed without a stop was cut off, whatever it had sent: an error the caller
+/// retries, rather than half an answer taken for a whole one.
+fn finished(stopped: bool, provider: &str) -> Result<(), ProviderError> {
+    if stopped {
+        return Ok(());
+    }
+    Err(ProviderError::new(
+        RetryClass::Transport,
+        format!("{provider} closed the stream without saying it had finished"),
+    ))
+}
+
+/// A model that wrote its tool call as text in its own markup, which the router passed on as an
+/// answer and nothing downstream can run: asked again, as a stream cut off would be.
+fn unleaked(said: &str, provider: &str) -> Result<(), ProviderError> {
+    if !["<｜DSML｜", "<｜tool▁call"]
+        .iter()
+        .any(|mark| said.contains(mark))
+    {
+        return Ok(());
+    }
+    crate::noted!("ask: {provider} wrote a tool call as text");
+    Err(ProviderError::new(
+        RetryClass::Transport,
+        format!("{provider} wrote a tool call as text"),
+    ))
 }
 
 /// The credential to send, renewed if it was about to expire. The exchange is not retried: if the
@@ -237,7 +450,19 @@ async fn credential(
         return Ok(provider.auth.resolve());
     };
 
-    let mut store = crate::mind::provider::oauth::Store::load()?;
+    let store = crate::mind::provider::oauth::Store::load()?;
+    let tokens = store
+        .get(&provider.id)
+        .ok_or_else(|| crate::mind::provider::oauth::Error::NotSignedIn(provider.id.clone()))?;
+    if !tokens.is_stale(crate::mind::provider::oauth::now()) {
+        return Ok(Some(tokens.access.clone()));
+    }
+
+    // Claim this provider before spending its refresh token, so that two processes do not both
+    // rotate it, and then look again: whoever held the claim may have just renewed it.
+    let id = provider.id.clone();
+    let _held = off_thread(move || crate::mind::provider::oauth::hold(&id)).await?;
+    let store = crate::mind::provider::oauth::Store::load()?;
     let tokens = store
         .get(&provider.id)
         .ok_or_else(|| crate::mind::provider::oauth::Error::NotSignedIn(provider.id.clone()))?;
@@ -260,10 +485,27 @@ async fn credential(
     )
     .await?;
     let access = renewed.access.clone();
-    store.put(&provider.id, renewed);
-    // Best effort: a token that works but could not be written costs a refresh next time.
-    let _ = store.save();
+    let id = provider.id.clone();
+    // Reported rather than ignored: a rotated refresh token that was not written is one the
+    // provider has already retired, which signs the person out at the next start.
+    off_thread(move || {
+        crate::mind::provider::oauth::Store::amend(|store| store.renew(&id, renewed)).map(drop)
+    })
+    .await?;
     Ok(Some(access))
+}
+
+/// Credential work touches the filesystem and waits on a lock another process may hold, neither of
+/// which belongs on a thread that is driving requests.
+async fn off_thread<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, crate::mind::provider::oauth::Error> + Send + 'static,
+) -> Result<T, crate::mind::provider::oauth::Error> {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(done) => done,
+        Err(why) => Err(crate::mind::provider::oauth::Error::Refused(format!(
+            "credentials could not be reached: {why}"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -271,10 +513,81 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_error_body_is_reduced_to_a_sentence() {
-        assert_eq!(first_line("\n\noverloaded\ndetail\n"), "overloaded");
-        assert_eq!(first_line(&"x".repeat(1000)).len(), 300);
-        assert_eq!(first_line(""), "");
+    fn a_stream_that_finishes_with_an_error_is_asked_again() {
+        let why = completed(Some("error"), "openrouter").expect_err("an error is no answer");
+        assert!(matches!(why.class, RetryClass::Transport), "{why:?}");
+        for real in [Some("stop"), Some("length"), Some("tool_calls"), None] {
+            assert!(completed(real, "openrouter").is_ok(), "{real:?}");
+        }
+    }
+
+    #[test]
+    fn a_stream_that_says_nothing_at_all_is_asked_again() {
+        let why = hung("openrouter");
+        assert!(matches!(why.class, RetryClass::Transport), "{why:?}");
+        assert!(why.to_string().contains("180"), "{why}");
+    }
+
+    #[test]
+    fn a_tool_call_written_as_text_is_asked_again() {
+        let leaked = "Let me look.\n\n<｜DSML｜tool_cinvoke name=\"shell\">";
+        let why = unleaked(leaked, "openrouter").expect_err("a leaked call is not an answer");
+        assert!(matches!(why.class, RetryClass::Transport), "{why:?}");
+        assert!(unleaked("I wrote the doc.", "openrouter").is_ok());
+    }
+
+    #[test]
+    fn the_finish_a_provider_named_is_found_in_any_spelling() {
+        let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"cost":0.1}}"#;
+        assert_eq!(reason_in(chunk).as_deref(), Some("stop"));
+        assert_eq!(
+            reason_in(r#"{"delta":{"stop_reason":"end_turn"}}"#).as_deref(),
+            Some("end_turn")
+        );
+        assert_eq!(
+            reason_in(r#"{"finishReason":"STOP"}"#).as_deref(),
+            Some("STOP")
+        );
+        assert_eq!(reason_in("[DONE]"), None);
+        let routed =
+            r#"{"id":"gen-1","provider":"StreamLake","model":"deepseek/deepseek-v4-flash"}"#;
+        assert_eq!(value_in(routed, "provider").as_deref(), Some("StreamLake"));
+        let mut tail = Vec::new();
+        for data in ["first", "second", "third"] {
+            kept(&mut tail, data);
+        }
+        assert_eq!(tail, ["second", "third"]);
+    }
+
+    #[test]
+    fn a_stream_that_never_stopped_is_retried_not_kept() {
+        assert!(finished(true, "p").is_ok());
+        let cut = finished(false, "p").expect_err("a cut-off stream");
+        assert!(cut.class.is_retryable(), "{}", cut.message);
+    }
+
+    #[test]
+    fn an_upstream_failing_inside_the_stream_is_said_as_it_was_said() {
+        let failed = r#"{"id":"gen-1","model":"unknown","provider":"Novita","choices":[],"error":{"code":504,"message":"The operation was aborted","metadata":{"error_type":"timeout"}}}"#;
+        let why = unfailed(&[failed.to_owned()], "openrouter").expect_err("a failed stream");
+        assert_eq!(why.class, RetryClass::Overload);
+        for part in ["Novita", "The operation was aborted", "504"] {
+            assert!(why.message.contains(part), "{part}: {}", why.message);
+        }
+        let fine = r#"{"choices":[{"delta":{"content":"an error occurred to me"}}]}"#;
+        assert!(unfailed(&[fine.to_owned()], "openrouter").is_ok());
+    }
+
+    #[test]
+    fn an_overflow_said_inside_the_stream_is_an_overflow() {
+        let long = r#"{"provider":"DeepInfra","choices":[],"error":{"code":400,"message":"Upstream error from DeepInfra: Requested input length 35327 exceeds maximum input length 32767"}}"#;
+        let why = unfailed(&[long.to_owned()], "openrouter").expect_err("too long");
+        assert_eq!(why.class, RetryClass::Overflow, "{}", why.message);
+        // Anything else said mid-stream is still asked again: the request was taken, so it was
+        // not malformed, whatever status the upstream's own failure carried.
+        let odd = r#"{"choices":[],"error":{"code":400,"message":"upstream hiccup"}}"#;
+        let why = unfailed(&[odd.to_owned()], "openrouter").expect_err("failed");
+        assert_eq!(why.class, RetryClass::Transport);
     }
 }
 

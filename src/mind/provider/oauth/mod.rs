@@ -3,6 +3,10 @@
 //! the journal, which is meant to be readable and shareable.
 
 mod flow;
+mod storage;
+
+#[cfg(test)]
+mod persistence;
 
 pub use flow::{Pkce, authorize_url, exchange, listen_for_code};
 
@@ -50,13 +54,10 @@ impl Store {
 
     /// Read a store from a named file.
     pub fn load_from(path: &std::path::Path) -> Result<Self, Error> {
-        match std::fs::read_to_string(path) {
-            Ok(source) => serde_json::from_str(&source).map_err(|e| Error::Corrupt {
-                path: path.to_owned(),
-                detail: e.to_string(),
-            }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(Error::Io(e)),
+        match storage::Directory::open(path, false) {
+            Ok(directory) => directory.read(),
+            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e),
         }
     }
 
@@ -67,20 +68,7 @@ impl Store {
 
     /// Write a store to a named file, readable only by its owner.
     pub fn save_to(&self, path: &std::path::Path) -> Result<(), Error> {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        file.write_all(serde_json::to_string_pretty(self)?.as_bytes())?;
-        Ok(())
+        storage::Directory::open(path, true)?.write(self)
     }
 
     #[must_use]
@@ -119,6 +107,9 @@ pub fn now() -> u64 {
 /// Anything that can go wrong holding a credential.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("unsafe credential path: {0}")]
+    UnsafePath(&'static str),
+
     #[error("credentials: {0}")]
     Io(#[from] std::io::Error),
 
@@ -138,6 +129,66 @@ pub enum Error {
     /// The provider issued no refresh token, and the access token has expired.
     #[error("the session for {0} expired; run `magi auth login {0}` again")]
     Expired(String),
+}
+
+/// How long a caller waits for another process. A store-wide hold is one small read and write; a
+/// provider hold spans a token exchange with a server that may be slow.
+const BRIEF: std::time::Duration = std::time::Duration::from_secs(5);
+const PATIENT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The scope covering the file as a whole, as against one provider inside it.
+const WHOLE: &str = "";
+
+/// An exclusive claim on one provider's credentials, held across a token exchange so that two
+/// processes do not both spend the same refresh token. Released when dropped.
+pub struct Held(#[allow(dead_code)] storage::Lock);
+
+/// Claim `provider` at the usual location.
+pub fn hold(provider: &str) -> Result<Held, Error> {
+    hold_within(&path(), provider, PATIENT)
+}
+
+/// The half that takes its location and its patience, so a test can exercise it.
+pub fn hold_within(
+    path: &std::path::Path,
+    provider: &str,
+    patience: std::time::Duration,
+) -> Result<Held, Error> {
+    storage::Directory::open(path, true)?
+        .lock(provider, patience)
+        .map(Held)
+}
+
+impl Store {
+    /// Apply `change` to what is on disk and write it back, under a lock. The store is read again
+    /// once the lock is held, so a change another process made in the meantime is kept rather than
+    /// overwritten.
+    pub fn amend(change: impl FnOnce(&mut Self)) -> Result<Self, Error> {
+        Self::amend_within(&path(), BRIEF, change)
+    }
+
+    /// The half that takes its location and its patience, so a test can exercise it.
+    pub fn amend_within(
+        path: &std::path::Path,
+        patience: std::time::Duration,
+        change: impl FnOnce(&mut Self),
+    ) -> Result<Self, Error> {
+        let directory = storage::Directory::open(path, true)?;
+        let _held = directory.lock(WHOLE, patience)?;
+        let mut store = directory.read()?;
+        change(&mut store);
+        directory.write(&store)?;
+        Ok(store)
+    }
+
+    /// Record a refreshed token. A provider that issues no replacement refresh token keeps the one
+    /// already stored: RFC 6749 section 6 leaves it optional, and dropping it signs the person out.
+    pub fn renew(&mut self, provider: &str, mut tokens: Tokens) {
+        if tokens.refresh.is_none() {
+            tokens.refresh = self.get(provider).and_then(|held| held.refresh.clone());
+        }
+        self.put(provider, tokens);
+    }
 }
 
 #[cfg(test)]

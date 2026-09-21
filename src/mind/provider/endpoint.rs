@@ -114,6 +114,9 @@ pub struct Provider {
     /// cached, never written into the configuration.
     #[serde(default)]
     pub discover: bool,
+    /// Upstreams a router must never serve this provider's asks from, fallbacks included.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub avoid: Vec<String>,
 }
 
 impl Provider {
@@ -152,6 +155,8 @@ struct ProviderDecl {
     models: Vec<Model>,
     #[serde(default)]
     discover: bool,
+    #[serde(default)]
+    avoid: Vec<String>,
 }
 
 impl From<ProviderDecl> for Provider {
@@ -165,6 +170,7 @@ impl From<ProviderDecl> for Provider {
             compat,
             mut models,
             discover,
+            avoid,
         } = decl;
         for model in &mut models {
             model.provider.clone_from(&id);
@@ -181,6 +187,7 @@ impl From<ProviderDecl> for Provider {
             compat,
             models,
             discover,
+            avoid,
         }
     }
 }

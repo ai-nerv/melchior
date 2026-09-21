@@ -26,6 +26,20 @@ pub fn run() -> std::io::Result<()> {
     };
 
     let answer = verbs::answer(&serde_json::to_value(&asked).unwrap_or_default(), &standing);
+    melchior::noted!(
+        "tool: {} {} as {} → {}",
+        asked.get("verb").map_or("", String::as_str),
+        asked
+            .get("who")
+            .or_else(|| asked.get("to"))
+            .map_or("", String::as_str),
+        standing.me,
+        if answer.failed {
+            format!("refused: {}", melchior::noted::short(&answer.said))
+        } else {
+            "ok".to_owned()
+        }
+    );
     if answer.failed {
         return refuse(&answer.said);
     }

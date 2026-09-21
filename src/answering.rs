@@ -51,7 +51,7 @@ impl About {
             session: crate::directory::sessions::session_of(&self.me),
             // Walked off the directory, so an adopted session reads its new branch, not the run it
             // was born in.
-            root: crate::directory::root_of(&self.me.project, &self.me.id),
+            root: crate::directory::run_of(&self.me.project, &self.me.id),
         }
     }
 }

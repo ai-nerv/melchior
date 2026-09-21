@@ -45,7 +45,22 @@ Two walls, and no setting opens either past what it says:
   and anything else started under the same root — or to everything in the project, and nothing
   widens it further.
 
-## Commands
+## Provider response boundaries
+
+Provider SSE is parsed from bytes: split UTF-8 and CRLF remain intact, including tool arguments.
+Malformed UTF-8 fails the attempt through the existing bounded transport-retry policy. The parser
+accepts a leading BOM and retains the provider client's EOF-tail delivery; it is not a browser
+EventSource reconnection implementation.
+
+Error bodies and OAuth control responses retain at most 64 KiB of decoded text and have a
+10-second absolute deadline. OAuth's deadline includes request headers and body. Error-body
+failure preserves the HTTP status's retry/refusal class; a complete bounded body can identify
+context overflow. Diagnostics omit response bodies and credential-bearing URLs.
+
+Successful generations have no total-duration or total-byte cap from this control policy;
+their existing 180-second inactivity timeout remains. Cancellation closes the active request.
+`oslo make test-streaming` runs parser partitions and local-HTTP boundary fixtures without
+provider credentials.
 
 ```sh
 melchior serve      # bind this session's socket and answer for it
@@ -127,6 +142,8 @@ print(them.status())
 them.tell("the parser is done", "attention")
 them:close()
 ```
+
+## Commands
 
 ## Commands
 
