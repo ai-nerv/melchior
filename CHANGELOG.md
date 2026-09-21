@@ -1,5 +1,54 @@
 # Changelog
 
+## [0.3.0] - 2026-09-21
+
+### <!-- 0 -->⛰️  Features
+
+- A dialect for models that decide
+- A proxy that meters live spend
+- The fake serves many at once
+- The fake can pause mid-answer
+- The fake can split and hang up
+- A report is handed in, not sent
+- The fake provider can refuse
+- The side edited last wins
+- A fake provider for acceptance
+- Coordinate credential persistence
+- Never route through an avoided upstream
+- Say which upstream answered
+- Name the upstream that served each stream
+- Name the finish each stream ended on
+- Say how each stream ended
+- One family log, every step stamped
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Off is the least a model that must reason will do
+- A model that must reason is not told to stop
+- Say off to every model, not only reasoners
+- A failed stream is not charged
+- An overflow said mid-stream is one
+- An upstream's mid-stream failure is said
+- A peer that vanishes is lost
+- A provider that never answers is asked again
+- An error finish is asked again
+- A stream that goes quiet is asked again
+- A tool call written as text is retried
+- Keep each event's end, where the finish is
+- A stream that never stopped is retried
+- A child is on its own run's roster
+- Discovered models get their provider's dialect
+- Quiet the roster's status poll
+
+### <!-- 3 -->📚 Documentation
+
+- Plan as the layout fallback
+- Layout, jobs and notes verbs
+
+### <!-- 6 -->🧪 Testing
+
+- Cover claim handover and permissions
+
 ## [0.2.0] - 2026-09-15
 
 ### <!-- 0 -->⛰️  Features
