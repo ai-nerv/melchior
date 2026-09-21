@@ -109,11 +109,12 @@ fn effective_thinking(model: &Model, options: &Options) -> Option<String> {
     // because "off" was dropped here. Telling a model that cannot reason not to reason costs a
     // field it ignores.
     if level == crate::mind::model::ThinkingLevel::Off {
-        // Unless this model has no "off": one that must reason refuses the whole request when told
-        // to stop, so nothing is said about reasoning and its own default stands.
+        // Unless this model has no "off": one that must reason takes the least it will do instead.
+        // Saying nothing would leave its own default standing, which is usually the largest.
         return match model.thinking.get(&level) {
+            Some(Some(least)) => Some(least.clone()),
             Some(None) => None,
-            _ => Some("off".to_owned()),
+            None => Some("off".to_owned()),
         };
     }
     if !model.reasoning {
@@ -352,10 +353,17 @@ mod thinking_tests {
     /// nothing, on a model whose catalog entry said `reasoning = false`. A field a model
     /// ignores costs nothing; the silence cost the whole answer.
     #[test]
-    fn off_is_not_said_to_a_model_that_has_no_off() {
-        // The one exception to the rule below: a model whose provider says reasoning is mandatory
-        // refuses the whole request when told to stop, so it is told nothing and its default
-        // stands. `reasoning.mandatory` in OpenRouter's catalog is what marks the level absent.
+    fn a_model_that_must_reason_is_asked_for_the_least_rather_than_for_nothing() {
+        // The one exception to the rule below. Told to stop, it refuses the whole request; told
+        // nothing, it reasons as much as it likes and a helper's budget goes on that alone.
+        let mut map = BTreeMap::new();
+        map.insert(ThinkingLevel::Off, Some("low".to_owned()));
+        let asked = asked(&model(true, map), &wanting(ThinkingLevel::Off));
+        assert_eq!(asked["thinking"], "low", "{asked}");
+    }
+
+    #[test]
+    fn a_level_marked_absent_outright_is_still_not_asked_for() {
         let mut map = BTreeMap::new();
         map.insert(ThinkingLevel::Off, None);
         let asked = asked(&model(true, map), &wanting(ThinkingLevel::Off));

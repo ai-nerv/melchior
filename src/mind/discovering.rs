@@ -194,22 +194,39 @@ fn one(entry: &serde_json::Value) -> Option<Model> {
     })
 }
 
-/// What each thinking level is called here, and which of them this model has not got.
+/// What each thinking level is called here.
 ///
-/// A model that must reason has no "off": told to stop, the provider refuses the whole request
-/// rather than ignoring the field, so the level is marked absent and nothing is said about
-/// reasoning at all. `reasoning.mandatory` is the provider's own word for this.
+/// A model that must reason has no "off", and saying nothing is not the same as saying "off": with
+/// no effort named the provider applies its own default, which for these is usually the largest
+/// one. A helper given a thousand tokens then spends them all reasoning and answers nothing. So
+/// "off" becomes the least reasoning this model will do, which is a request it accepts and a bill
+/// the caller meant. `reasoning.mandatory` and `reasoning.supported_efforts` are its own words.
 fn levels(entry: &serde_json::Value) -> std::collections::BTreeMap<ThinkingLevel, Option<String>> {
     let mut out = std::collections::BTreeMap::new();
-    let mandatory = entry
-        .get("reasoning")
+    let reasoning = entry.get("reasoning");
+    let mandatory = reasoning
         .and_then(|it| it.get("mandatory"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     if mandatory {
-        out.insert(ThinkingLevel::Off, None);
+        out.insert(ThinkingLevel::Off, Some(least(reasoning)));
     }
     out
+}
+
+/// The least reasoning a model offers, by name. Ranked here rather than taken in the order the
+/// provider happens to list them, which is nobody's idea of least-first.
+fn least(reasoning: Option<&serde_json::Value>) -> String {
+    const LEAST_FIRST: [&str; 6] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+    let offered: Vec<&str> = reasoning
+        .and_then(|it| it.get("supported_efforts"))
+        .and_then(serde_json::Value::as_array)
+        .map(|list| list.iter().filter_map(serde_json::Value::as_str).collect())
+        .unwrap_or_default();
+    LEAST_FIRST
+        .iter()
+        .find(|want| offered.contains(want))
+        .map_or_else(|| "low".to_owned(), |found| (*found).to_owned())
 }
 
 /// Whether the provider says this model can reason.
@@ -390,13 +407,40 @@ mod reasoning_tests {
     }
 
     #[test]
-    fn a_model_that_must_reason_is_marked_as_having_no_off() {
-        // Told to stop, such a model refuses the whole request — `reasoning.mandatory` is the
-        // provider saying so, and this is where that word is read.
-        let held = levels(&card(
-            serde_json::json!({ "mandatory": true, "default_effort": "max" }),
-        ));
-        assert_eq!(held.get(&ThinkingLevel::Off), Some(&None));
+    fn a_model_that_must_reason_takes_the_least_it_will_do_as_its_off() {
+        // Not "say nothing": with no effort named the provider applies `default_effort`, which
+        // here is `max`. A helper on a small budget then spends all of it reasoning.
+        let held = levels(&card(serde_json::json!({
+            "mandatory": true,
+            "default_effort": "max",
+            "supported_efforts": ["max", "high", "low"],
+        })));
+        assert_eq!(held.get(&ThinkingLevel::Off), Some(&Some("low".to_owned())));
+    }
+
+    #[test]
+    fn the_least_is_ranked_rather_than_taken_in_the_order_they_are_listed() {
+        // OpenRouter lists these largest-first, so the last one is not reliably the smallest.
+        assert_eq!(
+            least(Some(&serde_json::json!({
+                "supported_efforts": ["high", "medium", "low", "minimal"]
+            }))),
+            "minimal"
+        );
+        assert_eq!(
+            least(Some(&serde_json::json!({
+                "supported_efforts": ["max", "high"]
+            }))),
+            "high"
+        );
+    }
+
+    #[test]
+    fn a_model_that_names_no_efforts_still_gets_a_small_one() {
+        // Mandatory with nothing said about which levels it takes: anything is better than
+        // letting its own default stand.
+        let held = levels(&card(serde_json::json!({ "mandatory": true })));
+        assert_eq!(held.get(&ThinkingLevel::Off), Some(&Some("low".to_owned())));
     }
 
     #[test]
