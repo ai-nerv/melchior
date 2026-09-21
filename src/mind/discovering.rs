@@ -3,6 +3,7 @@
 //! cache is what load time reads, and a fetch happens only when it is missing or older than
 //! [`FRESH`], its failure leaving whatever the cache last held.
 
+use crate::mind::model::ThinkingLevel;
 use crate::mind::provider::endpoint::Provider;
 use crate::mind::provider::model::Model;
 use std::path::PathBuf;
@@ -188,9 +189,27 @@ fn one(entry: &serde_json::Value) -> Option<Model> {
         provider: String::new(),
         api: crate::mind::provider::model::Api::OpenAiCompletions,
         input: vec![crate::mind::provider::model::Modality::Text],
-        thinking: std::collections::BTreeMap::new(),
+        thinking: levels(entry),
         compat: None,
     })
+}
+
+/// What each thinking level is called here, and which of them this model has not got.
+///
+/// A model that must reason has no "off": told to stop, the provider refuses the whole request
+/// rather than ignoring the field, so the level is marked absent and nothing is said about
+/// reasoning at all. `reasoning.mandatory` is the provider's own word for this.
+fn levels(entry: &serde_json::Value) -> std::collections::BTreeMap<ThinkingLevel, Option<String>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mandatory = entry
+        .get("reasoning")
+        .and_then(|it| it.get("mandatory"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if mandatory {
+        out.insert(ThinkingLevel::Off, None);
+    }
+    out
 }
 
 /// Whether the provider says this model can reason.
@@ -359,5 +378,38 @@ mod tests {
             resolve(model.compat).thinking_format,
             ThinkingFormat::OpenRouter
         );
+    }
+}
+
+#[cfg(test)]
+mod reasoning_tests {
+    use super::*;
+
+    fn card(reasoning: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "reasoning": reasoning })
+    }
+
+    #[test]
+    fn a_model_that_must_reason_is_marked_as_having_no_off() {
+        // Told to stop, such a model refuses the whole request — `reasoning.mandatory` is the
+        // provider saying so, and this is where that word is read.
+        let held = levels(&card(
+            serde_json::json!({ "mandatory": true, "default_effort": "max" }),
+        ));
+        assert_eq!(held.get(&ThinkingLevel::Off), Some(&None));
+    }
+
+    #[test]
+    fn a_model_that_may_reason_keeps_its_off() {
+        let held = levels(&card(serde_json::json!({ "mandatory": false })));
+        assert!(held.is_empty(), "{held:?}");
+    }
+
+    #[test]
+    fn a_provider_that_says_nothing_about_it_is_left_alone() {
+        // Every provider but OpenRouter says nothing here, and silence must not take a level away.
+        assert!(levels(&serde_json::json!({})).is_empty());
+        assert!(levels(&card(serde_json::json!("yes"))).is_empty());
+        assert!(levels(&card(serde_json::json!({ "supported_efforts": ["low"] }))).is_empty());
     }
 }

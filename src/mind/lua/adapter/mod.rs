@@ -109,7 +109,12 @@ fn effective_thinking(model: &Model, options: &Options) -> Option<String> {
     // because "off" was dropped here. Telling a model that cannot reason not to reason costs a
     // field it ignores.
     if level == crate::mind::model::ThinkingLevel::Off {
-        return Some("off".to_owned());
+        // Unless this model has no "off": one that must reason refuses the whole request when told
+        // to stop, so nothing is said about reasoning and its own default stands.
+        return match model.thinking.get(&level) {
+            Some(None) => None,
+            _ => Some("off".to_owned()),
+        };
     }
     if !model.reasoning {
         return None;
@@ -346,6 +351,17 @@ mod thinking_tests {
     /// enough to matter: a helper allowed 1000 tokens spent 999 of them reasoning and answered
     /// nothing, on a model whose catalog entry said `reasoning = false`. A field a model
     /// ignores costs nothing; the silence cost the whole answer.
+    #[test]
+    fn off_is_not_said_to_a_model_that_has_no_off() {
+        // The one exception to the rule below: a model whose provider says reasoning is mandatory
+        // refuses the whole request when told to stop, so it is told nothing and its default
+        // stands. `reasoning.mandatory` in OpenRouter's catalog is what marks the level absent.
+        let mut map = BTreeMap::new();
+        map.insert(ThinkingLevel::Off, None);
+        let asked = asked(&model(true, map), &wanting(ThinkingLevel::Off));
+        assert!(asked.get("thinking").is_none(), "{asked}");
+    }
+
     #[test]
     fn off_is_said_to_every_model_so_one_that_reasons_can_stop() {
         for reasons in [true, false] {
