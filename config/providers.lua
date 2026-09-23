@@ -93,13 +93,22 @@ melchior.provider("zai", {
   },
 })
 
+-- Where ollama is, as its own client reads `OLLAMA_HOST`: a bare `host:port`, or a whole URL
+-- when it carries a scheme. Unset is the daemon on this machine.
+local function ollama_at()
+  local said = os.getenv("OLLAMA_HOST")
+  if not said or said == "" then return "http://localhost:11434/v1" end
+  local url = said:match("^https?://") and said or ("http://" .. said)
+  return (url:gsub("/+$", "")) .. "/v1"
+end
+
 melchior.provider("ollama", {
   name = "Ollama",
   api = "openai-completions",
-  base_url = "http://localhost:11434/v1",
+  base_url = ollama_at(),
   auth = { kind = "none" },
-  -- Whatever you have pulled, which is the only list that could be right. It answers on
-  -- localhost or it does not answer, and a failed ask leaves the cache alone.
+  -- Whatever you have pulled, which is the only list that could be right. It answers or it does
+  -- not, and a failed ask leaves the cache alone.
   discover = true,
 })
 
