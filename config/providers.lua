@@ -107,9 +107,12 @@ melchior.provider("ollama", {
   api = "openai-completions",
   base_url = ollama_at(),
   auth = { kind = "none" },
-  -- Whatever you have pulled, which is the only list that could be right. It answers or it does
-  -- not, and a failed ask leaves the cache alone.
+  -- A thinking level goes as `reasoning_effort`, which ollama reads; off goes as its "none".
+  compat = { supports_reasoning_effort = true },
+  -- Whatever you have pulled, which is the only list that could be right. Its listing names each
+  -- model and nothing more, so `/api/show` is asked for the window and whether it thinks.
   discover = true,
+  details = "ollama",
 })
 
 
