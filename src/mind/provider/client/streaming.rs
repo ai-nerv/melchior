@@ -456,3 +456,51 @@ async fn a_reply_that_is_one_document_reaches_the_dialect_whole_however_it_is_cu
         assert!(events.contains(&Delta::Stop(crate::mind::model::StopReason::EndTurn)));
     }
 }
+
+/// A provider that cannot be reached is named, with the reason the connection failed.
+mod unreachable {
+    use super::*;
+
+    /// A port nothing on this machine listens on, bound and released so the refusal is certain.
+    fn closed_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
+        let port = listener.local_addr().expect("its address").port();
+        drop(listener);
+        port
+    }
+
+    #[tokio::test]
+    async fn the_failure_names_the_provider_and_what_went_wrong() {
+        // It used to say "error sending request" and nothing else: which provider, and whether
+        // the host was down, refused or unroutable, were two error sources below what was shown.
+        let client = Client::with_base_delay(Duration::from_millis(1));
+        let url = format!("http://127.0.0.1:{}/v1", closed_port());
+        let said = stream(&client, &url)
+            .await
+            .expect_err("nothing listens there");
+        assert_eq!(said.class, RetryClass::Transport);
+        assert!(
+            said.message.starts_with("could not reach "),
+            "{}",
+            said.message
+        );
+        assert!(
+            said.message.to_lowercase().contains("refused"),
+            "the reason underneath is kept: {}",
+            said.message
+        );
+        assert_ne!(said.message, "error sending request");
+    }
+
+    #[tokio::test]
+    async fn the_url_is_never_in_the_message() {
+        // Some providers carry the key in the query string, so the URL stays out of what is said.
+        let client = Client::with_base_delay(Duration::from_millis(1));
+        let url = format!("http://127.0.0.1:{}/v1?key=SENTINEL", closed_port());
+        let said = stream(&client, &url)
+            .await
+            .expect_err("nothing listens there");
+        assert!(!said.message.contains("SENTINEL"), "{}", said.message);
+        assert!(!said.message.contains("127.0.0.1"), "{}", said.message);
+    }
+}

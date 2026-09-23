@@ -182,9 +182,9 @@ impl Client {
         // holds the turn open for as long as it stays quiet.
         let sent = tokio::time::timeout(QUIET, request.json(&body).send()).await;
         let response = match sent {
-            Ok(sent) => sent.map_err(|e| {
-                ProviderError::new(RetryClass::Transport, e.without_url().to_string())
-            })?,
+            Ok(sent) => {
+                sent.map_err(|e| unreached(&format!("could not reach {}", provider.id), e))?
+            }
             Err(_) => return Err(hung(&provider.id)),
         };
 
@@ -227,7 +227,10 @@ impl Client {
             };
             let Some(chunk) = next else { break };
             let chunk = chunk.map_err(|e| {
-                ProviderError::new(RetryClass::Transport, e.without_url().to_string())
+                unreached(
+                    &format!("lost {} partway through its answer", provider.id),
+                    e,
+                )
             })?;
             if events == 0 && whole.len() + chunk.len() <= WHOLE {
                 whole.extend_from_slice(&chunk);
@@ -333,6 +336,20 @@ fn kept(tail: &mut Vec<String>, data: &str) {
 /// How long a started stream may say nothing before it is taken as hung. Long, because a very
 /// large prompt nothing has cached is read in silence before the first token.
 const QUIET: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// A request that never reached the provider, said as the provider and the reason underneath:
+/// reqwest's own line is "error sending request", and "No route to host" is two sources below it.
+/// The URL stays out, since some providers carry the key in its query string.
+fn unreached(what: &str, error: reqwest::Error) -> ProviderError {
+    let mut deepest = None;
+    let mut cause = std::error::Error::source(&error);
+    while let Some(found) = cause {
+        deepest = Some(found.to_string());
+        cause = found.source();
+    }
+    let said = deepest.unwrap_or_else(|| error.without_url().to_string());
+    ProviderError::new(RetryClass::Transport, format!("{what}: {said}"))
+}
 
 /// A provider that took the request and then said nothing at all: asked again, since a turn that
 /// waits on it waits for as long as it stays quiet.
