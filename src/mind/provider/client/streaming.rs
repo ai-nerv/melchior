@@ -504,3 +504,108 @@ mod unreachable {
         assert!(!said.message.contains("127.0.0.1"), "{}", said.message);
     }
 }
+
+/// How long an unreachable provider is waited on before the failure is the answer.
+mod giving_up {
+    use super::*;
+
+    /// A connection error as hyper nests it: a message, with the operating system's reason under.
+    #[derive(Debug)]
+    struct Connecting(std::io::Error);
+
+    impl std::fmt::Display for Connecting {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("tcp connect error")
+        }
+    }
+
+    impl std::error::Error for Connecting {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    /// The top of the chain, as reqwest shows it: nothing useful of its own.
+    #[derive(Debug)]
+    struct Sending(Connecting);
+
+    impl std::fmt::Display for Sending {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("error sending request")
+        }
+    }
+
+    impl std::error::Error for Sending {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    fn sending(kind: std::io::ErrorKind) -> Sending {
+        Sending(Connecting(std::io::Error::from(kind)))
+    }
+
+    #[test]
+    fn no_route_to_the_host_is_not_asked_again() {
+        // Four attempts and fifty seconds of backoff did not put a machine back on the network.
+        for kind in [
+            std::io::ErrorKind::HostUnreachable,
+            std::io::ErrorKind::NetworkUnreachable,
+        ] {
+            let (said, routeless) = underneath(&sending(kind));
+            assert!(routeless, "{kind:?}");
+            assert!(said.is_some_and(|said| !said.contains("error sending request")));
+        }
+    }
+
+    #[test]
+    fn a_refused_connection_still_is() {
+        // That host is there, and a daemon restarting on it answers a few seconds later.
+        let (_, routeless) = underneath(&sending(std::io::ErrorKind::ConnectionRefused));
+        assert!(!routeless);
+    }
+
+    #[test]
+    fn a_failure_that_is_not_worth_repeating_is_not_repeated() {
+        let failed = ProviderError::new(RetryClass::Transport, "gone").finally();
+        assert_eq!(
+            failed.class,
+            RetryClass::Transport,
+            "still a transport failure"
+        );
+        assert!(!failed.again);
+        assert!(ProviderError::new(RetryClass::Transport, "blip").again);
+        assert!(!ProviderError::new(RetryClass::Auth, "denied").again);
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_is_retried_through_the_client() {
+        let client = Client::with_base_delay(Duration::from_millis(1));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
+        let port = listener.local_addr().expect("its address").port();
+        drop(listener);
+        let (adapter, provider, model, context, options) = (
+            adapter(),
+            provider(&format!("http://127.0.0.1:{port}/v1")),
+            model(),
+            Context::default(),
+            Options::default(),
+        );
+        let mut retried = 0;
+        let outcome = client
+            .stream_reporting(
+                &Call {
+                    adapter: &adapter,
+                    provider: &provider,
+                    model: &model,
+                    context: &context,
+                    options: &options,
+                },
+                |_| {},
+                |_| retried += 1,
+            )
+            .await;
+        assert!(outcome.is_err());
+        assert_eq!(retried, MAX_ATTEMPTS - 1, "every attempt was made");
+    }
+}
