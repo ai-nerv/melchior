@@ -21,6 +21,7 @@ fn provider(url: &str) -> Provider {
         compat: None,
         models: Vec::new(),
         discover: false,
+        details: None,
         avoid: Vec::new(),
     }
 }

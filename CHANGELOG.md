@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.0] - 2026-09-23
+
+### <!-- 0 -->⛰️  Features
+
+- Read windows and thinking from api/show
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Honour OLLAMA_HOST
+
 ## [0.4.0] - 2026-09-23
 
 ## [0.3.0] - 2026-09-21

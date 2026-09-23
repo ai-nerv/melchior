@@ -9,6 +9,8 @@ use crate::mind::provider::model::Model;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
+mod ollama;
+
 /// How long a fetched catalog is used before it is asked for again.
 pub const FRESH: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -35,7 +37,7 @@ pub fn discover(providers: &mut [Provider]) {
             .map(|held| held.models)
             .or_else(|| {
                 let key = key_for(provider);
-                let fetched = fetch(&base, key.as_deref());
+                let fetched = fetch(&base, key.as_deref(), provider.details.as_deref());
                 match fetched {
                     Some(models) if !models.is_empty() => {
                         write_cache(&provider.id, &models);
@@ -123,9 +125,10 @@ pub(crate) fn key_for(provider: &Provider) -> Option<String> {
 /// Ask `<base>/models` what there is, on a thread with a runtime of its own: the synchronous
 /// caller is reached from an async daemon too, and building a runtime inside a running one
 /// panics.
-fn fetch(base: &str, key: Option<&str>) -> Option<Vec<Model>> {
+fn fetch(base: &str, key: Option<&str>, details: Option<&str>) -> Option<Vec<Model>> {
     let url = format!("{}/models", base.trim_end_matches('/'));
     let key = key.map(ToOwned::to_owned);
+    let ollama = (details == Some("ollama")).then(|| ollama::root(base));
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -138,7 +141,17 @@ fn fetch(base: &str, key: Option<&str>) -> Option<Vec<Model>> {
                 request = request.bearer_auth(key);
             }
             let body: serde_json::Value = request.send().await.ok()?.json().await.ok()?;
-            Some(parse(&body))
+            let listed = parse(&body);
+            // Asked here, before the cache is written, so a card is read from ollama once a day
+            // rather than on every start.
+            let Some(root) = ollama else {
+                return Some(listed);
+            };
+            let mut detailed = Vec::with_capacity(listed.len());
+            for model in listed {
+                detailed.push(ollama::detailed(model, &root, &client).await);
+            }
+            Some(detailed)
         })
     })
     .join()
@@ -366,6 +379,7 @@ mod tests {
             compat: None,
             models: Vec::new(),
             discover: false,
+            details: None,
             avoid: Vec::new(),
         }];
         discover(&mut providers);
@@ -387,6 +401,7 @@ mod tests {
             }),
             models: Vec::new(),
             discover: true,
+            details: None,
             avoid: Vec::new(),
         };
         let model = joined(parse(&bare()).remove(0), &provider);

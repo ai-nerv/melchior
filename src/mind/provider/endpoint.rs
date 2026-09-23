@@ -114,6 +114,10 @@ pub struct Provider {
     /// cached, never written into the configuration.
     #[serde(default)]
     pub discover: bool,
+    /// Where a discovered model's own details are asked, when its listing leaves them out.
+    /// `"ollama"` reads `/api/show` for each: its window, and whether it reasons or sees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
     /// Upstreams a router must never serve this provider's asks from, fallbacks included.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub avoid: Vec<String>,
@@ -156,6 +160,8 @@ struct ProviderDecl {
     #[serde(default)]
     discover: bool,
     #[serde(default)]
+    details: Option<String>,
+    #[serde(default)]
     avoid: Vec<String>,
 }
 
@@ -170,6 +176,7 @@ impl From<ProviderDecl> for Provider {
             compat,
             mut models,
             discover,
+            details,
             avoid,
         } = decl;
         for model in &mut models {
@@ -187,6 +194,7 @@ impl From<ProviderDecl> for Provider {
             compat,
             models,
             discover,
+            details,
             avoid,
         }
     }
