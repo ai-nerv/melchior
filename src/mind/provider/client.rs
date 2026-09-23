@@ -40,6 +40,9 @@ use futures_util::StreamExt;
 pub struct ProviderError {
     pub class: RetryClass,
     pub message: String,
+    /// Whether asking again could help. The class's own answer, unless this failure is one the
+    /// class usually recovers from and this one will not.
+    pub again: bool,
 }
 
 impl std::fmt::Display for ProviderError {
@@ -53,6 +56,15 @@ impl ProviderError {
         Self {
             class,
             message: message.into(),
+            again: class.is_retryable(),
+        }
+    }
+
+    /// The same failure, not worth asking again.
+    fn finally(self) -> Self {
+        Self {
+            again: false,
+            ..self
         }
     }
 }
@@ -118,7 +130,7 @@ impl Client {
             let outcome = self.attempt(call, &mut on_delta).await;
             match outcome {
                 Ok(()) => return Ok(()),
-                Err(why) if why.class.is_retryable() && attempt < MAX_ATTEMPTS => {
+                Err(why) if why.again && attempt < MAX_ATTEMPTS => {
                     let wait = crate::mind::provider::retry::backoff_from(
                         self.base_delay,
                         attempt,
@@ -182,9 +194,9 @@ impl Client {
         // holds the turn open for as long as it stays quiet.
         let sent = tokio::time::timeout(QUIET, request.json(&body).send()).await;
         let response = match sent {
-            Ok(sent) => sent.map_err(|e| {
-                ProviderError::new(RetryClass::Transport, e.without_url().to_string())
-            })?,
+            Ok(sent) => {
+                sent.map_err(|e| unreached(&format!("could not reach {}", provider.id), e))?
+            }
             Err(_) => return Err(hung(&provider.id)),
         };
 
@@ -227,7 +239,10 @@ impl Client {
             };
             let Some(chunk) = next else { break };
             let chunk = chunk.map_err(|e| {
-                ProviderError::new(RetryClass::Transport, e.without_url().to_string())
+                unreached(
+                    &format!("lost {} partway through its answer", provider.id),
+                    e,
+                )
             })?;
             if events == 0 && whole.len() + chunk.len() <= WHOLE {
                 whole.extend_from_slice(&chunk);
@@ -333,6 +348,37 @@ fn kept(tail: &mut Vec<String>, data: &str) {
 /// How long a started stream may say nothing before it is taken as hung. Long, because a very
 /// large prompt nothing has cached is read in silence before the first token.
 const QUIET: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// A request that never reached the provider, said as the provider and the reason underneath:
+/// reqwest's own line is "error sending request", and "No route to host" is two sources below it.
+/// The URL stays out, since some providers carry the key in its query string.
+fn unreached(what: &str, error: reqwest::Error) -> ProviderError {
+    let (deepest, routeless) = underneath(&error);
+    let said = deepest.unwrap_or_else(|| error.without_url().to_string());
+    let failed = ProviderError::new(RetryClass::Transport, format!("{what}: {said}"));
+    // No route is the network saying the host is not there, and a minute of backoff does not put
+    // it back. A refused connection is not this: that host is up, and a daemon restarting on it
+    // answers seconds later.
+    if routeless { failed.finally() } else { failed }
+}
+
+/// The innermost reason beneath `error`, and whether any reason on the way says there is no route.
+fn underneath(error: &(dyn std::error::Error + 'static)) -> (Option<String>, bool) {
+    let mut deepest = None;
+    let mut routeless = false;
+    let mut cause = error.source();
+    while let Some(found) = cause {
+        deepest = Some(found.to_string());
+        routeless |= found.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::HostUnreachable | std::io::ErrorKind::NetworkUnreachable
+            )
+        });
+        cause = found.source();
+    }
+    (deepest, routeless)
+}
 
 /// A provider that took the request and then said nothing at all: asked again, since a turn that
 /// waits on it waits for as long as it stays quiet.

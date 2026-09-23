@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1] - 2026-09-23
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Give up at once on no route to host
+- Name the provider and why it was unreachable
+
 ## [0.5.0] - 2026-09-23
 
 ### <!-- 0 -->⛰️  Features
