@@ -124,9 +124,34 @@ pub fn reported(arguments: &serde_json::Value, standing: &Standing) -> Answer {
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
     let Some((who, message)) = read(about) else {
+        let who = arguments
+            .get("who")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if !about.is_empty()
+            && (who.is_empty() || who == about)
+            && (standing.forked.iter().any(|id| id == about) || standing.minted.contains_key(about))
+        {
+            return match super::doing::decide("status", about, arguments, standing) {
+                Ok(wanted) => {
+                    let mut answer = super::doing::perform(&wanted, standing);
+                    if !answer.failed {
+                        answer.said = format!(
+                            "`{about}` is a spawned agent, not an `ask` task. Current agent status: {}. \
+                             Use `status` with `who: \"{about}\"` or `crew` to check it. A report or \
+                             note can arrive while it is still working; that alone is not completion.",
+                            answer.said
+                        );
+                    }
+                    answer
+                }
+                Err(refused) => refused,
+            };
+        }
         return Answer::refused(format!(
             "`{about}` is not a task handle. `ask` hands one back, and it reads \
-             `id{BETWEEN}message-id`."
+             `id{BETWEEN}message-id`. `spawn` returns an agent id instead: use `status` with \
+             that id in `who`, or `crew`. This check does not mean the child failed or finished."
         ));
     };
     let me = standing.identity();
@@ -270,6 +295,30 @@ mod tests {
         let said = reported(&serde_json::json!({"about": "the-parser"}), &standing());
         assert!(said.failed);
         assert!(said.said.contains("ask"), "{}", said.said);
+    }
+
+    #[test]
+    fn a_spawned_child_id_is_polled_as_an_agent_not_an_ask_task() {
+        let mut standing = standing();
+        standing.forked.push("psi-zeta".to_owned());
+        let said = reported(
+            &serde_json::json!({"who": "psi-zeta", "about": "psi-zeta"}),
+            &standing,
+        );
+        assert!(!said.said.contains("not a task handle"), "{}", said.said);
+        assert!(said.said.contains("list"), "{}", said.said);
+    }
+
+    #[test]
+    fn a_child_id_fallback_does_not_override_a_different_who() {
+        let mut standing = standing();
+        standing.forked.push("psi-zeta".to_owned());
+        let said = reported(
+            &serde_json::json!({"who": "somebody-else", "about": "psi-zeta"}),
+            &standing,
+        );
+        assert!(said.failed);
+        assert!(said.said.contains("not a task handle"), "{}", said.said);
     }
 
     #[test]
