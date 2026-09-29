@@ -1,7 +1,7 @@
 //! Asking a provider what it offers, and remembering the answer. A fetch never writes back to
 //! `providers.lua`; what it finds goes to a cache under `$XDG_CACHE_HOME/melchior/models/`. That
-//! cache is what load time reads, and a fetch happens only when it is missing or older than
-//! [`FRESH`], its failure leaving whatever the cache last held.
+//! cache is read at load time. Missing, expired, or explicitly refreshed catalogs are fetched;
+//! a failed fetch leaves whatever the cache last held.
 
 use crate::mind::model::ThinkingLevel;
 use crate::mind::provider::endpoint::Provider;
@@ -25,6 +25,12 @@ const ASSUMED_WINDOW: u64 = 128_000;
 /// Fill in the models of every provider that asked to be discovered; one that declares its own
 /// models, or neither models nor discovery, is left as it is.
 pub fn discover(providers: &mut [Provider]) {
+    discover_with_refresh(providers, false);
+}
+
+/// Discover catalogs, optionally bypassing fresh caches, and name providers that failed.
+pub fn discover_with_refresh(providers: &mut [Provider], refresh: bool) -> Vec<String> {
+    let mut failed = Vec::new();
     for provider in providers.iter_mut() {
         if !provider.discover {
             continue;
@@ -33,18 +39,21 @@ pub fn discover(providers: &mut [Provider]) {
             continue;
         };
         let found = cached(&provider.id)
-            .filter(|held| held.fresh)
+            .filter(|held| held.fresh && !refresh)
             .map(|held| held.models)
             .or_else(|| {
                 let key = key_for(provider);
                 let fetched = fetch(&base, key.as_deref(), provider.details.as_deref());
                 match fetched {
-                    Some(models) if !models.is_empty() => {
+                    Some(models) => {
                         write_cache(&provider.id, &models);
                         Some(models)
                     }
                     // A failed fetch falls back to a stale cache.
-                    _ => cached(&provider.id).map(|held| held.models),
+                    _ => {
+                        failed.push(provider.id.clone());
+                        cached(&provider.id).map(|held| held.models)
+                    }
                 }
             });
         if let Some(found) = found {
@@ -54,6 +63,7 @@ pub fn discover(providers: &mut [Provider]) {
                 .collect();
         }
     }
+    failed
 }
 
 /// A discovered model as its provider serves it: the provider's id, protocol and dialect. Without
@@ -140,10 +150,21 @@ fn fetch(base: &str, key: Option<&str>, details: Option<&str>) -> Option<Vec<Mod
             if let Some(key) = key {
                 request = request.bearer_auth(key);
             }
-            let body: serde_json::Value = request.send().await.ok()?.json().await.ok()?;
+            let body: serde_json::Value = request
+                .send()
+                .await
+                .ok()?
+                .error_for_status()
+                .ok()?
+                .json()
+                .await
+                .ok()?;
+            let entries = body.get("data")?.as_array()?;
             let listed = parse(&body);
-            // Asked here, before the cache is written, so a card is read from ollama once a day
-            // rather than on every start.
+            if !entries.is_empty() && listed.is_empty() {
+                return None;
+            }
+            // Fetch Ollama metadata before storing the refreshed cards.
             let Some(root) = ollama else {
                 return Some(listed);
             };

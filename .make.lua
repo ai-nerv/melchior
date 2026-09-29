@@ -196,8 +196,23 @@ make.recipe{ name = "test", desc = "the suite",
              run = function() sh.cargo("test", "--all-targets") end }
 make.alias("t", "test")
 
+make.recipe{ name = "test-model-refresh", desc = "forced discovery with disposable cache and provider",
+             run = function() sh.cargo("test", "--test", "model_refresh") end }
+
 make.recipe{ name = "test-streaming", desc = "provider byte and response boundaries",
              run = function() sh.cargo("test", "--lib", "mind::provider::") end }
+
+make.recipe{ name = "test-agent-status", desc = "task handles and spawned child status",
+             run = function()
+               sh.cargo("test", "--lib", "verbs::tasking::")
+               sh.cargo("test", "--test", "task_status")
+             end }
+
+make.recipe{ name = "test-report-delivery", desc = "stored report revisions and non-interrupting notifications",
+             run = function()
+               sh.cargo("test", "--lib", "verbs::reporting::")
+               sh.cargo("test", "--test", "task_status")
+             end }
 
 make.recipe{ name = "test-all", desc = "the suite, with every feature on",
              run = function() sh.cargo("test", "--all-targets", "--all-features") end }

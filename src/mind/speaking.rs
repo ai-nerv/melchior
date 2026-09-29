@@ -50,7 +50,7 @@ pub fn refuse(out: &mut impl Write, how: As, why: &str, fault: Fault) -> std::io
 }
 
 /// The one place a command-line answer becomes bytes, so both doors carry the same [`Reply`].
-fn emit(out: &mut impl Write, how: As, body: &Reply) -> std::io::Result<()> {
+fn emit(out: &mut impl Write, how: As, body: &impl serde::Serialize) -> std::io::Result<()> {
     match how {
         As::Json => {
             let line = serde_json::to_string(body).map_err(std::io::Error::other)?;
@@ -68,7 +68,8 @@ fn emit(out: &mut impl Write, how: As, body: &Reply) -> std::io::Result<()> {
 pub fn models(flags: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
     let how = As::asked(flags);
     let mut out = std::io::stdout().lock();
-    match Catalog::load(&Catalog::dir()) {
+    let refresh = flags.contains_key("refresh");
+    match Catalog::load_with_refresh(&Catalog::dir(), refresh) {
         Ok(catalog) => {
             let mut cards = catalog.cards();
             // Ready first. A list that opens with forty models needing keys buries the one that
@@ -83,7 +84,30 @@ pub fn models(flags: &std::collections::BTreeMap<String, String>) -> std::io::Re
                 cards.len(),
                 cards.iter().filter(|card| card.ready).count()
             );
-            reply(&mut out, how, &cards)
+            if refresh {
+                let rows = cards
+                    .iter()
+                    .map(|card| serde_json::to_value(card).unwrap_or_default())
+                    .collect();
+                #[derive(serde::Serialize)]
+                struct Refreshed {
+                    #[serde(flatten)]
+                    reply: Reply,
+                    refreshed: bool,
+                    failed: Vec<String>,
+                }
+                emit(
+                    &mut out,
+                    how,
+                    &Refreshed {
+                        reply: Reply::rows(rows),
+                        refreshed: true,
+                        failed: catalog.discovery_failed,
+                    },
+                )
+            } else {
+                reply(&mut out, how, &cards)
+            }
         }
         Err(why) => {
             crate::noted!(

@@ -8,6 +8,53 @@
 
 use super::{Answer, Standing};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Stored {
+    format: String,
+    revision: String,
+    digest: String,
+    report: String,
+}
+
+fn stored(body: String) -> Stored {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let digest = format!("{:x}", Sha256::digest(body.as_bytes()));
+    let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let revision = format!(
+        "{:x}",
+        Sha256::digest(format!("{}:{serial}:{now}:{digest}", std::process::id()).as_bytes())
+    );
+    Stored {
+        format: "melchior-report-v1".into(),
+        revision,
+        digest,
+        report: body,
+    }
+}
+
+fn keep(at: &std::path::Path, value: &Stored) -> std::io::Result<()> {
+    let temporary = at.with_extension(format!("{}.tmp", value.revision));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        let bytes = serde_json::to_vec(value).map_err(std::io::Error::other)?;
+        file.write_all(&bytes)?;
+        std::fs::rename(&temporary, at)
+    })();
+    let _ = std::fs::remove_file(temporary);
+    result
+}
 
 /// How many lines one reading gives back, and how many bytes at most: under what a harness will
 /// carry as one tool result, so a long report is paged rather than cut in the middle.
@@ -32,7 +79,11 @@ pub fn report(arguments: &Value, standing: &Standing) -> Answer {
             .map(str::trim)
             .filter(|said| !said.is_empty())
     };
-    match (text("who"), text("message")) {
+    let message = arguments
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|said| !said.trim().is_empty());
+    match (text("who"), message) {
         (Some(_), Some(_)) => Answer::refused(
             "`report` with `who` reads that agent's report, and with `message` hands in this \
              session's own. Give one or the other.",
@@ -47,7 +98,11 @@ fn hand_in(said: Option<&str>, path: Option<&str>, standing: &Standing) -> Answe
     let me = standing.identity();
     let body = match (said, path) {
         (Some(said), _) => said.to_owned(),
-        (None, Some(path)) => match std::fs::read_to_string(path) {
+        (None, Some(path)) => match if path == "-" {
+            std::io::read_to_string(std::io::stdin())
+        } else {
+            std::fs::read_to_string(path)
+        } {
             Ok(body) => body,
             Err(why) => return Answer::refused(format!("could not read `{path}`: {why}")),
         },
@@ -58,9 +113,10 @@ fn hand_in(said: Option<&str>, path: Option<&str>, standing: &Standing) -> Answe
             );
         }
     };
+    let stored = stored(body.clone());
     let at = kept_at(&me.project, &me.id);
     if let Err(why) = std::fs::create_dir_all(crate::directory::home(&me.project))
-        .and_then(|()| std::fs::write(&at, &body))
+        .and_then(|()| keep(&at, &stored))
     {
         return Answer::refused(format!("the report could not be kept: {why}"));
     }
@@ -73,12 +129,11 @@ fn hand_in(said: Option<&str>, path: Option<&str>, standing: &Standing) -> Answe
         let note = serde_json::json!({
             "verb": "send",
             "who": lead,
-            "sort": "attention",
-            "message": format!(
-                "`{}` has handed in its report ({size}). Read it with the `agent` tool: verb \
-                 `report`, who `{}`.",
-                me.id, me.id
-            ),
+            "sort": "report",
+            "message": serde_json::json!({
+                "revision": stored.revision,
+                "notice": format!("`{}` has handed in its report ({size}).", me.id),
+            }).to_string(),
         });
         match super::doing::decide("send", lead, &note, standing) {
             Ok(wanted) => !super::doing::perform(&wanted, standing).failed,
@@ -109,6 +164,27 @@ fn read(who: &str, from: Option<&str>, standing: &Standing) -> Answer {
              has finished without reporting can be asked to with `ask`."
         ));
     };
+    let stored = serde_json::from_str::<Stored>(&body)
+        .ok()
+        .filter(|stored| stored.format == "melchior-report-v1");
+    let (body, revision, digest) = match stored {
+        Some(stored) => (stored.report, stored.revision, stored.digest),
+        None => {
+            let digest = format!("{:x}", Sha256::digest(body.as_bytes()));
+            (body, digest.clone(), digest)
+        }
+    };
+    if from == Some("json") {
+        return Answer::said(
+            serde_json::json!({
+                "agent": id,
+                "revision": revision,
+                "digest": digest,
+                "report": body,
+            })
+            .to_string(),
+        );
+    }
     let lines: Vec<&str> = body.lines().collect();
     let first = from
         .and_then(|n| n.parse::<usize>().ok())
@@ -217,5 +293,18 @@ mod tests {
         let lead = standing(&project, "iota-omega");
         let read = report(&serde_json::json!({"who": "pi-mu"}), &lead);
         assert!(read.said.ends_with("final"), "{}", read.said);
+    }
+
+    #[test]
+    fn old_plain_text_reports_remain_readable() {
+        let project = Project::new("melchior-reporting", "legacy");
+        std::fs::create_dir_all(crate::directory::home(&project)).expect("report directory");
+        let body = "Legacy findings.\n";
+        std::fs::write(kept_at(&project, "pi-mu"), body).expect("legacy report file");
+        let lead = standing(&project, "iota-omega");
+        let read = report(&serde_json::json!({"who": "pi-mu", "about": "json"}), &lead);
+        let value: Value = serde_json::from_str(&read.said).expect("report JSON");
+        assert_eq!(value["report"], body);
+        assert_eq!(value["revision"], value["digest"]);
     }
 }

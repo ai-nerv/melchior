@@ -82,7 +82,7 @@ usage: melchior serve | tool | fork | brief | models | card | ask | client | ver
   serve     bind this session's socket and answer for it
   tool      the vocabulary a model calls, one exec per request
   brief     what to tell a model about the sessions a prompt named
-  models    what this machine could talk to  [--json|--cbor]
+  models    what this machine could talk to  [--refresh] [--json|--cbor]
   card      one model in full: --model ID    [--json|--cbor]
   ask       run a turn, an Ask on stdin      [--json|--cbor]
   client    print the Lua client library     [--json|--cbor]

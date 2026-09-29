@@ -18,6 +18,8 @@ const PROVIDERS: &str = include_str!("../../config/providers.lua");
 
 /// Everything a config declared.
 pub struct Catalog {
+    /// Discovery failures, identified by provider rather than endpoint or credentials.
+    pub discovery_failed: Vec<String>,
     /// The endpoints, in the order they were declared.
     pub providers: Vec<Provider>,
     /// The VM the protocol descriptions live in, because an adapter *is* a Lua function.
@@ -28,6 +30,11 @@ impl Catalog {
     /// Read the configuration and register what it declares. A shipped file that will not
     /// compile or raises is fatal.
     pub fn load(dir: &Path) -> Result<Self, LuaError> {
+        Self::load_with_refresh(dir, false)
+    }
+
+    /// Load configuration and optionally bypass discovery caches.
+    pub fn load_with_refresh(dir: &Path, refresh: bool) -> Result<Self, LuaError> {
         let mut engine = Engine::new();
         // Protocols first: a provider may name one, and a name that resolves to nothing should
         // be a refusal rather than an ordering accident.
@@ -88,8 +95,13 @@ impl Catalog {
         drop(config);
         // Ask the providers that asked to be asked.
         let mut providers = providers;
-        crate::mind::discovering::discover(&mut providers);
-        Ok(Self { providers, engine })
+        let discovery_failed =
+            crate::mind::discovering::discover_with_refresh(&mut providers, refresh);
+        Ok(Self {
+            providers,
+            engine,
+            discovery_failed,
+        })
     }
 
     /// Where the configuration lives: `$MELCHIOR_CONFIG` first, so a test or a second install

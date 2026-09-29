@@ -130,6 +130,20 @@ environment it was given. A session started that way comes up a *child*: it writ
 makes the tree readable, it is inside the walls `policy::between` draws, and the session that
 minted its secret is the only one that can end it.
 
+Poll a spawned agent with `tool --verb=status --who=<id>`; its id is not a task handle.
+`tool --verb=task --about=<id@message-id>` tracks a question submitted with `ask`. If `task`
+receives a known child's bare id in `about`, with `who` omitted or matching it, it returns
+that child's current agent status through the normal policy checks instead of rejecting the
+id as a malformed handle. This does not create an `ask` task or infer completion from a report.
+
+`tool --verb=report --message=<text>` stores the caller's report. For large reports,
+`tool --verb=report --about=-` reads the complete UTF-8 body from stdin. Submission atomically
+replaces the agent's stored report and sends its parent a non-interrupting `report` notification
+with a distinct submission revision. Repeating identical text on another turn is a new revision.
+Read with `--who=<id>` for pages, or add `--about=json` for the whole body, revision and SHA-256
+content digest. Older plain-text report files remain readable. A stored report is not evidence
+that the child or its delegated work has finished; check current status separately.
+
 ## Talking to it from Lua
 
 `melchior lua-api` prints a plain-Lua client — framing, encoding, discovery and the verbs — with no
@@ -142,6 +156,14 @@ print(them.status())
 them.tell("the parser is done", "attention")
 them:close()
 ```
+
+## Model discovery
+
+`melchior models --refresh --json` bypasses the 24-hour discovery cache for providers with
+`discover = true`. Successful listings, including empty ones, replace their cached catalogs.
+Failed requests keep the last cached listing. The reply includes `refreshed: true` and a
+`failed` list of provider IDs; model cards remain in the ordinary `result` array. Without
+`--refresh`, normal cache freshness applies. This lists models; it does not run inference.
 
 ## Commands
 

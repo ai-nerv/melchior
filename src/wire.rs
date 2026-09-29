@@ -195,6 +195,8 @@ pub enum Sort {
     Answer,
     /// "I need you." The one that is allowed to interrupt.
     Attention,
+    /// A stored report is available for automatic delivery.
+    Report,
     Claim,
     Release,
     /// A piece of work moved, not copied.
@@ -211,6 +213,7 @@ impl Sort {
             "question" => Self::Question,
             "answer" => Self::Answer,
             "attention" => Self::Attention,
+            "report" => Self::Report,
             "claim" => Self::Claim,
             "release" => Self::Release,
             "handoff" => Self::Handoff,
