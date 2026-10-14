@@ -320,7 +320,8 @@ async fn provider_transport_errors_exclude_sensitive_endpoint_urls() {
         )
         .await
         .expect_err("unsupported transport");
-    assert_eq!(why.class, RetryClass::Transport);
+    // A request that cannot be built is the request's fault, and asking again repeats it.
+    assert_eq!(why.class, RetryClass::Invalid);
     assert!(!why.to_string().contains("SECRET"), "{why}");
 }
 

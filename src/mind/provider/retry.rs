@@ -102,6 +102,35 @@ pub fn backoff_from(base_delay: Duration, attempt: u32, seed: u64) -> Duration {
     capped.saturating_sub(Duration::from_millis(offset))
 }
 
+/// How long a provider asked to be left alone, from `retry-after-ms` or `retry-after` in seconds,
+/// and never longer than the ceiling. A date in `retry-after` is not read.
+#[must_use]
+pub fn after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let number = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0)
+    };
+    let said = number("retry-after-ms")
+        .map(|ms| Duration::from_secs_f64(ms / 1_000.0))
+        .or_else(|| number("retry-after").map(Duration::from_secs_f64))?;
+    Some(said.min(CEILING))
+}
+
+/// A wait of at least what the provider asked for, spread by up to a tenth of it so the sessions
+/// it told the same thing do not all come back at once.
+#[must_use]
+pub fn at_least(wait: Duration, asked: Option<Duration>, seed: u64) -> Duration {
+    let Some(asked) = asked.filter(|asked| *asked > wait) else {
+        return wait;
+    };
+    let span = asked.as_millis() as u64 / 10;
+    let spread = if span == 0 { 0 } else { seed % span };
+    asked.saturating_add(Duration::from_millis(spread))
+}
+
 /// A stable seed for one request's retry schedule.
 #[must_use]
 pub fn seed(request_id: &str, attempt: u32) -> u64 {

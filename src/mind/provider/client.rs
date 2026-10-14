@@ -8,6 +8,8 @@ use crate::mind::provider::model::Model;
 use crate::mind::provider::retry::RetryClass;
 
 #[cfg(test)]
+mod refusing;
+#[cfg(test)]
 mod streaming;
 
 /// How many times a request is made before the failure is the answer.
@@ -43,6 +45,8 @@ pub struct ProviderError {
     /// Whether asking again could help. The class's own answer, unless this failure is one the
     /// class usually recovers from and this one will not.
     pub again: bool,
+    /// How long the provider said to wait before asking again, when it said.
+    pub after: Option<std::time::Duration>,
 }
 
 impl std::fmt::Display for ProviderError {
@@ -57,6 +61,7 @@ impl ProviderError {
             class,
             message: message.into(),
             again: class.is_retryable(),
+            after: None,
         }
     }
 
@@ -131,14 +136,19 @@ impl Client {
             match outcome {
                 Ok(()) => return Ok(()),
                 Err(why) if why.again && attempt < MAX_ATTEMPTS => {
-                    let wait = crate::mind::provider::retry::backoff_from(
-                        self.base_delay,
-                        attempt,
-                        crate::mind::provider::retry::seed(
-                            &format!("{}/{}", call.provider.id, call.model.id),
-                            attempt,
+                    // Seeded by this process too, so sessions sharing a model do not ask in step.
+                    let seed = crate::mind::provider::retry::seed(
+                        &format!(
+                            "{}/{}/{}",
+                            call.provider.id,
+                            call.model.id,
+                            std::process::id()
                         ),
+                        attempt,
                     );
+                    let wait =
+                        crate::mind::provider::retry::backoff_from(self.base_delay, attempt, seed);
+                    let wait = crate::mind::provider::retry::at_least(wait, why.after, seed);
                     on_retry(Retrying {
                         attempt,
                         max_attempts: MAX_ATTEMPTS,
@@ -186,7 +196,21 @@ impl Client {
 
         let mut request = self.http.post(adapter.endpoint(base_url, model));
         for (name, value) in adapter.headers(key.as_deref()) {
-            request = request.header(name, value);
+            // A header that cannot be built is the request's fault, and asking again repeats it.
+            let (Ok(named), Ok(valued)) = (
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+                reqwest::header::HeaderValue::from_str(&value),
+            ) else {
+                return Err(ProviderError::new(
+                    RetryClass::Invalid,
+                    format!(
+                        "{}: the `{name}` header cannot be sent as it stands — a key with a space \
+                         or a line break in it, perhaps",
+                        provider.id
+                    ),
+                ));
+            };
+            request = request.header(named, valued);
         }
         let (body, kept_by_dialect) = parted(adapter.request(model, context, options));
 
@@ -194,6 +218,16 @@ impl Client {
         // holds the turn open for as long as it stays quiet.
         let sent = tokio::time::timeout(QUIET, request.json(&body).send()).await;
         let response = match sent {
+            Ok(Err(e)) if e.is_builder() => {
+                return Err(ProviderError::new(
+                    RetryClass::Invalid,
+                    format!(
+                        "{}: the request could not be built: {}",
+                        provider.id,
+                        e.without_url()
+                    ),
+                ));
+            }
             Ok(sent) => {
                 sent.map_err(|e| unreached(&format!("could not reach {}", provider.id), e))?
             }
@@ -202,6 +236,7 @@ impl Client {
 
         let status = response.status();
         if !status.is_success() {
+            let after = crate::mind::provider::retry::after(response.headers());
             let deadline = tokio::time::Instant::now() + self.control.timeout;
             let detail = control::read(response, self.control, deadline)
                 .await
@@ -212,10 +247,16 @@ impl Client {
                     )
                 })?;
             let class = RetryClass::of(status.as_u16(), &detail);
-            return Err(ProviderError::new(
+            let mut refused = ProviderError::new(
                 class,
-                format!("{} returned {status} ({class:?})", provider.id),
-            ));
+                format!(
+                    "{} returned {status} ({class:?}): {}",
+                    provider.id,
+                    summary(&detail)
+                ),
+            );
+            refused.after = after;
+            return Err(refused);
         }
 
         let mut parser = sse::Parser::new();
@@ -259,12 +300,9 @@ impl Client {
                         on_delta(delta);
                     }
                 })
-                .map_err(|why| ProviderError::new(RetryClass::Transport, why.to_string()))?;
+                .map_err(|why| unparsed(why, &provider.id))?;
         }
-        if let Some(event) = parser
-            .finish()
-            .map_err(|why| ProviderError::new(RetryClass::Transport, why.to_string()))?
-        {
+        if let Some(event) = parser.finish().map_err(|why| unparsed(why, &provider.id))? {
             events += 1;
             kept(&mut tail, &event.data);
             for delta in adapter.on_event(&mut state, &event) {
@@ -378,6 +416,54 @@ fn underneath(error: &(dyn std::error::Error + 'static)) -> (Option<String>, boo
         cause = found.source();
     }
     (deepest, routeless)
+}
+
+/// A stream that could not be read: broken text is asked again, and one larger than this reads is
+/// not, since it would be as large the next time.
+fn unparsed(why: sse::Malformed, provider: &str) -> ProviderError {
+    let failed = ProviderError::new(RetryClass::Transport, format!("{provider}: {why}"));
+    if why == sse::Malformed::Utf8 {
+        failed
+    } else {
+        failed.finally()
+    }
+}
+
+/// What a provider said when it refused, as one short line: the `message` of the usual JSON error
+/// and nothing else, with anything shaped like a credential taken out. A body that is not that
+/// shape may be the request echoed back, so it is not repeated.
+fn summary(detail: &str) -> String {
+    let said = serde_json::from_str::<serde_json::Value>(detail)
+        .ok()
+        .and_then(|body| {
+            body.pointer("/error/message")
+                .or_else(|| body.get("message"))
+                .or_else(|| body.get("error"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_default();
+    let masked: Vec<&str> = said
+        .split_whitespace()
+        .map(|word| if secretive(word) { "<redacted>" } else { word })
+        .collect();
+    let said = crate::noted::short(&masked.join(" "));
+    if said.is_empty() {
+        "it gave no reason a person can read".to_owned()
+    } else {
+        said
+    }
+}
+
+/// Whether a word looks like a key: long, unbroken, and mixing letters with digits.
+fn secretive(word: &str) -> bool {
+    let core = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    core.len() >= 20
+        && core
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && core.chars().any(|c| c.is_ascii_digit())
+        && core.chars().any(|c| c.is_ascii_alphabetic())
 }
 
 /// A provider that took the request and then said nothing at all: asked again, since a turn that
