@@ -20,8 +20,6 @@ pub(super) fn answered(
     let Some(them) = Identity::read(&request.from) else {
         return;
     };
-    // Withdrawn first, so two sessions taking each other on at once cannot both succeed.
-    pending::withdraw(me, &them.id);
     let outcome = if accept {
         took(me, &them, request, handover, about)
     } else {
@@ -45,6 +43,9 @@ fn took(
     handover: Option<&str>,
     about: &tokio::sync::watch::Sender<About>,
 ) -> Result<(), String> {
+    // This session's own asking of `them` goes first, so two sessions taking each other on at
+    // once cannot both succeed.
+    pending::withdraw(me, &them.id);
     if directory::sessions::session_in(&them.project, &them.id) != request.session {
         return Err(format!(
             "`{}` is not the session that asked: its run has changed",
