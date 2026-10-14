@@ -252,7 +252,7 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
                     Then::Nothing,
                 );
             }
-            let running = crate::directory::children(&about.me).len();
+            let running = crate::directory::children(&about.me).len() + coming(about);
             if running >= crate::directory::MAX_CHILDREN {
                 return (
                     Reply::refused(format!(
@@ -375,6 +375,16 @@ fn proven(call: &Call, about: &About) -> bool {
         .into_iter()
         .flatten()
         .any(|mine| crate::identity::same(mine, quoted))
+}
+
+/// How many children this session has named and that have not come up yet.
+#[must_use]
+pub fn coming(about: &About) -> usize {
+    about
+        .minted
+        .keys()
+        .filter(|id| crate::directory::reserved::fresh(&about.me.project, id))
+        .count()
 }
 
 /// A string argument, if there is one there.

@@ -22,6 +22,7 @@
 
 pub mod claims;
 pub mod pending;
+pub mod reserved;
 pub mod roles;
 pub mod screens;
 pub mod sending;
@@ -334,10 +335,13 @@ fn safe(name: &str) -> String {
 /// When a note cannot be written. A child that could not write `.parent` reads as a main to every
 /// peer, with a main's reach, so the caller must refuse to come up rather than serve under it.
 pub fn announce(me: &Identity, role: &roles::Role, ui: Option<&Path>) -> Result<(), String> {
+    reserved::release(&me.project, &me.id);
     sessions::began(me)?;
     roles::began(me, role)?;
     screens::began(me, ui)?;
     let Some(parent) = parent() else {
+        // A main says so by having no note, so one an earlier holder of this name left goes.
+        let _ = std::fs::remove_file(kin_at(me));
         return Ok(());
     };
     wrote(&kin_at(me), &parent)
@@ -416,10 +420,20 @@ pub fn answer_request(them: &Identity, me: &Identity, said: &str) {
     }
 }
 
-/// A name nothing in `project` is already listening under.
+/// A name nothing in `project` is listening under or holds, reserved for the caller as it is
+/// handed out: see [`reserved`].
 #[must_use]
 pub fn free_in(project: &str) -> Identity {
-    crate::identity::free_of(project, &listening(project))
+    let mut taken = listening(project);
+    taken.extend(reserved::taken(project));
+    for _ in 0..64 {
+        let picked = crate::identity::free_of(project, &taken);
+        if reserved::reserve(project, &picked.id) == Ok(true) {
+            return picked;
+        }
+        taken.push(picked.id);
+    }
+    crate::identity::free_of(project, &taken)
 }
 
 /// Open a connection to the session named `them`, as `me`.
@@ -449,9 +463,18 @@ pub fn listening(project: &str) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(home(project)) else {
         return Vec::new();
     };
-    let mut out: Vec<String> = entries
+    let names: Vec<String> = entries
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    // A `.parent` note whose socket is gone makes the next holder of that name read as a child.
+    for id in names.iter().filter_map(|name| name.strip_suffix(".parent")) {
+        if !names.iter().any(|name| name == id) && !reserved::fresh(project, id) {
+            let _ = std::fs::remove_file(home(project).join(format!("{id}.parent")));
+        }
+    }
+    let mut out: Vec<String> = names
+        .into_iter()
         // The notes sit beside the sockets, and an id is two Greek words and a dash.
         .filter(|name| !name.contains('.') && !name.is_empty())
         .filter(|id| {
@@ -478,6 +501,7 @@ fn forget_id(project: &str, id: &str) {
     let _ = std::fs::remove_file(socket(project, id));
     let _ = std::fs::remove_file(home(project).join(format!("{}.parent", safe(id))));
     let _ = std::fs::remove_file(home(project).join(format!("{}.lock", safe(id))));
+    reserved::release(project, id);
     pending::forget_in(project, id);
     sessions::forget_in(project, id);
     roles::forget_in(project, id);

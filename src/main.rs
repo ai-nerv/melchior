@@ -709,7 +709,8 @@ fn brief(project: Option<&str>, asked: &std::collections::BTreeMap<String, Strin
     if named.is_empty() {
         return;
     }
-    let me = melchior::directory::mine().or_else(|| project.map(melchior::directory::free_in));
+    let me = melchior::directory::mine()
+        .or_else(|| project.map(|project| melchior::identity::free_of(project, &[])));
     let standing = me.map(|me| melchior::verbs::Standing {
         inbox: melchior::directory::inbox_of(&me),
         forked: melchior::directory::children(&me),

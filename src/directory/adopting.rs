@@ -96,3 +96,21 @@ fn dialling_a_name_nobody_is_listening_under_is_an_error() {
     };
     assert!(dial(&missing, &missing).is_err());
 }
+
+#[test]
+fn a_note_left_by_an_earlier_holder_of_a_name_does_not_make_a_new_main_a_child() {
+    let project = alone("stale");
+    let me = id(&project, "psi-eta");
+    adopted(&me, "beta-omicron").expect("a note from an earlier life");
+    announce(&me, &roles::Role::default(), None).expect("the notes");
+    assert_eq!(parent_note(&project, &me.id), None, "the stale note stayed");
+
+    let gone = id(&project, "omega-pi");
+    adopted(&gone, "beta-omicron").expect("a note with no socket beside it");
+    let _ = listening(&project);
+    assert_eq!(
+        parent_note(&project, &gone.id),
+        None,
+        "an orphaned note was kept"
+    );
+}

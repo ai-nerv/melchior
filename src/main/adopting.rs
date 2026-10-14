@@ -51,7 +51,7 @@ fn took(
             them.id
         ));
     }
-    pending::adoptable(me, them, 0)?;
+    pending::adoptable(me, them, melchior::answering::coming(&about.borrow()))?;
     let secret = melchior::identity::secret().map_err(|why| why.to_string())?;
     directory::hand_over(them, me, handover, &secret, &request.nonce)?;
     directory::adopted(them, &me.id)?;
