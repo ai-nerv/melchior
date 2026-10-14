@@ -210,12 +210,14 @@ impl Engine {
                     };
                     let id = String::from_utf8_lossy(id.as_bytes()).into_owned();
 
-                    let Some(value) = json_from_lua(ctx, spec, 0) else {
-                        return Err(raise(
+                    let value = json_from_lua(ctx, spec).map_err(|why| {
+                        raise(
                             ctx,
-                            &format!("melchior.{name}({id}): this table cannot be described"),
-                        ));
-                    };
+                            &format!(
+                                "melchior.{name}({id}): this table cannot be described: {why}"
+                            ),
+                        )
+                    })?;
                     held.borrow_mut().registered.insert(name, &id, value);
                     stack.replace(ctx, ());
                     Ok(CallbackReturn::Return)
@@ -302,7 +304,7 @@ impl Engine {
                 let name = String::from_utf8_lossy(name.as_bytes()).into_owned();
                 // A registrar is a function and cannot be described, so it is skipped and every
                 // other field is a setting.
-                if let Some(json) = json_from_lua(ctx, value, 0) {
+                if let Ok(json) = json_from_lua(ctx, value) {
                     held.settings.insert(name, json);
                 }
             }
@@ -378,11 +380,7 @@ impl Engine {
 
         let mut out = None;
         self.lua.enter(|ctx| {
-            out = crate::mind::lua::convert::json_from_lua(
-                ctx,
-                ctx.get_global_value("__melchior_result"),
-                0,
-            );
+            out = json_from_lua(ctx, ctx.get_global_value("__melchior_result")).ok();
         });
         out.filter(|value| !value.is_null())
     }

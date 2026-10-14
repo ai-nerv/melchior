@@ -28,7 +28,10 @@ pub fn table<'gc>(ctx: Context<'gc>) -> Table<'gc> {
 
     let encode = Callback::from_fn(&ctx, |ctx, _exec, mut stack| {
         let value: Value = stack.consume(ctx)?;
-        match json_from_lua(ctx, value, 0).and_then(|v| serde_json::to_string(&v).ok()) {
+        match json_from_lua(ctx, value)
+            .ok()
+            .and_then(|v| serde_json::to_string(&v).ok())
+        {
             Some(text) => {
                 let text = luna::String::from_slice(&ctx, text.as_bytes());
                 stack.replace(ctx, text);

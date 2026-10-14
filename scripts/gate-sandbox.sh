@@ -27,6 +27,7 @@ ENGINE="$ROOT/mind/lua/engine.rs"
 SANDBOX="$ROOT/mind/lua/sandbox.rs"
 STREAM="$ROOT/mind/lua/stream.rs"
 FS="$ROOT/mind/lua/fs.rs"
+CONVERT="$ROOT/mind/lua/convert.rs"
 PLACES="$ROOT/places.rs"
 SETUP="$ROOT/mind/setup.rs"
 POLICY="$ROOT/policy.rs"
@@ -123,6 +124,14 @@ code "$SANDBOX" | grep -q '("string", "dump")' || {
   echo "gate-sandbox: string.dump is no longer removed from the VM" >&2
   fail=1
 }
+
+# ---- a value leaves the VM as JSON within bounds -------------------------------------------------
+for wanted in 'self.open.insert(table)' 'self.nodes > NODES' 'self.bytes > BYTES' 'depth > DEPTH'; do
+  shipped "$CONVERT" | grep -qF "$wanted" || {
+    echo "gate-sandbox: converting a Lua value to JSON no longer checks $wanted" >&2
+    fail=1
+  }
+done
 
 # ---- and nothing is queued for a finalizer -----------------------------------------------------
 body "$SANDBOX" '^pub fn apply[(]' | grep -q 'guard_setmetatable(ctx)' || {

@@ -132,9 +132,8 @@ fn called<'gc>(
     if !matches!(request, Value::Table(_)) {
         return Err("call needs a request table".to_owned());
     }
-    let Some(request) = json_from_lua(ctx, request, 0) else {
-        return Err("the request cannot be written as JSON".to_owned());
-    };
+    let request = json_from_lua(ctx, request)
+        .map_err(|why| format!("the request cannot be written as JSON: {why}"))?;
     let frame =
         framing::framed(Wire::Json, &request).map_err(|why| format!("{why}; nothing was sent"))?;
 
