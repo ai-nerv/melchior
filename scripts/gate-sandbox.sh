@@ -103,7 +103,7 @@ for gone in execute exit remove rename tmpname; do
     fail=1
   fi
 done
-for gone in io package dofile loadfile require; do
+for gone in io package dofile loadfile require debug; do
   if ! code "$SANDBOX" | grep -q "\"$gone\""; then
     echo "gate-sandbox: the global \`$gone\` is no longer removed from the VM" >&2
     fail=1
@@ -121,6 +121,12 @@ body "$SANDBOX" '^pub fn apply[(]' | grep -q 'guard_load(ctx)' || {
 }
 code "$SANDBOX" | grep -q '("string", "dump")' || {
   echo "gate-sandbox: string.dump is no longer removed from the VM" >&2
+  fail=1
+}
+
+# ---- and nothing is queued for a finalizer -----------------------------------------------------
+body "$SANDBOX" '^pub fn apply[(]' | grep -q 'guard_setmetatable(ctx)' || {
+  echo "gate-sandbox: setmetatable no longer refuses __gc, and nothing here runs finalizers" >&2
   fail=1
 }
 

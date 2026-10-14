@@ -560,3 +560,52 @@ mod precompiled_tests {
         assert_eq!(engine.config().number("source"), Some(7.0));
     }
 }
+
+/// Nothing a chunk does queues an object for a finalizer, so nothing waits on one forever.
+#[cfg(test)]
+mod finalizer_tests {
+    use super::*;
+
+    #[test]
+    fn a_metatable_with_gc_is_refused_and_any_other_is_taken() {
+        let mut engine = Engine::new();
+        engine
+            .run(
+                "local ok, why = pcall(setmetatable, {}, { __gc = function() end })\n\
+                 melchior.ok, melchior.why = ok, why\n\
+                 melchior.n = setmetatable({}, { __index = { n = 3 } }).n\n\
+                 melchior.no_debug = debug == nil",
+                "gc.lua",
+            )
+            .expect("runs");
+        engine.harvest();
+        let config = engine.config();
+        assert_eq!(config.boolean("ok"), Some(false));
+        assert!(config.string("why").unwrap_or_default().contains("__gc"));
+        assert_eq!(config.number("n"), Some(3.0));
+        assert_eq!(config.boolean("no_debug"), Some(true));
+    }
+
+    #[test]
+    fn dropped_tables_are_freed_rather_than_held_for_a_finalizer() {
+        let mut engine = Engine::new();
+        engine.lua.gc_collect();
+        let before = engine.lua.total_memory();
+        engine
+            .run(
+                "local function gc() end\n\
+                 for i = 1, 100000 do\n\
+                   pcall(setmetatable, { ('x'):rep(64) .. i }, { __gc = gc })\n\
+                   local late = {}\n\
+                   setmetatable({ ('y'):rep(64) .. i }, late)\n\
+                   late.__gc = gc\n\
+                 end",
+                "queue.lua",
+            )
+            .expect("runs");
+        engine.lua.gc_collect();
+        engine.lua.gc_collect();
+        let after = engine.lua.total_memory();
+        assert!(after < before + (1 << 20), "{before} -> {after} bytes");
+    }
+}

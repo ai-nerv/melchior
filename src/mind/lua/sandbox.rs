@@ -17,9 +17,10 @@ const REMOVED: &[(&str, &str)] = &[
     ("string", "dump"),
 ];
 
-/// Globals removed entirely: `io` opens files and `io.popen` spawns, and the loaders read
-/// arbitrary files.
-const REMOVED_TABLES: &[&str] = &["io", "package", "dofile", "loadfile", "require"];
+/// Globals removed entirely: `io` opens files and `io.popen` spawns, the loaders read
+/// arbitrary files, and `debug` rewrites other frames and attaches metatables past
+/// `setmetatable`.
+const REMOVED_TABLES: &[&str] = &["io", "package", "dofile", "loadfile", "require", "debug"];
 
 /// The first byte of a precompiled chunk: PUC-Rio's `\x1bLua` and luna's `\x1bLuna` alike.
 const PRECOMPILED: u8 = 0x1b;
@@ -45,8 +46,32 @@ pub fn apply(lua: &mut Lua) {
             ctx.set_global(name, Value::Nil);
         }
         guard_load(ctx);
+        guard_setmetatable(ctx);
     });
 }
+
+/// Replace `setmetatable` with one that refuses a metatable carrying `__gc`, so nothing is ever
+/// queued for a finalizer.
+fn guard_setmetatable(ctx: Context<'_>) {
+    let Ok(original) = ctx.get_global::<Function>("setmetatable") else {
+        return;
+    };
+    let guarded = Callback::from_fn_with(&ctx, original, |original, ctx, _exec, stack| {
+        if let Value::Table(metatable) = stack.get(1) {
+            if !metatable.get_value(ctx, "__gc").is_nil() {
+                return Err(refusal(ctx, REFUSED_GC));
+            }
+        }
+        Ok(CallbackReturn::Call {
+            function: *original,
+            then: None,
+        })
+    });
+    ctx.set_global("setmetatable", guarded);
+}
+
+/// What a metatable carrying `__gc` is told.
+const REFUSED_GC: &str = "setmetatable: a metatable with __gc is refused; no finalizer runs here";
 
 /// Replace `load` with one that refuses bytecode in every mode and hands source to the original.
 fn guard_load(ctx: Context<'_>) {
