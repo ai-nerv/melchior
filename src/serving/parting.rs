@@ -164,16 +164,22 @@ async fn a_caller_past_the_limit_is_told_it_is_busy() {
     let _bound = listening(&them).await;
     let at = crate::directory::listening_at(&them);
 
+    // Callers that say nothing are held open and answered nothing; the first past the limit is
+    // answered at once. A dial still being let go of may hold a place for a moment, so a few more
+    // than the limit are allowed for.
     let reply = tokio::task::spawn_blocking(move || {
-        // Once the dial that found it listening has been let go of.
-        std::thread::sleep(Duration::from_millis(200));
-        let held: Vec<std::os::unix::net::UnixStream> = (0..super::CALLERS)
-            .map(|_| std::os::unix::net::UnixStream::connect(&at).expect("connected"))
-            .collect();
-        std::thread::sleep(Duration::from_millis(200));
-        let back = one_shot(&at, &[]);
-        drop(held);
-        back
+        let mut held = Vec::new();
+        for _ in 0..super::CALLERS + 4 {
+            let mut sock = std::os::unix::net::UnixStream::connect(&at).expect("connected");
+            sock.set_read_timeout(Some(Duration::from_millis(500)))
+                .expect("a timeout");
+            let mut back = Vec::new();
+            if sock.read_to_end(&mut back).is_ok() && !back.is_empty() {
+                return back;
+            }
+            held.push(sock);
+        }
+        Vec::new()
     })
     .await
     .expect("the thread finished");
