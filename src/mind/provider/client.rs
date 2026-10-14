@@ -508,24 +508,21 @@ fn unfailed(tail: &[String], provider: &str) -> Result<(), ProviderError> {
         return Ok(());
     };
     let (error, event) = error;
-    let said = error["message"]
-        .as_str()
+    let said = error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
         .unwrap_or("an error with no message");
-    let code = error["code"]
-        .as_u64()
-        .map(|code| format!(" ({code})"))
-        .unwrap_or_default();
-    let through = event["provider"]
-        .as_str()
+    let status = error.get("code").and_then(serde_json::Value::as_u64);
+    let code = status.map(|code| format!(" ({code})")).unwrap_or_default();
+    let through = event
+        .get("provider")
+        .and_then(serde_json::Value::as_str)
         .map(|upstream| format!(" through {upstream}"))
         .unwrap_or_default();
     crate::noted!("ask: {provider}{through} failed mid-stream: {said}{code}");
     // Classed by what was said, as a refusal with a status is: an upstream that timed out is
     // asked again, and one that says the prompt is too long wants a smaller prompt, not another try.
-    let class = match error["code"]
-        .as_u64()
-        .and_then(|code| u16::try_from(code).ok())
-    {
+    let class = match status.and_then(|code| u16::try_from(code).ok()) {
         Some(status) => match RetryClass::of(status, said) {
             RetryClass::Overflow => RetryClass::Overflow,
             class if class.is_retryable() => class,
