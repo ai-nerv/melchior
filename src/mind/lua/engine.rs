@@ -100,6 +100,7 @@ impl Engine {
             lua: Lua::full(),
             config: Rc::new(RefCell::new(Config::default())),
         };
+        engine.lua.set_memory_limit(Some(MEMORY));
         engine.install();
         // After install, so a removal cannot be undone by something the installer adds.
         crate::mind::lua::sandbox::apply(&mut engine.lua);
@@ -150,6 +151,10 @@ impl Engine {
                 .lua
                 .enter(|ctx| ctx.fetch(&executor).step(ctx, &mut fuel))
                 .map_err(|e| failed(e.to_string()))?;
+            if let Some(limit) = self.over_memory() {
+                self.lua.enter(|ctx| ctx.fetch(&executor).stop(&ctx));
+                return Err(failed(format!("stopped holding more than {limit} bytes")));
+            }
             if finished {
                 break;
             }
@@ -167,6 +172,16 @@ impl Engine {
         self.lua
             .try_enter(|ctx| ctx.fetch(&executor).take_result::<()>(ctx)?)
             .map_err(|e| failed(e.to_string()))
+    }
+
+    /// The ceiling, if the VM still holds more than it once two full collections have run.
+    fn over_memory(&mut self) -> Option<usize> {
+        let limit = self.lua.memory_limit()?;
+        if self.lua.total_memory() > limit {
+            self.lua.gc_collect();
+            self.lua.gc_collect();
+        }
+        (self.lua.total_memory() > limit).then_some(limit)
     }
 
     /// Install the `magi` global and its registrars. Settings are plain fields on the table,
@@ -295,6 +310,9 @@ pub const BUDGET: u64 = 200_000_000;
 /// How many instructions one step of the executor is given.
 const SLICE: i32 = 4096;
 
+/// The most memory one VM may hold between slices, in bytes.
+pub const MEMORY: usize = 1 << 30;
+
 /// The registrars a config may call; adding one here is the only way a config gains a new kind
 /// of declaration.
 const REGISTRARS: &[&str] = &["provider"];
@@ -404,5 +422,69 @@ mod budget_tests {
             .expect("an ordinary chunk runs");
         engine.harvest();
         assert_eq!(engine.config().number("n"), Some(5_000_050_000.0));
+    }
+}
+
+/// A chunk that holds too much is stopped and named, rather than taking the host down with it.
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+
+    #[test]
+    fn the_shipped_declarations_and_plugins_fit_far_under_the_ceiling() {
+        let mut engine = Engine::new();
+        for (name, source) in [
+            ("apis.lua", include_str!("../../../config/apis.lua")),
+            (
+                "providers.lua",
+                include_str!("../../../config/providers.lua"),
+            ),
+            (
+                "local-llama.lua",
+                include_str!("../../../examples/plugin/local-llama.lua"),
+            ),
+            (
+                "thinking-tags.lua",
+                include_str!("../../../examples/plugin/thinking-tags.lua"),
+            ),
+            ("client.lua", crate::CLIENT),
+        ] {
+            engine.run(source, name).expect(name);
+        }
+        engine.lua.gc_collect();
+        let held = engine.lua.total_memory();
+        eprintln!("shipped declarations and plugins hold {held} bytes");
+        assert_eq!(engine.lua.memory_limit(), Some(MEMORY));
+        assert!(held < MEMORY / 256, "{held} bytes");
+    }
+
+    #[test]
+    fn a_chunk_over_the_ceiling_is_stopped_and_the_vm_recovers() {
+        let mut engine = Engine::new();
+        engine.lua.set_memory_limit(Some(8 << 20));
+        let why = engine
+            .run(
+                "local t = {} for i = 1, 1e7 do t[i] = ('x'):rep(64) .. i end",
+                "plugin/hog.lua",
+            )
+            .expect_err("a hog finished");
+        let said = why.to_string();
+        assert!(said.contains("plugin/hog.lua"), "{said}");
+        assert!(said.contains(&(8 << 20).to_string()), "{said}");
+        engine
+            .run("melchior.after = 1", "after.lua")
+            .expect("the VM runs again once the hog is gone");
+    }
+
+    #[test]
+    fn garbage_is_collected_before_the_ceiling_is_judged() {
+        let mut engine = Engine::new();
+        engine.lua.set_memory_limit(Some(8 << 20));
+        engine
+            .run(
+                "collectgarbage('stop') for i = 1, 50000 do local s = ('x'):rep(1024) .. i end",
+                "churn.lua",
+            )
+            .expect("garbage alone is not held");
     }
 }

@@ -119,6 +119,14 @@ body "$ENGINE" 'pub fn run_within[(]' | grep -q 'spent >= budget' || {
   echo "gate-sandbox: nothing stops a chunk that has spent its budget" >&2
   fail=1
 }
+body "$ENGINE" 'pub fn new[(]' | grep -q 'set_memory_limit(Some(MEMORY))' || {
+  echo "gate-sandbox: the VM is built with no memory ceiling" >&2
+  fail=1
+}
+body "$ENGINE" 'pub fn run_within[(]' | grep -q 'over_memory()' || {
+  echo "gate-sandbox: nothing stops a chunk that holds more than the ceiling" >&2
+  fail=1
+}
 
 # ---- `stream`: the family's sockets, framed here ------------------------------------------------
 # A path is dialable by the family's own directory names and a socket's owner, never by the
