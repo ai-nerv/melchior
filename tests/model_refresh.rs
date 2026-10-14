@@ -1,5 +1,7 @@
 //! Explicit model discovery against an isolated provider and cache.
 
+#![allow(clippy::expect_used, clippy::indexing_slicing)]
+
 use melchior::scratch::Scratch;
 use serde_json::{Value, json};
 use std::io::{Read, Write};

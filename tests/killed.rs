@@ -1,5 +1,7 @@
 //! A parent killed outright takes its `melchior serve` with it, and leaves nothing behind.
 
+#![allow(clippy::expect_used, clippy::indexing_slicing)]
+
 mod fixture;
 
 use fixture::left_in;

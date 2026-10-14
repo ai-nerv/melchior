@@ -64,3 +64,5 @@ unused = { level = "deny", priority = -1 }
 dbg_macro = "deny"
 todo = "deny"
 unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"

@@ -18,6 +18,7 @@ pub struct Scratch {
 impl Scratch {
     /// A fresh directory, named after `prefix` and `name`.
     #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new(prefix: &str, name: &str) -> Self {
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("{prefix}-{}-{n}-{name}", std::process::id()));
@@ -101,6 +102,7 @@ pub struct Project {
 impl Project {
     /// A project nothing else is in, named after `prefix` and `name`.
     #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new(prefix: &str, name: &str) -> Self {
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let it = Self {

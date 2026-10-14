@@ -4,6 +4,8 @@
 //! real pipe and a real socket, because the two things it has to get right are only true at
 //! that level: what crosses the pipe, and that nothing outlives the parent.
 
+#![allow(clippy::expect_used, clippy::indexing_slicing)]
+
 mod fixture;
 
 use fixture::{Serving, ask, id_of, left_in, stderr, stdout, tool};

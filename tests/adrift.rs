@@ -6,6 +6,8 @@
 //! client that keeps its connection after a failed read hands the abandoned reply to whoever
 //! calls next. See FAMILY.md, "A caller that abandons a call abandons the connection".
 
+#![allow(clippy::expect_used, clippy::indexing_slicing)]
+
 use melchior::mind::lua::engine::Engine;
 use melchior::scratch::Project;
 use std::io::{Read, Write};

@@ -2,6 +2,8 @@
 //! case served to both of melchior's clients, [`melchior::asking::Held`] and the shipped Lua
 //! library, each answered or taken as `cases.json` says.
 
+#![allow(clippy::expect_used, clippy::indexing_slicing)]
+
 mod fixture;
 
 use fixture::Serving;

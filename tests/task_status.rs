@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::indexing_slicing)]
+
 use melchior::scratch::Scratch;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;

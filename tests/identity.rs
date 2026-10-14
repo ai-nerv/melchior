@@ -1,6 +1,8 @@
 //! Who a caller is, against the real binary: authority comes from the kernel or from a secret,
 //! and an environment or a name on the frame is only ever attribution.
 
+#![allow(clippy::expect_used, clippy::indexing_slicing)]
+
 mod fixture;
 
 use fixture::{Serving, ask, id_of, stderr, stdout, tool};

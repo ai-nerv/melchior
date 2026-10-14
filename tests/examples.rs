@@ -7,6 +7,8 @@
 //! These run each file the way a plugin directory would — in a plain VM, over the shipped
 //! catalog — and check that it declared what it says it declares.
 
+#![allow(clippy::expect_used, clippy::indexing_slicing)]
+
 use melchior::mind::catalog::Catalog;
 use melchior::scratch::Scratch;
 
