@@ -8,7 +8,11 @@ use crate::mind::provider::model::{Modality, Model};
 const NONE: &str = "none";
 
 /// `model` with what `/api/show` says of it, or as it was when that cannot be asked.
-pub(super) async fn detailed(model: Model, root: &str, client: &reqwest::Client) -> Model {
+pub(super) async fn detailed(
+    model: Model,
+    root: &str,
+    client: &crate::mind::provider::Http,
+) -> Model {
     let shown = async {
         client
             .post(format!("{root}/api/show"))

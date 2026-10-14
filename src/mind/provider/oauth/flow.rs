@@ -180,7 +180,7 @@ const ASSUMED_LIFETIME: u64 = 3600;
 
 /// Turn an authorization code, or a refresh token, into tokens: the same request, another grant.
 pub async fn exchange(
-    http: &reqwest::Client,
+    http: &crate::mind::provider::Http,
     token_url: &str,
     form: &[(&str, &str)],
 ) -> Result<super::Tokens, super::Error> {
@@ -188,7 +188,7 @@ pub async fn exchange(
 }
 
 async fn exchange_with_limits(
-    http: &reqwest::Client,
+    http: &crate::mind::provider::Http,
     token_url: &str,
     form: &[(&str, &str)],
     limits: super::super::control::Limits,
@@ -198,7 +198,14 @@ async fn exchange_with_limits(
     let response = tokio::time::timeout_at(deadline, http.post(token_url).form(form).send())
         .await
         .map_err(|_| super::Error::Refused(control::Error::Timeout.to_string()))?
-        .map_err(|_| super::Error::Refused("the token endpoint could not be reached".into()))?;
+        .map_err(|why| {
+            super::Error::Refused(match why {
+                crate::mind::provider::Unanswered::Refused { .. } => why.to_string(),
+                crate::mind::provider::Unanswered::Http(_) => {
+                    "the token endpoint could not be reached".into()
+                }
+            })
+        })?;
 
     let status = response.status();
     let body = control::read(response, limits, deadline)
