@@ -206,6 +206,9 @@
             # failure rather than a line somebody eventually notices. See the note in
             # `Cargo.toml` for why this and not `unused_crate_dependencies`.
             pkgs.cargo-machete
+            # Known advisories and the dependency policy in `deny.toml`, both run by `make verify`.
+            pkgs.cargo-audit
+            pkgs.cargo-deny
             pkgs.clang
             pkgs.mold
             pkgs.pkg-config

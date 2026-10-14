@@ -338,10 +338,41 @@ make.recipe{
   end,
 }
 
+-- `cargo <argv>`, through the dev shell when this shell has no such subcommand, as `machete` is.
+local function cargo_or_shell(argv, failed)
+  local direct = { "cargo", capture = true }
+  for _, word in ipairs(argv) do direct[#direct + 1] = word end
+  local ran = oslo.run(direct)
+  local said = (ran.out or "") .. (ran.err or "")
+  if ran.ok then
+    print(said)
+    return
+  end
+  if not said:find("no such command") then
+    print(said)
+    error(failed)
+  end
+  local shelled = { "nix", "develop", "--command", "cargo" }
+  for _, word in ipairs(argv) do shelled[#shelled + 1] = word end
+  assert(oslo.run(shelled).ok, failed)
+end
+
+-- Known advisories against the lockfile, from the advisory database already on this machine.
+make.recipe{ name = "audit", desc = "known advisories against the lockfile, offline",
+             run = function()
+               cargo_or_shell({ "audit", "--no-fetch" }, "cargo audit found an advisory")
+             end }
+
+-- Advisories, licenses, bans and sources, as `deny.toml` says.
+make.recipe{ name = "deny", desc = "the dependency policy in deny.toml, offline",
+             run = function()
+               cargo_or_shell({ "deny", "check", "--disable-fetch" }, "cargo deny failed")
+             end }
+
 make.recipe{
   name = "verify",
   desc = "the whole local gate",
-  deps = { "fmt-check", "check", "test", "check-all", "test-all", "clippy", "rustdoc", "gates", "gate-hermetic", "gate-family", "gate-role", "machete" },
+  deps = { "fmt-check", "check", "test", "check-all", "test-all", "clippy", "rustdoc", "gates", "gate-hermetic", "gate-family", "gate-role", "machete", "audit", "deny" },
 }
 make.alias("v", "verify")
 

@@ -51,6 +51,12 @@ jobs:
           # modularity claim rests on. See the note in `Cargo.toml`.
           nix develop --command cargo machete
 
+      # Known advisories against a freshly fetched database, and the policy in `deny.toml`.
+      - name: Supply chain
+        run: |
+          nix develop --command cargo audit
+          nix develop --command cargo deny check
+
       # The architectural gates, which until now ran only on whoever remembered. `README.md` says
       # they are not advisory and `PLAN.md` says they go into CI at the first commit; both were
       # untrue for as long as this file ran four cargo commands and nothing else.
