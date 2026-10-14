@@ -97,7 +97,7 @@ impl Client {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            http: reqwest::Client::builder()
+            http: crate::mind::provider::http()
                 // No overall timeout on purpose: a long turn is a long turn.
                 .connect_timeout(std::time::Duration::from_secs(15))
                 .build()

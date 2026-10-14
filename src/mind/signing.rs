@@ -59,7 +59,7 @@ pub async fn login(id: &str) -> Result<()> {
     }
 
     let tokens = oauth::exchange(
-        &reqwest::Client::new(),
+        &crate::mind::provider::http().build()?,
         token_url,
         &[
             ("grant_type", "authorization_code"),
