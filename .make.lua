@@ -389,7 +389,8 @@ make.recipe{
   run = function()
     local where = "target/x86_64-unknown-linux-musl/release/melchior"
     if not oslo.fs.exists(where) then where = "target/release/melchior" end
-    local ran = oslo.run{ "scripts/gate-family.sh", where  }
+    -- With how it serves, so the gate also probes a live socket.
+    local ran = oslo.run{ "scripts/gate-family.sh", where, "serve", "--project", "gate-family" }
     assert(ran.ok, "gate-family failed")
   end,
 }

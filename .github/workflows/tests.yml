@@ -97,6 +97,11 @@ jobs:
           nix develop --command cargo build --release --bin "$bin"
           nix develop --command ./scripts/gate-family.sh "target/release/$bin"
 
+      # The same gate against a live `melchior serve`: cap+1, zero length and a call from a newer
+      # family each come back as a refusal frame. The runner's `nc` speaks to the socket.
+      - name: The family contract, on a live socket
+        run: nix develop --command ./scripts/gate-family.sh target/release/melchior serve --project gate-family
+
       # Separate because it compiles nothing new but runs every test a second time, and because a
       # repo without one should skip it rather than fail.
       - name: The suite with no model reachable
