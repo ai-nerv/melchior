@@ -131,7 +131,8 @@ pub fn same(one: &str, other: &str) -> bool {
 fn from_seed(seed: usize) -> String {
     let first = seed % GREEK.len();
     let apart = 1 + (seed / GREEK.len()) % (GREEK.len() - 1);
-    format!("{}-{}", GREEK[first], GREEK[(first + apart) % GREEK.len()])
+    let word = |at: usize| GREEK.get(at % GREEK.len()).copied().unwrap_or_default();
+    format!("{}-{}", word(first), word(first + apart))
 }
 
 #[cfg(test)]
