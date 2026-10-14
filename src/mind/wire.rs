@@ -122,7 +122,8 @@ pub enum Said {
     ToolCallArgs {
         args: String,
     },
-    /// What the turn cost. Arrives at its own pace, and more than once.
+    /// What the whole ask has cost so far, failed attempts included; each replaces the last, and
+    /// one follows every [`Said::Retrying`].
     Spent {
         usage: Usage,
     },

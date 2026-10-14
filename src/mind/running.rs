@@ -155,32 +155,53 @@ async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
     // twice. A cell rather than a channel: this is one thread and the cost is a borrow check.
     let ended = std::cell::Cell::new(None);
     let say = std::cell::RefCell::new(say);
+    let tally = std::cell::Cell::new(Tally::default());
     let outcome = Client::new()
         .stream_reporting(
             &call,
             |delta| match carried(delta) {
                 Said::Stop { reason } => ended.set(Some(reason)),
+                Said::Spent { usage } => {
+                    let mut held = tally.get();
+                    let usage = held.heard(usage);
+                    tally.set(held);
+                    (say.borrow_mut())(Said::Spent { usage });
+                }
                 said => (say.borrow_mut())(said),
             },
             // Said during the wait, not after it. A broker showing a spinner has no other way to
             // tell somebody that forty seconds of nothing is a backoff rather than a hang.
             |retry| {
+                let mut held = tally.get();
+                let paid = held.retried();
+                tally.set(held);
                 (say.borrow_mut())(Said::Retrying {
                     attempt: retry.attempt,
                     of: retry.max_attempts,
                     seconds: retry.delay.as_secs_f64(),
                     why: retry.why.clone(),
                 });
+                // What the failed attempts cost is still owed, so it is said again after the
+                // retraction the retry is.
+                if paid != Usage::default() {
+                    (say.borrow_mut())(Said::Spent { usage: paid });
+                }
             },
         )
         .await;
 
     let mut say = say.into_inner();
     match outcome {
-        Err(why) => say(Said::Failed {
-            message: why.to_string(),
-            why: refused(why.class),
-        }),
+        Err(why) => {
+            let total = tally.get().total();
+            if total != Usage::default() {
+                say(Said::Spent { usage: total });
+            }
+            say(Said::Failed {
+                message: why.to_string(),
+                why: refused(why.class),
+            });
+        }
         // A stream that ended without the protocol saying why still ended. `EndTurn` is the
         // honest reading: the body finished and nothing complained.
         Ok(()) => say(Said::Stop {
@@ -188,6 +209,35 @@ async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
                 .into_inner()
                 .unwrap_or(crate::mind::model::StopReason::EndTurn),
         }),
+    }
+}
+
+/// What one ask has cost across its attempts: the ones that failed, and the one in progress as it
+/// last said. Every `Spent` the caller hears is the whole of it.
+#[derive(Debug, Clone, Copy, Default)]
+struct Tally {
+    paid: Usage,
+    this: Usage,
+}
+
+impl Tally {
+    /// The attempt in progress said it has cost `usage` so far; the whole ask's cost.
+    fn heard(&mut self, usage: Usage) -> Usage {
+        self.this = usage;
+        self.total()
+    }
+
+    /// The attempt in progress failed: its cost is paid for, and the next starts at nothing.
+    fn retried(&mut self) -> Usage {
+        self.paid.add(self.this);
+        self.this = Usage::default();
+        self.paid
+    }
+
+    fn total(self) -> Usage {
+        let mut total = self.paid;
+        total.add(self.this);
+        total
     }
 }
 
@@ -380,5 +430,41 @@ fn refused(class: crate::mind::provider::retry::RetryClass) -> Refusal {
         R::Invalid => Refusal::Invalid,
         R::Overflow => Refusal::Overflow,
         R::Unknown => Refusal::Unknown,
+    }
+}
+
+/// An attempt that failed was still paid for, so what it cost is never dropped.
+#[cfg(test)]
+mod tally_tests {
+    use super::*;
+
+    fn usage(input: u64, output: u64, cost_micros: u64) -> Usage {
+        Usage {
+            input,
+            output,
+            cost_micros,
+            ..Usage::default()
+        }
+    }
+
+    #[test]
+    fn every_spent_is_the_whole_ask_failed_attempts_included() {
+        let mut tally = Tally::default();
+        assert_eq!(tally.heard(usage(100, 0, 0)), usage(100, 0, 0));
+        assert_eq!(tally.heard(usage(100, 40, 900)), usage(100, 40, 900));
+        // Rejected after streaming: it cost what it said.
+        assert_eq!(tally.retried(), usage(100, 40, 900));
+        assert_eq!(tally.heard(usage(120, 0, 0)), usage(220, 40, 900));
+        assert_eq!(tally.heard(usage(120, 60, 1_100)), usage(220, 100, 2_000));
+        assert_eq!(tally.total(), usage(220, 100, 2_000));
+    }
+
+    #[test]
+    fn an_attempt_that_said_nothing_costs_nothing_more() {
+        let mut tally = Tally::default();
+        tally.heard(usage(10, 1, 5));
+        tally.retried();
+        assert_eq!(tally.retried(), usage(10, 1, 5));
+        assert_eq!(tally.total(), usage(10, 1, 5));
     }
 }
