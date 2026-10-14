@@ -356,11 +356,37 @@ end
 
 -- ---------------------------------------------------------------- who is where
 
---- The runtime directory sessions live under.
+--- This user's id, from the host when it says, else from `$UID`; `nil` when nothing says.
+local function uid()
+  for _, name in ipairs(FAMILY) do
+    local host = _G[name]
+    local said = type(host) == "table" and host.uid
+    if type(said) == "function" then said = said() end
+    if type(said) == "number" or type(said) == "string" then return tostring(said) end
+  end
+  local said = os.getenv("UID")
+  if said and said:match("^%d+$") then return said end
+  return nil
+end
+
+--- The runtime directory sessions live under, by the family's rule: `$XDG_RUNTIME_DIR/melchior`
+--- when that is an absolute path, else `<tmp>/melchior-<uid>`. `nil` when neither can be said.
 local function runtime()
   local dir = os.getenv("XDG_RUNTIME_DIR")
-  if dir and dir ~= "" then return dir .. "/melchior" end
-  return "/tmp/melchior-" .. (os.getenv("UID") or "0")
+  if dir and dir:sub(1, 1) == "/" then return dir .. "/melchior" end
+  local id = uid()
+  if not id then return nil end
+  local tmp = os.getenv("TMPDIR")
+  if not tmp or tmp:sub(1, 1) ~= "/" then tmp = "/tmp" end
+  return tmp:gsub("/+$", "") .. "/melchior-" .. id
+end
+
+--- One name as one path segment, the way the session that bound it flattened it: anything that is
+--- not a letter, a digit, `-` or `_` becomes `-`, so a name cannot climb out of its directory.
+local function safe(name)
+  local flat = tostring(name):gsub("[^%w_-]", "-")
+  if flat == "" then return "-" end
+  return flat
 end
 
 --- Who this process belongs to, if it belongs to a session at all.
@@ -377,28 +403,18 @@ function M.me()
   return { project = project, role = role, id = id, full = project .. "/" .. role .. "/" .. id }
 end
 
---- List a directory, however this host can.
----
---- Plain Lua cannot, so this asks the host two ways and gives up rather than guessing. A wrong
---- guess here is the worst kind: it reads as "nobody is running" and sends whoever asked away.
+--- List a directory through the host, or not at all: plain Lua cannot, and running a shell to
+--- do it is not this library's to do.
 local function entries(dir)
   for _, name in ipairs(FAMILY) do
     local host = _G[name]
-    if host and host.fs and host.fs.ls then
+    if type(host) == "table" and host.fs and host.fs.ls then
       local out = {}
       for _, entry in ipairs(host.fs.ls(dir) or {}) do out[#out + 1] = entry.name end
       return out
     end
   end
-  local ok, found = pcall(function()
-    local ls = io.popen("ls -1 '" .. dir .. "' 2>/dev/null")
-    if not ls then return nil end
-    local out = {}
-    for line in ls:lines() do out[#out + 1] = line end
-    ls:close()
-    return out
-  end)
-  return (ok and found) or {}
+  return {}
 end
 
 --- Every session listening in `project`, by id.
@@ -413,8 +429,10 @@ end
 function M.instances(project)
   project = project or (M.me() or {}).project
   if not project then return nil, "no project: pass one, or set MAGI_MELCHIOR_PROJECT" end
+  local base = runtime()
+  if not base then return nil, "no runtime directory: set XDG_RUNTIME_DIR, or UID" end
   local out = {}
-  for _, name in ipairs(entries(runtime() .. "/" .. project)) do
+  for _, name in ipairs(entries(base .. "/" .. safe(project))) do
     if not name:find("%.") and name ~= "" then out[#out + 1] = name end
   end
   table.sort(out)
@@ -426,7 +444,9 @@ end
 --- The id is the part that places it. A role in the path would be a second key for the same
 --- door, and a session that changed what it was for would move.
 local function socket_of(project, id)
-  return runtime() .. "/" .. project .. "/" .. id
+  local base = runtime()
+  if not base then return nil end
+  return base .. "/" .. safe(project) .. "/" .. safe(id)
 end
 
 --- Read a name the way a session would: `id`, `role/id`, or `project/role/id`.
@@ -474,6 +494,9 @@ function M.connect(where)
     end
     named = project .. "/" .. id
     path = socket_of(project, id)
+    if not path then
+      return nil, "no runtime directory to find " .. named .. " in: set XDG_RUNTIME_DIR, or UID"
+    end
   end
 
   local timeout = type(where) == "table" and where.timeout_ms or nil
@@ -523,7 +546,7 @@ end
 --- This file's own source, as the session it is talking to has it.
 ---
 --- `melchior lua-api` prints it, which is enough for a host that can shell out and useless to one
---- that cannot: a sandboxed VM with no `io.popen` has no way to run it. So a session hands the
+--- that cannot: a sandboxed VM that may not start a program has no way to run it. So a session hands the
 --- library out over the wire too, and a sibling that speaks the framing can fetch the right
 --- vocabulary using the wrong one, in code, with nothing written to disk.
 function M.client(where)

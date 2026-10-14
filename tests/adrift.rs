@@ -247,3 +247,28 @@ fn a_reply_in_a_newer_family_is_refused_by_name_and_the_line_stays_open() {
     drop(engine);
     ended.join().expect("the fixture ends");
 }
+
+#[test]
+fn a_name_is_flattened_into_its_socket_path_and_no_shell_is_run_to_list_one() {
+    assert!(
+        !melchior::CLIENT.contains("io.popen"),
+        "the client runs a shell"
+    );
+    let mut engine = Engine::new();
+    let chunk = format!(
+        "local asked = {{}}\n\
+         local fake = {{ connect = function(path) asked[#asked + 1] = path; return nil, 'no' end }}\n\
+         local client = load([=====[\n{source}]=====])(fake)\n\
+         client.connect('p.q/main/a.b')\n\
+         client.connect('../../etc')\n\
+         melchior.dialled = tostring(asked[1])\n\
+         melchior.count = #asked\n",
+        source = melchior::CLIENT,
+    );
+    engine.run(&chunk, "flat.lua").expect("the client loads");
+    engine.harvest();
+    let config = engine.config();
+    let dialled = config.string("dialled").unwrap_or_default().to_owned();
+    assert!(dialled.ends_with("/p-q/a-b"), "{dialled}");
+    assert!(!dialled.contains(".."), "{dialled}");
+}
