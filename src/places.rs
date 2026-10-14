@@ -32,11 +32,25 @@ pub fn trusted(dir: &Path, owner: u32) -> Option<PathBuf> {
     (meta.is_dir() && meta.uid() == owner && meta.mode() & 0o077 == 0).then(|| dir.to_path_buf())
 }
 
+/// The system temporary directory: `$TMPDIR` when it is absolute, else `/tmp`.
+#[must_use]
+pub fn tmp() -> PathBuf {
+    tmp_from(std::env::var_os("TMPDIR"))
+}
+
+/// The same, from what the environment said.
+#[must_use]
+pub fn tmp_from(said: Option<std::ffi::OsString>) -> PathBuf {
+    said.map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+}
+
 /// Where `program` keeps its sockets: `<runtime>/<program>`, or `<tmp>/<program>-<uid>`.
 #[must_use]
 pub fn base(program: &str) -> PathBuf {
     runtime().map_or_else(
-        || std::env::temp_dir().join(format!("{program}-{}", uid())),
+        || tmp().join(format!("{program}-{}", uid())),
         |runtime| runtime.join(program),
     )
 }
@@ -49,7 +63,7 @@ pub fn family_roots() -> Vec<PathBuf> {
         if let Some(runtime) = runtime() {
             out.push(runtime.join(program));
         }
-        out.push(std::env::temp_dir().join(format!("{program}-{}", uid())));
+        out.push(tmp().join(format!("{program}-{}", uid())));
     }
     out.into_iter()
         .filter_map(|root| std::fs::canonicalize(root).ok())
@@ -130,6 +144,16 @@ mod tests {
             None,
             "somebody else's was trusted"
         );
+    }
+
+    #[test]
+    fn the_fallback_is_under_an_absolute_tmpdir_only() {
+        let said = |value: &str| tmp_from(Some(std::ffi::OsString::from(value)));
+        assert_eq!(said("/scratch"), Path::new("/scratch"));
+        for value in ["scratch", "./scratch", ""] {
+            assert_eq!(said(value), Path::new("/tmp"), "{value:?}");
+        }
+        assert_eq!(tmp_from(None), Path::new("/tmp"));
     }
 
     #[test]
