@@ -143,7 +143,10 @@ fn requirement_or_nothing(provider: &Provider) -> String {
 
 /// Ask the desktop to open a URL, and shrug if it cannot: the URL is printed above regardless.
 fn open_browser(url: &str) {
-    if let Err(why) = std::process::Command::new("xdg-open")
+    let mut opening = std::process::Command::new("xdg-open");
+    // Not a member of the family, so it is started with none of the family's capability.
+    crate::inherited::scrub(&mut opening);
+    if let Err(why) = opening
         .arg(url)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
