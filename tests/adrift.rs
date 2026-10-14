@@ -227,6 +227,29 @@ fn a_reply_header_over_the_cap_is_refused_before_its_body_is_read() {
 }
 
 #[test]
+fn a_reply_that_will_not_decode_is_refused_and_takes_the_connection_with_it() {
+    let mut fixture = Fixture::new("garbled");
+    let (cue, ended) = session(&mut fixture, framed(r#"{"ok":tru"#), Vec::new());
+
+    let mut engine = dialled(&fixture.at);
+    call(&mut engine, "first");
+    let (first, why) = said(&mut engine, "first");
+    assert_eq!(first, "nil");
+    assert!(why.contains("bad reply"), "{why}");
+    assert!(why.contains("closed"), "{why}");
+
+    cue.give_up.send(()).expect("the fixture is listening");
+    cue.landed.recv().expect("released");
+    call(&mut engine, "second");
+    let (second, why) = said(&mut engine, "second");
+    assert_eq!(second, "nil");
+    assert_eq!(why, "this connection is closed");
+
+    drop(engine);
+    ended.join().expect("the fixture ends");
+}
+
+#[test]
 fn a_reply_in_a_newer_family_is_refused_by_name_and_the_line_stays_open() {
     let newer = framed(r#"{"ok":true,"family":2,"n":1,"result":["from the future"]}"#);
     let mut fixture = Fixture::new("family");

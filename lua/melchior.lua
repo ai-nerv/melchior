@@ -278,7 +278,9 @@ function Session:call(name, ...)
   local body, cut = exactly(self, length)
   if not body then return nil, cut end
 
-  local reply = decode(body)
+  local read, reply = pcall(decode, body)
+  if not read then return nil, adrift(self, tostring(reply)) end
+  if type(reply) ~= "table" then return nil, adrift(self, "a reply that is not an object") end
   if type(reply.family) == "number" and reply.family > FAMILY_REVISION then
     return nil, "the reply is written in family " .. reply.family .. ", newer than this library's "
       .. FAMILY_REVISION
