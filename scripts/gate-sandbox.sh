@@ -110,6 +110,20 @@ for gone in io package dofile loadfile require; do
   fi
 done
 
+# ---- bytecode never enters ---------------------------------------------------------------------
+body "$ENGINE" 'pub fn run_within[(]' | grep -q 'sandbox::precompiled(' || {
+  echo "gate-sandbox: a chunk is no longer checked for bytecode before it is loaded" >&2
+  fail=1
+}
+body "$SANDBOX" '^pub fn apply[(]' | grep -q 'guard_load(ctx)' || {
+  echo "gate-sandbox: \`load\` no longer refuses bytecode" >&2
+  fail=1
+}
+code "$SANDBOX" | grep -q '("string", "dump")' || {
+  echo "gate-sandbox: string.dump is no longer removed from the VM" >&2
+  fail=1
+}
+
 # ---- every chunk runs on a budget ---------------------------------------------------------------
 body "$ENGINE" 'pub fn run_within[(]' | grep -q 'Fuel::with(' || {
   echo "gate-sandbox: chunks are no longer run a slice of fuel at a time" >&2

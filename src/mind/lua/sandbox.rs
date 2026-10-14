@@ -2,11 +2,11 @@
 //! pieces back out, so the list below is what must not be reachable rather than a hand-assembled
 //! list of what may be.
 
-use luna::{Lua, Value};
+use luna::{Callback, CallbackReturn, Context, Function, Lua, Value};
 
 /// Globals a config must not have: `os.execute` spawns, `os.remove`, `os.rename` and
-/// `os.tmpname` write outside the `Ops` seam where path checking lives, and `os.exit` would let
-/// a config file end the daemon.
+/// `os.tmpname` write outside the `Ops` seam where path checking lives, `os.exit` would let
+/// a config file end the daemon, and `string.dump` makes the bytecode nothing here loads.
 const REMOVED: &[(&str, &str)] = &[
     ("os", "execute"),
     ("os", "exit"),
@@ -14,11 +14,24 @@ const REMOVED: &[(&str, &str)] = &[
     ("os", "rename"),
     ("os", "tmpname"),
     ("os", "setlocale"),
+    ("string", "dump"),
 ];
 
 /// Globals removed entirely: `io` opens files and `io.popen` spawns, and the loaders read
 /// arbitrary files.
 const REMOVED_TABLES: &[&str] = &["io", "package", "dofile", "loadfile", "require"];
+
+/// The first byte of a precompiled chunk: PUC-Rio's `\x1bLua` and luna's `\x1bLuna` alike.
+const PRECOMPILED: u8 = 0x1b;
+
+/// What a refused precompiled chunk is told.
+pub const REFUSED_PRECOMPILED: &str = "a precompiled chunk is refused; only source runs";
+
+/// Whether a chunk is bytecode rather than source.
+#[must_use]
+pub fn precompiled(chunk: &[u8]) -> bool {
+    chunk.first() == Some(&PRECOMPILED)
+}
 
 /// Take away what a config must not be able to do.
 pub fn apply(lua: &mut Lua) {
@@ -31,7 +44,32 @@ pub fn apply(lua: &mut Lua) {
         for name in REMOVED_TABLES {
             ctx.set_global(name, Value::Nil);
         }
+        guard_load(ctx);
     });
+}
+
+/// Replace `load` with one that refuses bytecode in every mode and hands source to the original.
+fn guard_load(ctx: Context<'_>) {
+    let Ok(load) = ctx.get_global::<Function>("load") else {
+        return;
+    };
+    let guarded = Callback::from_fn_with(&ctx, load, |load, ctx, _exec, stack| {
+        if let Value::String(chunk) = stack.get(0) {
+            if precompiled(chunk.as_bytes()) {
+                return Err(refusal(ctx, &format!("load: {REFUSED_PRECOMPILED}")));
+            }
+        }
+        Ok(CallbackReturn::Call {
+            function: *load,
+            then: None,
+        })
+    });
+    ctx.set_global("load", guarded);
+}
+
+/// An error raised into Lua as a string.
+fn refusal<'gc>(ctx: Context<'gc>, message: &str) -> luna::Error<'gc> {
+    luna::Error::from_value(Value::String(ctx.intern(message.as_bytes())))
 }
 
 #[cfg(test)]

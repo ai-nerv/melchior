@@ -133,6 +133,12 @@ impl Engine {
             file: chunk.to_owned(),
             message,
         };
+        if crate::mind::lua::sandbox::precompiled(source.as_bytes()) {
+            return Err(LuaError::Syntax {
+                file: chunk.to_owned(),
+                message: crate::mind::lua::sandbox::REFUSED_PRECOMPILED.to_owned(),
+            });
+        }
         let executor = self
             .lua
             .try_enter(|ctx| {
@@ -486,5 +492,71 @@ mod memory_tests {
                 "churn.lua",
             )
             .expect("garbage alone is not held");
+    }
+}
+
+/// Bytecode is refused wherever a chunk enters the VM, whatever mode it asks for.
+#[cfg(test)]
+mod precompiled_tests {
+    use super::*;
+
+    /// A real luna chunk that sets `melchior.dumped`, as bytes.
+    fn dumped(engine: &mut Engine) -> Vec<u8> {
+        engine.lua.enter(|ctx| {
+            let closure =
+                Closure::load(ctx, Some("dumped"), b"melchior.dumped = true").expect("compiles");
+            luna::dump::dump(&closure.prototype(), true)
+        })
+    }
+
+    #[test]
+    fn a_precompiled_file_is_refused_before_it_is_loaded() {
+        let mut engine = Engine::new();
+        let bytes = dumped(&mut engine);
+        let luna = std::str::from_utf8(&bytes).expect("this chunk dumps as UTF-8");
+        for source in [luna, "\x1bLuaT\0\x19\u{93}\r\n\x1a\n"] {
+            let why = engine
+                .run(source, "plugin/dumped.lua")
+                .expect_err("bytecode ran");
+            let said = why.to_string();
+            assert!(said.contains("plugin/dumped.lua"), "{said}");
+            assert!(said.contains("precompiled"), "{said}");
+        }
+        engine.harvest();
+        assert_eq!(engine.config().boolean("dumped"), None);
+    }
+
+    #[test]
+    fn load_refuses_bytecode_in_every_mode_and_still_takes_source() {
+        let mut engine = Engine::new();
+        let bytes = dumped(&mut engine);
+        engine.lua.enter(|ctx| {
+            ctx.set_global("chunk", luna::String::from_slice(&ctx, &bytes));
+        });
+        engine
+            .run(
+                "local said = {}\n\
+                 for _, mode in ipairs({ 'b', 'bt', 't' }) do\n\
+                   local ok, why = pcall(load, chunk, 'dumped', mode)\n\
+                   said[#said + 1] = tostring(ok) .. ':' .. tostring(why)\n\
+                 end\n\
+                 melchior.said = table.concat(said, '|')\n\
+                 melchior.source = load('return 7')()",
+                "loading.lua",
+            )
+            .expect("runs");
+        engine.harvest();
+        let said = engine
+            .config()
+            .string("said")
+            .unwrap_or_default()
+            .to_owned();
+        assert_eq!(
+            said.matches("false:load: a precompiled chunk").count(),
+            3,
+            "{said}"
+        );
+        assert_eq!(engine.config().boolean("dumped"), None);
+        assert_eq!(engine.config().number("source"), Some(7.0));
     }
 }
