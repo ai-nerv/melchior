@@ -40,6 +40,16 @@ pub fn needs() -> Vec<Need> {
             default: Some(serde_json::json!(true)),
         },
         Need {
+            name: crate::mind::spending::SETTING.to_owned(),
+            kind: Kind::Number,
+            about: "how many US dollars one run may spend on models — the root session and every \
+                    session started under it — before an ask is refused unsent; 0 or false for no \
+                    cap. Priced as the provider reports, else at the model's own rates"
+                .to_owned(),
+            required: false,
+            default: Some(serde_json::json!(crate::mind::spending::DEFAULT_USD)),
+        },
+        Need {
             name: "provider".to_owned(),
             kind: Kind::Table,
             about: "a provider declaration, as `melchior.provider(id, { … })`".to_owned(),
@@ -75,7 +85,14 @@ pub fn needs() -> Vec<Need> {
 ///
 /// Narrower than [`needs`]: a registrar reaches the VM by being called, and `agent_talk` reaches
 /// [`crate::policy`] in the environment a session is spawned with, not by assignment here.
-const SETTINGS: &[&str] = &["model", "thinking", "max_tokens", "discover", "role"];
+const SETTINGS: &[&str] = &[
+    "model",
+    "thinking",
+    "max_tokens",
+    "discover",
+    "role",
+    crate::mind::spending::SETTING,
+];
 
 /// What a person or a coordinator assigned to one setting, without building the model catalog:
 /// binding a socket must not depend on the model layer loading cleanly, so nothing shipped is
@@ -174,6 +191,12 @@ pub fn given() -> Option<std::path::PathBuf> {
 pub fn given_from(said: Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
     let dir = std::path::PathBuf::from(said.filter(|dir| !dir.is_empty())?);
     dir.is_absolute().then(|| dir.join("melchior.lua"))
+}
+
+/// The directory `$NERV_GIVEN` names, when it names one.
+#[must_use]
+pub fn given_dir() -> Option<std::path::PathBuf> {
+    given().and_then(|file| file.parent().map(std::path::Path::to_path_buf))
 }
 
 /// What a coordinator said, read from a regular file and never through a link.

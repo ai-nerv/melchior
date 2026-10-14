@@ -13,4 +13,5 @@ pub mod running;
 pub mod setup;
 pub mod signing;
 pub mod speaking;
+pub mod spending;
 pub mod wire;

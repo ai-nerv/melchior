@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.6.1] - 2026-10-14
+
+### <!-- 0 -->⛰️  Features
+
+- Cap what one run may spend
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Send plain http to this machine only
+
+### <!-- 3 -->📚 Documentation
+
+- The spending cap
+- The model role's spend cap
+
+### <!-- 6 -->🧪 Testing
+
+- The cap against the real binary
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Spend cap
+- Https except loopback
+
 ## [0.6.0] - 2026-10-14
 
 ### <!-- 0 -->⛰️  Features
