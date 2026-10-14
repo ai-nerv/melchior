@@ -57,10 +57,10 @@ fn guard_setmetatable(ctx: Context<'_>) {
         return;
     };
     let guarded = Callback::from_fn_with(&ctx, original, |original, ctx, _exec, stack| {
-        if let Value::Table(metatable) = stack.get(1) {
-            if !metatable.get_value(ctx, "__gc").is_nil() {
-                return Err(refusal(ctx, REFUSED_GC));
-            }
+        if let Value::Table(metatable) = stack.get(1)
+            && !metatable.get_value(ctx, "__gc").is_nil()
+        {
+            return Err(refusal(ctx, REFUSED_GC));
         }
         Ok(CallbackReturn::Call {
             function: *original,
@@ -79,10 +79,10 @@ fn guard_load(ctx: Context<'_>) {
         return;
     };
     let guarded = Callback::from_fn_with(&ctx, load, |load, ctx, _exec, stack| {
-        if let Value::String(chunk) = stack.get(0) {
-            if precompiled(chunk.as_bytes()) {
-                return Err(refusal(ctx, &format!("load: {REFUSED_PRECOMPILED}")));
-            }
+        if let Value::String(chunk) = stack.get(0)
+            && precompiled(chunk.as_bytes())
+        {
+            return Err(refusal(ctx, &format!("load: {REFUSED_PRECOMPILED}")));
         }
         Ok(CallbackReturn::Call {
             function: *load,
