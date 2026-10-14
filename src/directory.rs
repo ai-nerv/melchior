@@ -10,10 +10,13 @@
 //!     iota-mu.role         <- "reviewer", and a line saying what that means
 //!     iota-mu.sent         <- what it has sent lately, so a loop runs out of window
 //!     iota-mu.adopting     <- 0600: who it asked to take it on, and the nonce
+//!     iota-mu.given        <- the directory its coordinator keeps its settings in
 //!     .claims/             <- one file per piece of work somebody has taken
 //!       the-parser
 //!   other-project/
 //!     beta-nu
+//!   .spent/                <- one ledger per run, 0600: what its asks have cost
+//!     alpha-rho-1789480440
 //! ```
 //!
 //! Every name beside a socket carries a dot, and the claims directory begins with one, because
@@ -323,7 +326,7 @@ pub fn root() -> PathBuf {
 
 /// Flatten one name into one path segment, so a project called `../../etc` cannot name a
 /// directory outside the one this chose.
-fn safe(name: &str) -> String {
+pub(crate) fn safe(name: &str) -> String {
     let flattened: String = name
         .chars()
         .map(|c| {

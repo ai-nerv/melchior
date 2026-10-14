@@ -390,11 +390,18 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
             lease.release();
             std::process::exit(1);
         }
+        // Read back from the note `announce` just wrote, so the directory holds one answer.
+        let run = melchior::directory::sessions::session_of(&me).unwrap_or_else(|| me.id.clone());
+        // The asks this session's coordinator starts carry its directory and no name.
+        if let Some(given) = melchior::mind::setup::given_dir()
+            && let Err(why) = melchior::directory::sessions::gave(&me, &given)
+        {
+            eprintln!("melchior serve: {why}");
+        }
         say(&Heard::Listening {
             at: at.display().to_string(),
             named: me.full(),
-            // Read back from the note `announce` just wrote, so the directory holds one answer.
-            run: melchior::directory::sessions::session_of(&me).unwrap_or_else(|| me.id.clone()),
+            run: run.clone(),
         });
         melchior::noted!("serve: {} listening at {}", me.full(), at.display());
         tokio::spawn(async move {
@@ -579,6 +586,11 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         }
         melchior::noted!("serve: {} ends", me.full());
         melchior::directory::forget(&me);
+        // A run this session began ends with it, and so does what the run spent.
+        if melchior::directory::sessions::inherited().is_none() {
+            let kept = melchior::mind::spending::Ledger::kept();
+            melchior::mind::spending::Ledger::at(&kept, &run).close();
+        }
         lease.release();
         // And the directory itself, which refuses while anybody else is still in the project.
         melchior::directory::leave(&me.project);

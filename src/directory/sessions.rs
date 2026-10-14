@@ -67,14 +67,49 @@ fn since_epoch() -> u64 {
         .map_or(0, |since| since.as_secs())
 }
 
-/// Take the note back down.
+/// Take the notes back down.
 pub fn ended(me: &Identity) {
     let _ = std::fs::remove_file(session_at(me));
+    let _ = std::fs::remove_file(given_at(me));
 }
 
 /// The same, for a corpse being swept by somebody else.
 pub fn forget_in(project: &str, id: &str) {
-    let _ = std::fs::remove_file(home(project).join(format!("{}.session", safe(id))));
+    for note in ["session", "given"] {
+        let _ = std::fs::remove_file(home(project).join(format!("{}.{note}", safe(id))));
+    }
+}
+
+/// Where the note naming the directory `me`'s coordinator keeps its settings in is put.
+#[must_use]
+pub fn given_at(me: &Identity) -> PathBuf {
+    home(&me.project).join(format!("{}.given", safe(&me.id)))
+}
+
+/// Leave the note naming the directory `me`'s coordinator keeps its settings in: a process that
+/// coordinator starts carries that directory and no name, and finds its run by it.
+pub fn gave(me: &Identity, given: &std::path::Path) -> Result<(), String> {
+    super::wrote(&given_at(me), &given.display().to_string())
+}
+
+/// The run of the session whose coordinator keeps its settings in `given`, read off the note that
+/// session left; `None` when no session named it.
+#[must_use]
+pub fn run_given(given: &std::path::Path) -> Option<String> {
+    let said = given.display().to_string();
+    std::fs::read_dir(super::root())
+        .ok()?
+        .flatten()
+        .find_map(|project| {
+            let home = project.path();
+            std::fs::read_dir(&home).ok()?.flatten().find_map(|note| {
+                let name = note.file_name().into_string().ok()?;
+                let id = name.strip_suffix(".given")?;
+                (read(&note.path())? == said).then(|| {
+                    read(&home.join(format!("{id}.session"))).unwrap_or_else(|| id.to_owned())
+                })
+            })
+        })
 }
 
 /// Everyone in `me`'s run, `me` included, and not filtered by what `me` may reach.
@@ -333,6 +368,23 @@ mod tests {
             Some("alpha-rho"),
             "adoption rewrote the run, and everything filed under the old one is now orphaned"
         );
+    }
+
+    #[test]
+    fn a_root_s_run_is_found_by_the_directory_its_coordinator_gave_it() {
+        let project = alone("given");
+        let root = id(&project, "alpha-rho");
+        std::fs::write(session_at(&root), "alpha-rho-1789480440").expect("the note");
+        let given = crate::scratch::Scratch::new("melchior-session", "given");
+        let elsewhere = crate::scratch::Scratch::new("melchior-session", "elsewhere");
+        assert_eq!(run_given(&given), None, "nobody has named it yet");
+
+        gave(&root, &given).expect("the note");
+        assert_eq!(run_given(&given).as_deref(), Some("alpha-rho-1789480440"));
+        assert_eq!(run_given(&elsewhere), None, "another coordinator's asks");
+
+        ended(&root);
+        assert_eq!(run_given(&given), None, "the note outlived its session");
     }
 
     #[test]

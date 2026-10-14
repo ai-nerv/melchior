@@ -174,6 +174,19 @@ Failed requests keep the last cached listing. The reply includes `refreshed: tru
 `failed` list of provider IDs; model cards remain in the ordinary `result` array. Without
 `--refresh`, normal cache freshness applies. This lists models; it does not run inference.
 
+## Spending cap
+
+A run — a root session and every session started under it — may spend `spend_cap_usd` US dollars
+on models, 10 unless something sets it. `0` or `false` means no cap. Set it in a file of
+melchior's own, `melchior.spend_cap_usd = 25`, or have a coordinator send it with `configure`.
+
+Each ask adds what it cost to its run's ledger under `.spent/` in the runtime directory: what the
+provider reports, else the model's own rates, and nothing for a model with neither. Attempts that
+failed and were tried again are counted too. Once a run has reached its cap, the next ask is
+refused with nothing sent, as `failed` with `why: "invalid"`, and the message gives the total, the
+cap and how to raise it. The request that crosses the cap still finishes. The ledger goes when the
+root session that began the run ends.
+
 ## Commands
 
 The build is `.make.lua`, read by [oslo](https://github.com/termworks/oslo). At an oslo prompt in
