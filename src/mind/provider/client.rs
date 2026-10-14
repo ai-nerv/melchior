@@ -1,6 +1,7 @@
 //! Streaming a turn from a provider: the only part of this crate that does I/O. What it knows of
 //! a protocol comes from an [`Adapter`], and what it knows of a vendor from the catalog.
 
+use crate::mind::provider::Unanswered;
 use crate::mind::provider::api::{Adapter, Delta, Options};
 use crate::mind::provider::control;
 use crate::mind::provider::endpoint::{Auth, Provider};
@@ -76,7 +77,7 @@ impl ProviderError {
 
 /// Streams turns from providers.
 pub struct Client {
-    http: reqwest::Client,
+    http: crate::mind::provider::Http,
     /// The first backoff delay; each later one grows from it.
     base_delay: std::time::Duration,
     control: control::Limits,
@@ -218,7 +219,13 @@ impl Client {
         // holds the turn open for as long as it stays quiet.
         let sent = tokio::time::timeout(QUIET, request.json(&body).send()).await;
         let response = match sent {
-            Ok(Err(e)) if e.is_builder() => {
+            Ok(Err(refused @ Unanswered::Refused { .. })) => {
+                return Err(ProviderError::new(
+                    RetryClass::Invalid,
+                    format!("{}: {refused}", provider.id),
+                ));
+            }
+            Ok(Err(Unanswered::Http(e))) if e.is_builder() => {
                 return Err(ProviderError::new(
                     RetryClass::Invalid,
                     format!(
@@ -228,9 +235,10 @@ impl Client {
                     ),
                 ));
             }
-            Ok(sent) => {
-                sent.map_err(|e| unreached(&format!("could not reach {}", provider.id), e))?
+            Ok(Err(Unanswered::Http(e))) => {
+                return Err(unreached(&format!("could not reach {}", provider.id), e));
             }
+            Ok(Ok(response)) => response,
             Err(_) => return Err(hung(&provider.id)),
         };
 
@@ -567,7 +575,7 @@ fn unleaked(said: &str, provider: &str) -> Result<(), ProviderError> {
 /// The credential to send, renewed if it was about to expire. The exchange is not retried: if the
 /// provider will not renew, signing in again is the only thing that helps.
 async fn credential(
-    http: &reqwest::Client,
+    http: &crate::mind::provider::Http,
     provider: &Provider,
 ) -> Result<Option<String>, crate::mind::provider::oauth::Error> {
     let Auth::OAuth {

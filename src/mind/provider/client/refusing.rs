@@ -142,6 +142,19 @@ async fn a_header_that_cannot_be_built_is_refused_once_and_never_sent() {
     assert_eq!(server.requests.load(Ordering::SeqCst), 0);
 }
 
+#[tokio::test]
+async fn a_provider_off_this_machine_over_plain_http_is_never_asked() {
+    let (outcome, waits) = asked(&lua(), "http://models.invalid/v1").await;
+    let why = outcome.expect_err("refused");
+    assert_eq!(why.class, RetryClass::Invalid, "{}", why.message);
+    assert!(
+        why.message.contains("http://models.invalid "),
+        "{}",
+        why.message
+    );
+    assert!(waits.is_empty(), "asked again {} times", waits.len());
+}
+
 #[test]
 fn a_wait_asked_for_is_read_in_milliseconds_or_seconds_and_capped() {
     let mut headers = reqwest::header::HeaderMap::new();

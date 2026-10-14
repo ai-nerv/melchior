@@ -1,6 +1,6 @@
 use super::*;
 use crate::mind::provider::{
-    control,
+    Http, control,
     testing::{Server, Step, chunk, headers, reply},
 };
 use std::time::Duration;
@@ -37,7 +37,7 @@ async fn oauth_control_reads_bound_headers_bodies_and_total_drip_time() {
         let why = tokio::time::timeout(
             Duration::from_secs(3),
             exchange_with_limits(
-                &reqwest::Client::new(),
+                &Http::default(),
                 &server.url,
                 &[("refresh_token", "SECRET-refresh")],
                 limits(),
@@ -66,7 +66,7 @@ async fn oauth_oversized_invalid_and_error_responses_never_echo_secrets() {
     ] {
         let server = Server::start(vec![reply(status, body)]).await;
         let why = exchange_with_limits(
-            &reqwest::Client::new(),
+            &Http::default(),
             &format!("{}?key=SECRET-url", server.url),
             &[],
             control::LIMITS,
@@ -85,7 +85,7 @@ async fn oauth_valid_unicode_tokens_survive_byte_chunks_and_expiry_cannot_wrap()
     steps.extend(body.as_bytes().chunks(1).map(chunk));
     steps.push(Step::Bytes(b"0\r\n\r\n".to_vec()));
     let server = Server::start(vec![steps]).await;
-    let tokens = exchange(&reqwest::Client::new(), &server.url, &[])
+    let tokens = exchange(&Http::default(), &server.url, &[])
         .await
         .expect("tokens");
     assert_eq!(tokens.access, "clé-🦀");
@@ -96,7 +96,7 @@ async fn oauth_valid_unicode_tokens_survive_byte_chunks_and_expiry_cannot_wrap()
 #[tokio::test]
 async fn cancelling_an_oauth_exchange_closes_its_connection() {
     let server = Server::start(vec![vec![headers(200), Step::Hold]]).await;
-    let client = reqwest::Client::new();
+    let client = Http::default();
     {
         let exchange = exchange(&client, &server.url, &[]);
         tokio::pin!(exchange);
@@ -106,4 +106,17 @@ async fn cancelling_an_oauth_exchange_closes_its_connection() {
         }
     }
     server.wait_for(&server.closed, 1).await;
+}
+
+#[tokio::test]
+async fn a_token_endpoint_off_this_machine_over_plain_http_is_refused() {
+    let why = exchange(
+        &Http::default(),
+        "http://auth.invalid/token",
+        &[("refresh_token", "SECRET-refresh")],
+    )
+    .await
+    .expect_err("refused");
+    assert!(why.to_string().contains("http://auth.invalid "), "{why}");
+    assert!(!why.to_string().contains("SECRET"), "{why}");
 }
