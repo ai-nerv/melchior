@@ -51,6 +51,29 @@ pub fn line(at: std::time::SystemTime, pid: u32, args: std::fmt::Arguments<'_>) 
     format!("{} {PROGRAM}[{pid}] {said}", stamp(at))
 }
 
+/// The fields a line never carries the value of, wherever in a value they sit.
+const SECRET: &[&str] = &["token", "nonce", "secret"];
+
+/// `value` with every secret field's contents taken out, for a line that would print it.
+#[must_use]
+pub fn redacted(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(fields) => fields
+            .iter()
+            .map(|(key, held)| {
+                let shown = if SECRET.contains(&key.to_ascii_lowercase().as_str()) {
+                    serde_json::Value::from("<redacted>")
+                } else {
+                    redacted(held)
+                };
+                (key.clone(), shown)
+            })
+            .collect(),
+        serde_json::Value::Array(rows) => rows.iter().map(redacted).collect(),
+        other => other.clone(),
+    }
+}
+
 /// A value cut to fit a line: one line, and no longer than `SHORT` characters.
 #[must_use]
 pub fn short(text: &str) -> String {
@@ -62,10 +85,13 @@ pub fn short(text: &str) -> String {
 }
 
 /// Written whole in one call, so lines from several processes appending at once do not interleave.
+/// A log this makes is this user's alone.
 fn append(path: &std::path::Path, said: &str) {
+    use std::os::unix::fs::OpenOptionsExt;
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
+        .mode(0o600)
         .open(path)
     {
         let _ = file.write_all(format!("{said}\n").as_bytes());
@@ -164,6 +190,28 @@ mod tests {
         assert!(cut.ends_with('…'), "{cut}");
         assert_eq!(cut.chars().count(), 121);
         assert_eq!(short("a\n  b"), "a b");
+    }
+
+    #[test]
+    fn a_log_is_made_for_this_user_alone_and_carries_no_secret() {
+        use std::os::unix::fs::MetadataExt;
+        let at = Scratch::file("melchior-noted", "secret", "log.txt");
+        let minted = serde_json::json!({
+            "id": "iota-mu",
+            "token": "0123456789abcdef",
+            "environment": {"MAGI_MELCHIOR_ID": "iota-mu"},
+            "rows": [{"nonce": "fedcba"}],
+        });
+        note_to(
+            &at,
+            format_args!("fork: minted {}", super::redacted(&minted)),
+        );
+        let held = std::fs::read_to_string(&at).expect("the log");
+        assert!(!held.contains("0123456789abcdef"), "{held}");
+        assert!(!held.contains("fedcba"), "{held}");
+        assert!(held.contains("iota-mu"), "{held}");
+        let mode = std::fs::metadata(&at).expect("the log").mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
     }
 
     #[test]

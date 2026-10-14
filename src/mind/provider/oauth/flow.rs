@@ -140,27 +140,23 @@ fn decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or_default();
-                match u8::from_str_radix(hex, 16) {
-                    Ok(byte) => {
-                        out.push(byte);
-                        i += 3;
-                    }
-                    Err(_) => {
-                        out.push(bytes[i]);
-                        i += 1;
-                    }
-                }
+    while let Some(&byte) = bytes.get(i) {
+        let escaped = (byte == b'%')
+            .then(|| bytes.get(i + 1..i + 3))
+            .flatten()
+            .and_then(|hex| std::str::from_utf8(hex).ok())
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match (escaped, byte) {
+            (Some(decoded), _) => {
+                out.push(decoded);
+                i += 3;
             }
-            b'+' => {
+            (None, b'+') => {
                 out.push(b' ');
                 i += 1;
             }
-            byte => {
-                out.push(byte);
+            (None, other) => {
+                out.push(other);
                 i += 1;
             }
         }

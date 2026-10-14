@@ -92,7 +92,7 @@ pub fn take(project: &str, by: &str, about: &str) -> Result<Claim, String> {
         about: about.trim().to_owned(),
     };
     let path = at(project, about);
-    if let Err(why) = std::fs::create_dir_all(held_in(project)) {
+    if let Err(why) = crate::places::ensure(&held_in(project)) {
         return Err(format!("claims cannot be recorded here: {why}"));
     }
     // Two passes: the second is for the file that was there and whose holder had gone.

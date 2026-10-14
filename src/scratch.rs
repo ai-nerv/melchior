@@ -18,12 +18,13 @@ pub struct Scratch {
 impl Scratch {
     /// A fresh directory, named after `prefix` and `name`.
     #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new(prefix: &str, name: &str) -> Self {
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("{prefix}-{}-{n}-{name}", std::process::id()));
         // A pid is reused, and a run that was killed rather than unwound left its directory.
         let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).expect("a scratch directory");
+        crate::places::ensure(&path).expect("a scratch directory");
         Self { path }
     }
 
@@ -101,13 +102,14 @@ pub struct Project {
 impl Project {
     /// A project nothing else is in, named after `prefix` and `name`.
     #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new(prefix: &str, name: &str) -> Self {
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let it = Self {
             name: format!("{prefix}-{}-{n}-{name}", std::process::id()),
         };
         let _ = std::fs::remove_dir_all(it.home());
-        std::fs::create_dir_all(it.home()).expect("a project directory");
+        crate::places::ensure(&it.home()).expect("a project directory");
         it
     }
 

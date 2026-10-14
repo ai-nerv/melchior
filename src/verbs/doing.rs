@@ -124,17 +124,21 @@ pub fn decide(
         0
     };
     // By verb rather than by reach, so a second verb rated `Stop` one day cannot pick a secret up.
-    let token = if verb == "stop" {
-        // Refused here rather than at the far end, whose answer would be "that is not the secret".
-        let Some(secret) = standing.minted.get(&whole.id).cloned() else {
-            return Err(Answer::refused(format!(
-                "this session did not start `{}`, so it holds nothing that could stop it",
-                whole.full()
-            )));
-        };
-        Some(secret)
-    } else {
-        None
+    // `assign` quotes it too: the child takes a role only from a parent that can prove it is one.
+    let token = match verb {
+        "stop" => {
+            // Refused here rather than at the far end, whose answer would be "that is not the
+            // secret".
+            let Some(secret) = standing.minted.get(&whole.id).cloned() else {
+                return Err(Answer::refused(format!(
+                    "this session did not start `{}`, so it holds nothing that could stop it",
+                    whole.full()
+                )));
+            };
+            Some(secret)
+        }
+        "assign" => standing.minted.get(&whole.id).cloned(),
+        _ => None,
     };
     Ok(Wanted {
         verb: verb.to_owned(),
@@ -192,7 +196,7 @@ pub(super) fn carried(wanted: &Wanted, standing: &Standing) -> Answer {
             ));
         }
     };
-    let reply = match said(&mut held, wanted) {
+    let reply = match said(&mut held, wanted, &me) {
         Ok(reply) => reply,
         Err(why) => {
             return Answer::refused(format!("`{}` did not answer: {why}", wanted.who.full()));
@@ -210,8 +214,12 @@ pub(super) fn carried(wanted: &Wanted, standing: &Standing) -> Answer {
     Answer::said(landed(wanted, &reply))
 }
 
-/// One verb, over an open connection.
-fn said(held: &mut asking::Held, wanted: &Wanted) -> std::io::Result<Reply> {
+/// One verb, over an open connection, as `me`.
+fn said(
+    held: &mut asking::Held,
+    wanted: &Wanted,
+    me: &crate::identity::Identity,
+) -> std::io::Result<Reply> {
     match wanted.verb.as_str() {
         "about" => held.call("identity", Vec::new()),
         "status" => held.call("status", Vec::new()),
@@ -222,20 +230,28 @@ fn said(held: &mut asking::Held, wanted: &Wanted) -> std::io::Result<Reply> {
             wanted.token.as_deref().unwrap_or_default(),
         ),
         // Both are the same call; what differs is who may make it, settled above and far end.
-        "role" | "assign" => held.call(
-            "role",
-            vec![
+        "role" | "assign" => {
+            let args = vec![
                 serde_json::json!(wanted.role.clone().unwrap_or_default()),
                 serde_json::json!(wanted.message),
-            ],
-        ),
-        // The reason travels with it: it is all the far end has to decide on.
-        "adopt" => held.call(
-            "adopt",
-            vec![serde_json::json!(
-                wanted.message.clone().unwrap_or_default()
-            )],
-        ),
+            ];
+            match &wanted.token {
+                Some(token) => held.call_with("role", args, token),
+                None => held.call("role", args),
+            }
+        }
+        // The reason travels with it, and the nonce the answer must quote back to this session.
+        "adopt" => {
+            let nonce = crate::directory::pending::asked(me, &wanted.who.id)
+                .map_err(std::io::Error::other)?;
+            held.call(
+                "adopt",
+                vec![
+                    serde_json::json!(wanted.message.clone().unwrap_or_default()),
+                    serde_json::json!(nonce),
+                ],
+            )
+        }
         // Everything else is a message, and the sort is what makes them different verbs.
         _ => held.call(
             "tell",

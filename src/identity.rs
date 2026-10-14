@@ -104,15 +104,27 @@ pub fn free_of(project: &str, taken: &[String]) -> Identity {
 }
 
 /// A secret to hand a session being started, which a `stop` has to quote back: sixteen bytes of
-/// `/dev/urandom` as hex, never written to disk or into a transcript.
-#[must_use]
-pub fn secret() -> String {
-    use std::io::Read;
+/// the kernel's randomness as hex. It leaves this process in a `mint` reply's `token` field and
+/// reaches the child's `serve` on its stdin; it is never put in an environment, an argument list
+/// or a log.
+///
+/// # Errors
+/// When the kernel has no randomness to give.
+pub fn secret() -> std::io::Result<String> {
     let mut bytes = [0_u8; 16];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut source| source.read_exact(&mut bytes))
-        .expect("the kernel's randomness");
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    getrandom::fill(&mut bytes).map_err(|why| std::io::Error::other(why.to_string()))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Whether two secrets are the same, compared in time that depends on their length only.
+#[must_use]
+pub fn same(one: &str, other: &str) -> bool {
+    one.len() == other.len()
+        && one
+            .bytes()
+            .zip(other.bytes())
+            .fold(0_u8, |seen, (a, b)| seen | (a ^ b))
+            == 0
 }
 
 /// The name a seed picks, always a pair of different words — `delta-rho`, never `delta` and
@@ -121,12 +133,23 @@ pub fn secret() -> String {
 fn from_seed(seed: usize) -> String {
     let first = seed % GREEK.len();
     let apart = 1 + (seed / GREEK.len()) % (GREEK.len() - 1);
-    format!("{}-{}", GREEK[first], GREEK[(first + apart) % GREEK.len()])
+    let word = |at: usize| GREEK.get(at % GREEK.len()).copied().unwrap_or_default();
+    format!("{}-{}", word(first), word(first + apart))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_secret_is_sixteen_random_bytes_as_hex_and_never_repeats() {
+        let one = secret().expect("randomness");
+        let two = secret().expect("randomness");
+        assert_eq!(one.len(), 32);
+        assert!(one.chars().all(|c| c.is_ascii_hexdigit()), "{one}");
+        assert_ne!(one, two);
+        assert!(same(&one, &one.clone()) && !same(&one, &two) && !same(&one, "short"));
+    }
 
     #[test]
     fn a_name_is_three_parts() {

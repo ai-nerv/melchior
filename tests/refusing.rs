@@ -4,6 +4,8 @@
 //! what a caller sees — stdout, the reply shape, exit 0 — and an argument parser breaks it above
 //! the level any unit test reaches.
 
+#![allow(clippy::expect_used, clippy::indexing_slicing)]
+
 use std::process::Command;
 
 /// Run the binary and hand back what it put on stdout and what it exited with.

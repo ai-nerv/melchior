@@ -15,6 +15,8 @@
 //! leak rather than an approximation of it: a real melchior in exactly this state is holding a
 //! connection open to somebody's API and streaming nothing to nobody.
 
+#![allow(clippy::expect_used, clippy::indexing_slicing)]
+
 use melchior::scratch::Scratch;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};

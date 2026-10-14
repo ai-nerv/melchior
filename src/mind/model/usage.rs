@@ -46,13 +46,14 @@ impl Usage {
         (prompt > 0).then(|| self.cache_read as f64 / prompt as f64 * 100.0)
     }
 
-    /// Add another request's tokens to this total.
+    /// Add another request's tokens to this total, stopping at the largest count rather than
+    /// wrapping.
     pub const fn add(&mut self, other: Self) {
-        self.input += other.input;
-        self.output += other.output;
-        self.cache_read += other.cache_read;
-        self.cache_write += other.cache_write;
-        self.cost_micros += other.cost_micros;
+        self.input = self.input.saturating_add(other.input);
+        self.output = self.output.saturating_add(other.output);
+        self.cache_read = self.cache_read.saturating_add(other.cache_read);
+        self.cache_write = self.cache_write.saturating_add(other.cache_write);
+        self.cost_micros = self.cost_micros.saturating_add(other.cost_micros);
     }
 
     /// What these tokens cost at `cost`.

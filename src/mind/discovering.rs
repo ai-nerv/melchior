@@ -145,7 +145,10 @@ fn fetch(base: &str, key: Option<&str>, details: Option<&str>) -> Option<Vec<Mod
             .build()
             .ok()?;
         runtime.block_on(async move {
-            let client = reqwest::Client::builder().timeout(PATIENCE).build().ok()?;
+            let client = crate::mind::provider::http()
+                .timeout(PATIENCE)
+                .build()
+                .ok()?;
             let mut request = client.get(&url);
             if let Some(key) = key {
                 request = request.bearer_auth(key);

@@ -1,6 +1,7 @@
 //! Reaching another instance: the other half of [`crate::serving`], and deliberately blocking.
 //! [`Held`] stays open across calls — a client that closes after each one dies on its second with
-//! a broken pipe. Every call names its caller, or the far end answers `verbs` and nothing else.
+//! a broken pipe. Every call carries this session's name for a reader of the frame; the far end
+//! takes who is calling from this process, not from the call.
 
 use crate::framing;
 use crate::identity::Identity;
@@ -13,28 +14,66 @@ use std::time::Duration;
 /// How long to wait for a connection, and then for each answer from a healthy peer.
 const PATIENCE: Duration = Duration::from_secs(10);
 
+/// What answers a call made to this process's own socket, without the socket.
+pub type Answerer = std::sync::Arc<dyn Fn(Call) -> Reply + Send + Sync>;
+
+/// The sockets this process answers itself, and how.
+static HERE: std::sync::Mutex<Vec<(std::path::PathBuf, Answerer)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Answer calls this process makes to `path` with `answerer`, rather than by dialling it.
+pub fn answer_here(path: &Path, answerer: Answerer) {
+    if let Ok(mut here) = HERE.lock() {
+        here.retain(|(held, _)| held != path);
+        here.push((path.to_path_buf(), answerer));
+    }
+}
+
+fn here(path: &Path) -> Option<Answerer> {
+    let here = HERE.lock().ok()?;
+    here.iter()
+        .find(|(held, _)| held == path)
+        .map(|(_, answerer)| std::sync::Arc::clone(answerer))
+}
+
+/// How a call reaches the far end.
+enum Line {
+    Socket(UnixStream),
+    /// This process's own socket, answered in place.
+    Local(Answerer),
+}
+
 /// An open connection to one instance.
 pub struct Held {
-    stream: UnixStream,
+    line: Line,
     /// Who this session is, put on every call.
     me: String,
     /// Whether a call went out whose reply was never read to the end. One reply per call and
     /// nothing in a reply that says which call it answers, so an abandoned one is still in the
-    /// stream: the next call would read it as its own answer, and every answer after that would
-    /// belong to the call before it. See FAMILY.md.
+    /// stream: the next call would read it as its own answer. See FAMILY.md.
     adrift: bool,
 }
 
 impl Held {
-    /// Open a connection to whatever is listening at `path`.
+    /// Open a connection to whatever is listening at `path`, as long as it is this user. A path
+    /// this process answers itself is answered in place.
     pub fn at(path: &Path, me: &Identity) -> std::io::Result<Self> {
-        let stream = UnixStream::connect(path)?;
-        // Both directions: a peer that accepted and never answered would hold this open, and the
-        // tool call with it.
-        stream.set_read_timeout(Some(PATIENCE))?;
-        stream.set_write_timeout(Some(PATIENCE))?;
+        Self::within(path, me, PATIENCE)
+    }
+
+    /// The same, waiting at most `patience` to connect, to write a call and to read its reply.
+    pub fn within(path: &Path, me: &Identity, patience: Duration) -> std::io::Result<Self> {
+        let line = match here(path) {
+            Some(answerer) => Line::Local(answerer),
+            None => {
+                let stream = dial(path, patience)?;
+                stream.set_read_timeout(Some(patience))?;
+                stream.set_write_timeout(Some(patience))?;
+                Line::Socket(stream)
+            }
+        };
         Ok(Self {
-            stream,
+            line,
             me: me.full(),
             adrift: false,
         })
@@ -75,23 +114,82 @@ impl Held {
                 "this connection is closed: a reply left on the wire would answer the next call",
             ));
         }
+        let stream = match &self.line {
+            Line::Local(answerer) => return Ok(answerer(call)),
+            Line::Socket(stream) => stream,
+        };
         // Set before the write, not after: a request half written is one the far end will finish
         // reading out of whatever is sent next.
         self.adrift = true;
-        let answered = framing::write_to(&mut Writing(&self.stream), &call)
-            .and_then(|()| framing::read_from(&mut Reading(&self.stream)));
+        let answered: std::io::Result<Reply> = framing::write_to(&mut Writing(stream), &call)
+            .and_then(|()| framing::read_from(&mut Reading(stream)));
         match answered {
+            // Read whole, so the connection is in step; refused by name all the same.
+            Ok(reply) if reply.family > crate::wire::FAMILY => {
+                self.adrift = false;
+                Err(std::io::Error::other(format!(
+                    "the reply is written in family {}, newer than this melchior's {}",
+                    reply.family,
+                    crate::wire::FAMILY
+                )))
+            }
             Ok(reply) => {
                 self.adrift = false;
                 Ok(reply)
             }
             Err(why) => {
                 // So the far end learns too, rather than answering into a socket nobody reads.
-                let _ = self.stream.shutdown(std::net::Shutdown::Both);
+                let _ = stream.shutdown(std::net::Shutdown::Both);
                 Err(why)
             }
         }
     }
+}
+
+/// Connect to `path` within `patience`, to a server running as this user and nobody else. A
+/// listener whose backlog is full is retried until the deadline rather than waited on for good.
+pub fn dial(path: &Path, patience: Duration) -> std::io::Result<UnixStream> {
+    use rustix::io::Errno;
+    use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
+    let fd = rustix::net::socket_with(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::NONBLOCK | SocketFlags::CLOEXEC,
+        None,
+    )?;
+    let address = SocketAddrUnix::new(path)?;
+    let deadline = std::time::Instant::now() + patience;
+    loop {
+        match rustix::net::connect_unix(&fd, &address) {
+            Ok(()) | Err(Errno::ISCONN) => break,
+            Err(Errno::AGAIN | Errno::INPROGRESS | Errno::ALREADY | Errno::INTR)
+                if std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(Errno::AGAIN | Errno::INPROGRESS | Errno::ALREADY) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("{} did not take the connection in time", path.display()),
+                ));
+            }
+            Err(why) => return Err(why.into()),
+        }
+    }
+    let stream = UnixStream::from(fd);
+    stream.set_nonblocking(false)?;
+    let peer = rustix::net::sockopt::get_socket_peercred(&stream)?;
+    if peer.uid.as_raw() != crate::places::uid() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "{} answers as uid {}, not as this user",
+                path.display(),
+                peer.uid.as_raw()
+            ),
+        ));
+    }
+    Ok(stream)
 }
 
 /// A `&UnixStream` writes; the borrow is what lets one connection do both halves.
@@ -115,20 +213,37 @@ impl Read for Reading<'_> {
     }
 }
 
-/// Whether anything is actually listening as `them`. A socket file outlives the process that made
-/// it, so the directory only says who *was* here.
+/// Whether anything is actually listening at `where_it_is`. A socket file outlives the process
+/// that made it, so the directory only says who *was* here.
 #[must_use]
-pub fn answers(where_it_is: &Path, me: &Identity) -> bool {
-    match Held::at(where_it_is, me) {
-        Ok(_) => true,
-        Err(why) => {
-            // The only place the reason survives: the caller wants a yes or a no.
-            crate::noted!(
-                "asking: nothing answers at {}: {why}",
-                where_it_is.display()
-            );
+pub fn answers(where_it_is: &Path, _me: &Identity) -> bool {
+    alive(where_it_is)
+}
+
+/// Whether something may still be listening at `path`, asked with one connect that never waits:
+/// it is gone only when nothing is bound there or the kernel refuses the connection. A full
+/// backlog, an interrupted call or a process out of descriptors is a live peer having a bad moment.
+#[must_use]
+pub fn alive(path: &Path) -> bool {
+    use rustix::io::Errno;
+    use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
+    let Ok(fd) = rustix::net::socket_with(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::NONBLOCK | SocketFlags::CLOEXEC,
+        None,
+    ) else {
+        return true;
+    };
+    let Ok(address) = SocketAddrUnix::new(path) else {
+        return true;
+    };
+    match rustix::net::connect_unix(&fd, &address) {
+        Err(Errno::CONNREFUSED | Errno::NOENT) => {
+            crate::noted!("asking: nothing answers at {}", path.display());
             false
         }
+        _ => true,
     }
 }
 
@@ -162,7 +277,7 @@ mod tests {
     fn a_call_carries_the_caller_s_name() {
         let held = Held {
             // Any fd will do: nothing is written, and building the frame is what is under test.
-            stream: UnixStream::pair().expect("a pair").0,
+            line: Line::Socket(UnixStream::pair().expect("a pair").0),
             adrift: false,
             me: me().full(),
         };
@@ -180,7 +295,7 @@ mod tests {
     fn a_round_trip_over_a_real_socket_pair_reads_back() {
         let (mine, theirs) = UnixStream::pair().expect("a pair");
         let mut held = Held {
-            stream: mine,
+            line: Line::Socket(mine),
             adrift: false,
             me: me().full(),
         };
@@ -204,7 +319,7 @@ mod tests {
     fn a_call_that_did_not_get_its_answer_takes_the_connection_with_it() {
         let (mine, theirs) = UnixStream::pair().expect("a pair");
         let mut held = Held {
-            stream: mine,
+            line: Line::Socket(mine),
             adrift: false,
             me: me().full(),
         };
@@ -242,6 +357,88 @@ mod tests {
         );
         done.send(()).ok();
         answering.join().expect("the far end finished");
+    }
+
+    #[test]
+    fn a_reply_from_a_newer_family_is_refused_by_name_and_the_line_stays_in_step() {
+        let (mine, theirs) = UnixStream::pair().expect("a pair");
+        let mut held = Held {
+            line: Line::Socket(mine),
+            adrift: false,
+            me: me().full(),
+        };
+        let answering = std::thread::spawn(move || {
+            for family in [crate::wire::FAMILY + 1, crate::wire::FAMILY] {
+                let _: Call = framing::read_from(&mut Reading(&theirs)).expect("a call");
+                let mut reply = Reply::of(serde_json::json!("hello"));
+                reply.family = family;
+                framing::write_to(&mut Writing(&theirs), &reply).expect("writes");
+            }
+        });
+        let newer = held.call("status", Vec::new()).expect_err("a newer family");
+        assert!(newer.to_string().contains("newer"), "{newer}");
+        let same = held
+            .call("status", Vec::new())
+            .expect("the next call is answered");
+        assert_eq!(same.result[0], "hello");
+        answering.join().expect("the far end finished");
+    }
+
+    #[test]
+    fn a_server_of_this_user_is_dialled_and_its_answer_read() {
+        let room = crate::scratch::Scratch::new("melchior-asking", "dial");
+        let at = room.join("s");
+        let listening = std::os::unix::net::UnixListener::bind(&at).expect("bound");
+        let stream = dial(&at, Duration::from_secs(2)).expect("this user's own server");
+        drop(stream);
+        drop(listening);
+        assert!(dial(&room.join("absent"), Duration::from_millis(50)).is_err());
+    }
+
+    #[test]
+    fn a_peer_is_gone_only_when_nothing_is_bound_or_it_refuses() {
+        use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
+        let room = crate::scratch::Scratch::new("melchior-asking", "alive");
+        assert!(!alive(&room.join("absent")), "nothing bound");
+        std::fs::write(room.join("plain"), b"").expect("a file");
+        assert!(!alive(&room.join("plain")), "not a socket");
+
+        // A listener that accepts nobody, with its backlog full: alive, and not waited on.
+        let at = room.join("full");
+        let listener = rustix::net::socket_with(
+            AddressFamily::UNIX,
+            SocketType::STREAM,
+            SocketFlags::CLOEXEC,
+            None,
+        )
+        .expect("a socket");
+        let address = SocketAddrUnix::new(&at).expect("an address");
+        rustix::net::bind_unix(&listener, &address).expect("bound");
+        rustix::net::listen(&listener, 0).expect("listening");
+        let mut queued = Vec::new();
+        while queued.len() < 64 {
+            let Ok(waiting) = dial(&at, Duration::ZERO) else {
+                break;
+            };
+            queued.push(waiting);
+        }
+        assert!(alive(&at), "a full backlog read as a corpse");
+        let began = std::time::Instant::now();
+        let refused = dial(&at, Duration::from_millis(100)).expect_err("nobody accepts");
+        assert_eq!(refused.kind(), std::io::ErrorKind::TimedOut, "{refused}");
+        assert!(began.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_call_to_this_process_s_own_socket_is_answered_in_place() {
+        let at = std::path::Path::new("/nonexistent/melchior-asking/here");
+        answer_here(
+            at,
+            std::sync::Arc::new(|call: Call| Reply::of(serde_json::json!(call.call))),
+        );
+        let mut held = Held::at(at, &me()).expect("no socket is dialled");
+        let reply = held.call("status", Vec::new()).expect("answered");
+        assert_eq!(reply.result[0], "status");
     }
 
     #[test]

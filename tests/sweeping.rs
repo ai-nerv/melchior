@@ -11,6 +11,8 @@
 //! Against the library rather than the binary, because the six files are the point and naming
 //! them is how this stays a test of coverage rather than of one session's tidiness.
 
+#![allow(clippy::expect_used, clippy::indexing_slicing)]
+
 use melchior::directory::{self, claims, roles, screens, sending, sessions};
 use melchior::identity::Identity;
 use melchior::scratch::Project;

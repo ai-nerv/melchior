@@ -82,7 +82,9 @@ impl Catalog {
 
         // Last and over the top: what a coordinator said outranks what is on disk. Nothing there
         // is the ordinary case of a melchior nobody is coordinating.
-        if let Ok(given) = std::fs::read_to_string(crate::mind::setup::given()) {
+        if let Some(given) =
+            crate::mind::setup::given().and_then(|path| crate::mind::setup::read_given(&path))
+        {
             engine.run(&given, "given")?;
         }
         engine.harvest();

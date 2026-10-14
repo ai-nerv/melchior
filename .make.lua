@@ -10,14 +10,12 @@
 
 local make = oslo.make
 
--- Name and version live in PROJECT, one per line, so every tool reads them from one place.
+-- Version from Cargo.toml, the file a release bumps: the workspace's if it has one, else the package's.
 local function project()
-  local found = {}
-  for line in (oslo.fs.read("PROJECT") or ""):gmatch("[^\n]+") do
-    local value = line:match("^%s*([^#%[%s]%S*)%s*$")
-    if value then found[#found + 1] = value end
-  end
-  return found[1] or "melchior", found[2] or "0.1.0"
+  local manifest = oslo.fs.read("Cargo.toml") or ""
+  local section = manifest:match("%[workspace%.package%](.-)\n%[")
+    or manifest:match("%[package%](.-)\n%[") or ""
+  return "melchior", section:match('\nversion%s*=%s*"([^"]+)"') or "0.0.0"
 end
 
 local NAME, VERSION = project()
@@ -122,6 +120,26 @@ make.alias("b", "build")
 
 make.recipe{ name = "family-path", desc = "the binary selected by the build recipe",
              run = function() print("NERV_BINARY=target/release/" .. NAME) end }
+
+make.recipe{ name = "nix-build", desc = "the static Nix package, into result/bin/" .. NAME,
+             run = function() sh.nix("build", "--accept-flake-config", ".#" .. NAME, "-L") end }
+
+make.recipe{ name = "nix-check", desc = "the flake's outputs and the package's install checks",
+             run = function() sh.nix("flake", "check", "--accept-flake-config", "-L") end }
+
+-- Substituted only: no local or remote builder may build it, so a cache miss fails here.
+make.recipe{
+  name = "nix-download-check",
+  desc = "fetch the package from the cache, building nothing, and run it",
+  run = function()
+    sh.nix("build", "--accept-flake-config", "--no-update-lock-file",
+           "--max-jobs", "0", "--builders", "", ".#" .. NAME)
+    local ran = oslo.run{ "result/bin/" .. NAME, "verbs", "--json", capture = true }
+    assert(ran.ok and (ran.out or ""):find('"ok":true', 1, true),
+           "result/bin/" .. NAME .. " verbs --json did not answer ok")
+    print(("%s answers verbs from the cache"):format(NAME))
+  end,
+}
 
 make.recipe{
   name = "install",
@@ -315,15 +333,48 @@ make.recipe{
       print(said)
       error("cargo machete failed")
     end
-    local shelled = oslo.run{ "nix", "develop", "--command", "cargo", "machete" }
+    local shelled = oslo.run{ "nix", "--extra-experimental-features", "nix-command flakes",
+                              "develop", "--command", "cargo", "machete" }
     assert(shelled.ok, "cargo machete failed")
   end,
 }
 
+-- `cargo <argv>`, through the dev shell when this shell has no such subcommand, as `machete` is.
+local function cargo_or_shell(argv, failed)
+  local direct = { "cargo", capture = true }
+  for _, word in ipairs(argv) do direct[#direct + 1] = word end
+  local ran = oslo.run(direct)
+  local said = (ran.out or "") .. (ran.err or "")
+  if ran.ok then
+    print(said)
+    return
+  end
+  if not said:find("no such command") then
+    print(said)
+    error(failed)
+  end
+  local shelled = { "nix", "--extra-experimental-features", "nix-command flakes",
+                    "develop", "--command", "cargo" }
+  for _, word in ipairs(argv) do shelled[#shelled + 1] = word end
+  assert(oslo.run(shelled).ok, failed)
+end
+
+-- Known advisories against the lockfile, from the advisory database already on this machine.
+make.recipe{ name = "audit", desc = "known advisories against the lockfile, offline",
+             run = function()
+               cargo_or_shell({ "audit", "--no-fetch" }, "cargo audit found an advisory")
+             end }
+
+-- Advisories, licenses, bans and sources, as `deny.toml` says.
+make.recipe{ name = "deny", desc = "the dependency policy in deny.toml, offline",
+             run = function()
+               cargo_or_shell({ "deny", "check", "--disable-fetch" }, "cargo deny failed")
+             end }
+
 make.recipe{
   name = "verify",
   desc = "the whole local gate",
-  deps = { "fmt-check", "check", "test", "check-all", "test-all", "clippy", "rustdoc", "gates", "gate-hermetic", "gate-family", "gate-role", "machete" },
+  deps = { "fmt-check", "check", "test", "check-all", "test-all", "clippy", "rustdoc", "gates", "gate-hermetic", "gate-family", "gate-role", "machete", "audit", "deny" },
 }
 make.alias("v", "verify")
 
@@ -340,7 +391,8 @@ make.recipe{
   run = function()
     local where = "target/x86_64-unknown-linux-musl/release/melchior"
     if not oslo.fs.exists(where) then where = "target/release/melchior" end
-    local ran = oslo.run{ "scripts/gate-family.sh", where  }
+    -- With how it serves, so the gate also probes a live socket.
+    local ran = oslo.run{ "scripts/gate-family.sh", where, "serve", "--project", "gate-family" }
     assert(ran.ok, "gate-family failed")
   end,
 }

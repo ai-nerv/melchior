@@ -1,5 +1,99 @@
 # Changelog
 
+## [0.6.0] - 2026-10-14
+
+### <!-- 0 -->⛰️  Features
+
+- Frame calls in the stream, not in Lua
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Hide a userdata's metatable
+- Bound Lua-to-JSON by nodes, bytes, cycles
+- Refuse __gc metatables and drop debug
+- Refuse precompiled chunks everywhere
+- Hold every VM to a memory ceiling
+- Refuse a call from a newer family
+- Take TMPDIR only when absolute
+- Take rustls and quinn-proto fixes
+- Take the uid only from the host
+- A reply that will not decode closes
+- Name an unknown verb to any caller
+- Never name a child after its parent
+- Withdraw an own asking only on accept
+- One runtime rule, flat names, no shell
+- Meter every usage shape, settle always
+- Count what every attempt cost
+- Bound streams, say refusals, honour waits
+- Cap tells, one inbox, steady roster
+- Reserve names, drop stale parent notes
+- Start no outsider with family capability
+- Runtime dirs 0700 and owner-checked
+- Keep given config per session only
+- Follow no redirect with a key on it
+- Answer off the loop, under deadlines
+- Mint secrets without a panic
+- Take the body only from the message
+- Kernel kin, stdin token, adopt nonce
+- Read a report only across agent_talk
+- Cap frames and refuse a newer family
+- Check the server uid and its family
+- One 16 MiB cap, answered not dropped
+- Stop a VM that runs past its budget
+- Dial only the family's own sockets
+
+### <!-- 2 -->🚜 Refactor
+
+- No panics on input
+- Page lines without slicing
+- No panics on input
+- Pick names without indexing
+- Mark a cut row without indexing
+
+### <!-- 3 -->📚 Documentation
+
+- The three VMs and getmetatable
+- The memory key and socket families
+- What a VM refuses
+- One contract in all four
+- Drop a duplicated heading
+- One text across the family
+- Install from the ai-nerv Nix cache
+- Say where callers and secrets come from
+- Runtime dir, lock, stream bounds
+- Name hexe and oslo sockets
+- Frames, sockets, deadlines, callers
+
+### <!-- 5 -->🎨 Styling
+
+- Collapse the guard ifs clippy flags
+
+### <!-- 6 -->🧪 Testing
+
+- Hold a one-slice chunk to the ceiling
+- One gate-family in all four
+- Hold the VM surface to an allowlist
+- Probe a live socket for refusals
+- Hold the wire to one cap and dir rule
+- Hold the plugin VM to its narrow surface
+- Run the family conformance corpus
+- Find the busy reply without racing
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Pin actions by commit
+- Publish tagged builds to ai-nerv
+
+### Build
+
+- Enable flakes for the dev shell
+- Run cargo audit and deny in verify
+- Check overflow in release
+- Read the version from Cargo.toml
+- Nix-build, nix-check, download check
+- A static package with config and client
+- Deny expect and indexing outside tests
+
 ## [0.5.5] - 2026-09-29
 
 ## [0.5.4] - 2026-09-29

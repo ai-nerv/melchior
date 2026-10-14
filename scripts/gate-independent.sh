@@ -8,7 +8,7 @@
 # types are duplicated on purpose rather than shared -- see `gate-wire.sh`.
 #
 # **melchior names magi constantly, and every one of those is legitimate.** It is the program magi
-# spawns: `MAGI_MELCHIOR_PROJECT`, `MAGI_MELCHIOR_ID` and `MAGI_MELCHIOR_TOKEN` are the variables
+# spawns: `MAGI_MELCHIOR_PROJECT`, `MAGI_MELCHIOR_ID` and `MAGI_MELCHIOR_PARENT` are the variables
 # it is started with, `tied::to_magi` is the function that ties its lifetime to the process that
 # started it, and half the module documentation explains melchior by what magi does with it. The
 # blanket name match the sibling gates use -- any occurrence of a sibling's name in Rust is a

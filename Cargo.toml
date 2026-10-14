@@ -1,6 +1,6 @@
 [package]
 name = "melchior"
-version = "0.5.5"
+version = "0.6.0"
 edition = "2024"
 description = "One agent talking to another: naming, finding, reaching and refusing"
 license = "MIT"
@@ -20,8 +20,10 @@ path = "src/main.rs"
 # makes melchior an agent runtime rather than a message bus. What a harness needs still crosses as
 # data and as bytes on a pipe.
 [dependencies]
-rustix = { version = "0.38", features = ["process", "fs"] }
+rustix = { version = "0.38", features = ["process", "fs", "net"] }
 serde = { version = "1.0", features = ["derive"] }
+# Already in the lockfile, through luna: the kernel's randomness, as an error rather than a panic.
+getrandom = "0.3"
 serde_json = { version = "1.0", features = ["preserve_order"] }
 # `signal` because the way a `serve` actually ends is a `SIGTERM` from the kernel, and a signal
 # nothing waits for runs none of the lines that take this session's socket and notes back down —
@@ -41,6 +43,10 @@ thiserror = "2.0"
 anyhow = "1"
 
 [dev-dependencies]
+
+# An overflow is a panic in the shipped binary as it is in the tests, never a silent wrap.
+[profile.release]
+overflow-checks = true
 
 # The same gate this code was written under, not a stricter one. Tightening it on the way out
 # would mean rewriting working code to satisfy a rule nobody had chosen, in the same change that
@@ -62,3 +68,5 @@ unused = { level = "deny", priority = -1 }
 dbg_macro = "deny"
 todo = "deny"
 unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"

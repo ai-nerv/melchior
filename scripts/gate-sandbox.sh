@@ -25,12 +25,46 @@ ROOT="${GATE_ROOT:-src}"
 
 ENGINE="$ROOT/mind/lua/engine.rs"
 SANDBOX="$ROOT/mind/lua/sandbox.rs"
+STREAM="$ROOT/mind/lua/stream.rs"
+FS="$ROOT/mind/lua/fs.rs"
+CONVERT="$ROOT/mind/lua/convert.rs"
+PLACES="$ROOT/places.rs"
+SETUP="$ROOT/mind/setup.rs"
+POLICY="$ROOT/policy.rs"
 PLUGINS="$ROOT/mind/plugins.rs"
 CATALOG="$ROOT/mind/catalog.rs"
 
 # Code with the comments taken out, which is the only thing any match here looks at.
 code() {
   awk '{ sub(/\/\/.*$/, ""); print }' "$1"
+}
+
+# A file's code before its tests.
+shipped() {
+  code "$1" | sed '/#\[cfg(test)\]/,$d'
+}
+
+# One item's code, from the line matching a pattern to the first line closing at column zero.
+body() {
+  code "$1" | awk -v pat="$2" '
+    !inside && $0 ~ pat { inside = 1 }
+    inside { print }
+    inside && /^}/ { exit }
+  '
+}
+
+# One declaration, from the line naming it to the line that ends it.
+decl() {
+  code "$1" | awk -v pat="$2" '
+    !inside && $0 ~ pat { inside = 1 }
+    inside { print }
+    inside && /;[[:space:]]*$/ { exit }
+  '
+}
+
+# The quoted names in what is read from stdin, sorted, on one line.
+names() {
+  grep -o '"[a-z_]*"' | tr -d '"' | sort | tr '\n' ' ' | sed 's/ $//'
 }
 
 fail=0
@@ -70,12 +104,148 @@ for gone in execute exit remove rename tmpname; do
     fail=1
   fi
 done
-for gone in io package dofile loadfile require; do
+for gone in io package dofile loadfile require debug; do
   if ! code "$SANDBOX" | grep -q "\"$gone\""; then
     echo "gate-sandbox: the global \`$gone\` is no longer removed from the VM" >&2
     fail=1
   fi
 done
+
+# ---- bytecode never enters ---------------------------------------------------------------------
+body "$ENGINE" 'pub fn run_within[(]' | grep -q 'sandbox::precompiled(' || {
+  echo "gate-sandbox: a chunk is no longer checked for bytecode before it is loaded" >&2
+  fail=1
+}
+body "$SANDBOX" '^pub fn apply[(]' | grep -q 'guard_load(ctx)' || {
+  echo "gate-sandbox: \`load\` no longer refuses bytecode" >&2
+  fail=1
+}
+code "$SANDBOX" | grep -q '("string", "dump")' || {
+  echo "gate-sandbox: string.dump is no longer removed from the VM" >&2
+  fail=1
+}
+
+# ---- a value leaves the VM as JSON within bounds -------------------------------------------------
+for wanted in 'self.open.insert(table)' 'self.nodes > NODES' 'self.bytes > BYTES' 'depth > DEPTH'; do
+  shipped "$CONVERT" | grep -qF "$wanted" || {
+    echo "gate-sandbox: converting a Lua value to JSON no longer checks $wanted" >&2
+    fail=1
+  }
+done
+
+# ---- and nothing is queued for a finalizer -----------------------------------------------------
+body "$SANDBOX" '^pub fn apply[(]' | grep -q 'guard_setmetatable(ctx)' || {
+  echo "gate-sandbox: setmetatable no longer refuses __gc, and nothing here runs finalizers" >&2
+  fail=1
+}
+body "$SANDBOX" '^pub fn apply[(]' | grep -q 'hide_userdata_metatables(ctx)' || {
+  echo "gate-sandbox: getmetatable hands out a userdata's metatable again" >&2
+  fail=1
+}
+
+# ---- every chunk runs on a budget ---------------------------------------------------------------
+body "$ENGINE" 'pub fn run_within[(]' | grep -q 'Fuel::with(' || {
+  echo "gate-sandbox: chunks are no longer run a slice of fuel at a time" >&2
+  fail=1
+}
+body "$ENGINE" 'pub fn run_within[(]' | grep -q 'spent >= budget' || {
+  echo "gate-sandbox: nothing stops a chunk that has spent its budget" >&2
+  fail=1
+}
+body "$ENGINE" 'pub fn new[(]' | grep -q 'set_memory_limit(Some(MEMORY))' || {
+  echo "gate-sandbox: the VM is built with no memory ceiling" >&2
+  fail=1
+}
+body "$ENGINE" 'pub fn run_within[(]' | grep -q 'over_memory()' || {
+  echo "gate-sandbox: nothing stops a chunk that holds more than the ceiling" >&2
+  fail=1
+}
+
+# ---- `stream`: the family's sockets, framed here ------------------------------------------------
+# A path is dialable by the family's own directory names and a socket's owner, never by the
+# runtime directory alone, and the handle carries whole calls rather than raw bytes.
+body "$STREAM" '^fn dialable[(]' | grep -q 'family_socket(' || {
+  echo "gate-sandbox: melchior.stream no longer asks whether a path is one of the family's sockets" >&2
+  fail=1
+}
+if shipped "$STREAM" | grep -q 'temp_dir()\|XDG_RUNTIME_DIR'; then
+  echo "gate-sandbox: melchior.stream decides what is dialable by directory again" >&2
+  fail=1
+fi
+lent=$(shipped "$STREAM" | grep -o '[a-z]*\.set(ctx, "[a-z_]*"' | names)
+if [ "$lent" != "call close connect" ]; then
+  echo "gate-sandbox: melchior.stream lends [$lent]; it lends connect, call and close" >&2
+  fail=1
+fi
+programs=$(decl "$PLACES" '^pub const FAMILY' | names)
+if [ "$programs" != "balthasar casper magi melchior memory" ]; then
+  echo "gate-sandbox: the family's socket directories are [$programs]" >&2
+  fail=1
+fi
+for wanted in 'is_socket()' '== owner'; do
+  body "$PLACES" '^pub fn family_socket[(]' | grep -qF "$wanted" || {
+    echo "gate-sandbox: a dialable socket is no longer checked with $wanted" >&2
+    fail=1
+  }
+done
+
+# ---- `fs`: a listing, and nothing that writes ----------------------------------------------------
+lent=$(shipped "$FS" | grep -o 'fs\.set(ctx, "[a-z_]*"' | names)
+if [ "$lent" != "ls" ]; then
+  echo "gate-sandbox: melchior.fs lends [$lent]; it lends ls alone" >&2
+  fail=1
+fi
+if shipped "$FS" | grep -q 'fs::write\|File::create\|OpenOptions\|remove_\|create_dir\|rename('; then
+  echo "gate-sandbox: melchior.fs can change the filesystem" >&2
+  fail=1
+fi
+
+# ---- `env`: read through os.getenv, never written or lent ---------------------------------------
+for file in "$ROOT"/mind/lua/*.rs; do
+  if shipped "$file" | grep -q 'set_var(\|remove_var('; then
+    echo "gate-sandbox: $file changes the process environment" >&2
+    fail=1
+  fi
+done
+if body "$ENGINE" 'fn install[(]' | grep -q '"env"\|"setenv"\|"environ"'; then
+  echo "gate-sandbox: the VM is lent the environment as a table of its own" >&2
+  fail=1
+fi
+
+# ---- `roles` and the privileged list: what a config may assign ----------------------------------
+# An allowlist of exactly the settings that choose a model or name what a session is for. The
+# reach comes from the environment a session is spawned with, and no decision reads a role.
+allowed=$(decl "$SETUP" '^const SETTINGS' | names)
+if [ "$allowed" != "discover max_tokens model role thinking" ]; then
+  echo "gate-sandbox: a config may assign [$allowed]" >&2
+  fail=1
+fi
+for setting in agent_talk talk reach env roles token secret parent project id confine allow \
+               trusted isolation may_spawn mode ask deny agents tools helpers system memory \
+               magi casper balthasar melchior; do
+  case " $allowed " in
+    *" $setting "*)
+      echo "gate-sandbox: \`melchior.$setting\` is privileged and a config may set it" >&2
+      fail=1 ;;
+  esac
+done
+body "$SETUP" '^pub fn configure_into[(]' | grep -q '!SETTINGS.contains(' || {
+  echo "gate-sandbox: a setting nobody declared is no longer refused by name" >&2
+  fail=1
+}
+registrars=$(decl "$ENGINE" '^const REGISTRARS' | names)
+if [ "$registrars" != "provider" ]; then
+  echo "gate-sandbox: a config may call the registrars [$registrars]" >&2
+  fail=1
+fi
+shipped "$POLICY" | grep -q 'inherited::TALK' || {
+  echo "gate-sandbox: the reach is no longer read from the environment a session is spawned with" >&2
+  fail=1
+}
+if shipped "$POLICY" | grep -qi 'role'; then
+  echo "gate-sandbox: the reach reads a role, which any session may name for itself" >&2
+  fail=1
+fi
 
 # ---- and fetched code still has to be let in ----------------------------------------------------
 # The other half of the boundary. A file under `site/pack/` arrived from somewhere else and can

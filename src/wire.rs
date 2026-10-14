@@ -30,10 +30,11 @@ pub struct Call {
     pub call: String,
     #[serde(default)]
     pub args: Vec<serde_json::Value>,
-    /// Who is calling, as `project/role/id`, taken at face value for everything but `stop`.
+    /// Who the caller says it is, for a reader of the frame; never read as who is calling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
-    /// The secret handed down at spawn, for the one verb that needs proof.
+    /// A secret this session holds, for the verbs that need proof: `stop`, and `role` from a
+    /// parent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
 }
@@ -41,6 +42,27 @@ pub struct Call {
 /// Which revision of the family wire this speaks, carried on every reply rather than negotiated,
 /// and bumped only when a consumer that does not know about a change would misread a reply.
 pub const FAMILY: u16 = 1;
+
+/// A call as a server reads it, with the revision it says it is written in. None named is read
+/// as one from before the field existed.
+#[derive(Debug, Deserialize)]
+pub struct Arriving {
+    #[serde(flatten)]
+    pub call: Call,
+    #[serde(default)]
+    pub family: Option<u64>,
+}
+
+impl Arriving {
+    /// The refusal for a call written in a newer family than this one, by name.
+    #[must_use]
+    pub fn newer(&self) -> Option<Reply> {
+        let family = self.family.filter(|said| *said > u64::from(FAMILY))?;
+        Some(Reply::refused(format!(
+            "the call is written in family {family}, newer than this melchior's {FAMILY}"
+        )))
+    }
+}
 
 /// The revision of the registrar surface a plugin file is written against — the registrar names,
 /// the fields each declaration owes, what a callback is handed — reported on `verbs` beside
@@ -404,8 +426,8 @@ mod tests {
 
     #[test]
     fn nothing_that_runs_a_command_is_in_the_first_cut() {
-        // `tool` is exempt: no shell command, only the session's own vocabulary, and the caller is
-        // taken from the kernel (`serving::is_authority`) — as safe on the socket as `melchior tool`.
+        // `tool` is exempt: no shell command, only the session's own vocabulary, answered only to a
+        // caller the kernel's process tree places as this session (`serving::callers`).
         for (name, _) in VERBS {
             assert!(
                 !["run", "shell", "exec", "eval"].contains(name),
@@ -512,6 +534,12 @@ pub struct Request {
     pub why: String,
     /// When, in milliseconds since the epoch.
     pub at: u64,
+    /// What the answer must quote back to the asker. Held here and never put on a wire but that.
+    #[serde(skip)]
+    pub nonce: String,
+    /// The run the asker was in when it asked, so an answer reaches the same session or none.
+    #[serde(skip)]
+    pub session: Option<String>,
 }
 
 impl Request {
@@ -523,6 +551,8 @@ impl Request {
             from: from.to_owned(),
             why: why.to_owned(),
             at,
+            nonce: String::new(),
+            session: None,
         }
     }
 }

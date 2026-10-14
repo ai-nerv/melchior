@@ -6,6 +6,12 @@
 --   local them = melchior.connect("beta-nu")
 --   print(them.status())
 --
+-- The transport does the framing, so nothing here writes a length prefix or reads a frame:
+--
+--   transport.connect(path, timeout_ms)               -> handle | nil, why
+--   handle:call(request, { deadline_ms = N })          -> reply  | nil, why
+--   handle:close()
+--
 -- What is on the other end is one *session* — one agent, one conversation, one name. There is no
 -- server for the layer as a whole: every session binds its own socket and answers for itself, so
 -- "connect to melchior" is always "connect to somebody".
@@ -31,213 +37,8 @@ local M = { _NAME = "melchior", _VERSION = 1 }
 -- only its own name would fail on exactly the hosts it is meant to run in.
 local FAMILY = { "melchior", "magi", "aeon", "oslo", "hexe" }
 
--- ---------------------------------------------------------------- JSON, in Lua
-
--- Carried rather than required. The library runs inside somebody else's VM, so it cannot reach
--- the host's own JSON module — and a client that depended on there being one would be a
--- client most hosts could not load.
-
-local ESCAPES = {
-  ['"'] = '\\"', ['\\'] = '\\\\', ['\b'] = '\\b',
-  ['\f'] = '\\f', ['\n'] = '\\n', ['\r'] = '\\r', ['\t'] = '\\t',
-}
-
-local function quote(s)
-  return '"' .. s:gsub('[%c"\\]', function(c)
-    return ESCAPES[c] or string.format('\\u%04x', c:byte())
-  end) .. '"'
-end
-
-local encode
-
--- A Lua table is a map or a list and JSON is not, so the shape has to be decided. An empty table
--- encodes as an array: every argument list is one, and an empty *record* is not something the
--- surface below ever sends.
-local function is_list(t)
-  local n = 0
-  for _ in pairs(t) do n = n + 1 end
-  return n == #t
-end
-
-function encode(v, depth)
-  depth = (depth or 0) + 1
-  if depth > 24 then error("agent: value nested too deeply to send", 0) end
-
-  local kind = type(v)
-  if v == nil then return "null" end
-  if kind == "boolean" then return tostring(v) end
-  if kind == "string" then return quote(v) end
-  if kind == "number" then
-    if v ~= v or v == math.huge or v == -math.huge then
-      error("agent: " .. tostring(v) .. " cannot be sent", 0)
-    end
-    return (math.type and math.type(v) == "integer") and string.format("%d", v) or tostring(v)
-  end
-  if kind ~= "table" then error("agent: cannot send a " .. kind, 0) end
-
-  local out = {}
-  if is_list(v) then
-    for i = 1, #v do out[#out + 1] = encode(v[i], depth) end
-    return "[" .. table.concat(out, ",") .. "]"
-  end
-  for key, value in pairs(v) do
-    out[#out + 1] = quote(tostring(key)) .. ":" .. encode(value, depth)
-  end
-  return "{" .. table.concat(out, ",") .. "}"
-end
-
-local function decode(s)
-  local at = 1
-
-  local function fail(why) error("agent: bad reply at " .. at .. ": " .. why, 0) end
-  local function skip() at = s:find("[^ \t\r\n]", at) or #s + 1 end
-
-  local function literal(word, value)
-    if s:sub(at, at + #word - 1) ~= word then return nil, false end
-    at = at + #word
-    return value, true
-  end
-
-  local value
-
-  local function str()
-    at = at + 1
-    local out = {}
-    while true do
-      local c = s:sub(at, at)
-      if c == "" then fail("unterminated string") end
-      if c == '"' then at = at + 1; return table.concat(out) end
-      if c == "\\" then
-        local e = s:sub(at + 1, at + 1)
-        at = at + 2
-        if e == "n" then out[#out + 1] = "\n"
-        elseif e == "t" then out[#out + 1] = "\t"
-        elseif e == "r" then out[#out + 1] = "\r"
-        elseif e == "b" then out[#out + 1] = "\b"
-        elseif e == "f" then out[#out + 1] = "\f"
-        elseif e == "u" then
-          local hex = s:sub(at, at + 3)
-          at = at + 4
-          local code = tonumber(hex, 16) or fail("bad \\u")
-          -- A lone surrogate or anything past the BMP is not something this surface sends; the
-          -- byte-for-byte cases go through \u00xx, which is what the family escapes control bytes as.
-          out[#out + 1] = (code < 256) and string.char(code)
-            or (utf8 and utf8.char(code) or "?")
-        else out[#out + 1] = e end
-      else
-        out[#out + 1] = c
-        at = at + 1
-      end
-    end
-  end
-
-  function value()
-    skip()
-    local c = s:sub(at, at)
-    if c == '"' then return str() end
-    if c == "{" then
-      at = at + 1
-      local out = {}
-      skip()
-      if s:sub(at, at) == "}" then at = at + 1; return out end
-      while true do
-        skip()
-        if s:sub(at, at) ~= '"' then fail("wanted a key") end
-        local key = str()
-        skip()
-        if s:sub(at, at) ~= ":" then fail("wanted ':'") end
-        at = at + 1
-        out[key] = value()
-        skip()
-        local sep = s:sub(at, at)
-        at = at + 1
-        if sep == "}" then return out end
-        if sep ~= "," then fail("wanted ',' or '}'") end
-      end
-    end
-    if c == "[" then
-      at = at + 1
-      local out = {}
-      skip()
-      if s:sub(at, at) == "]" then at = at + 1; return out end
-      while true do
-        out[#out + 1] = value()
-        skip()
-        local sep = s:sub(at, at)
-        at = at + 1
-        if sep == "]" then return out end
-        if sep ~= "," then fail("wanted ',' or ']'") end
-      end
-    end
-    local got, found = literal("true", true)
-    if found then return got end
-    got, found = literal("false", false)
-    if found then return got end
-    got, found = literal("null", nil)
-    if found then return got end
-
-    local number = s:match("^-?%d+%.?%d*[eE]?[-+]?%d*", at)
-    if number and #number > 0 then
-      at = at + #number
-      return tonumber(number) or fail("bad number")
-    end
-    fail("unexpected " .. (c == "" and "end of reply" or ("'" .. c .. "'")))
-  end
-
-  local out = value()
-  return out
-end
-
--- ---------------------------------------------------------------- the frame
-
--- Four bytes of big-endian length, then the body. Written by hand rather than with `string.pack`,
--- which Lua 5.1 and LuaJIT do not have and one of the siblings might be.
-local function frame(body)
-  local n = #body
-  return string.char(
-    math.floor(n / 16777216) % 256,
-    math.floor(n / 65536) % 256,
-    math.floor(n / 256) % 256,
-    n % 256
-  ) .. body
-end
-
-local function be32(s)
-  return s:byte(1) * 16777216 + s:byte(2) * 65536 + s:byte(3) * 256 + s:byte(4)
-end
-
--- Take the connection down, and say why it went.
---
--- Nothing in a reply says which call it answers: the two ends are held in step by position alone,
--- one reply per call in the order the calls were made. So a call whose reply was abandoned — a
--- read timeout, a frame read in half — has left an answer on the wire that would be read as the
--- *next* call's, and every answer after that would belong to the call before it. The connection
--- goes instead, and the handle with it, so the guard at the top of `Session:call` refuses the
--- next one rather than something further down indexing a nil. Dial again.
---
--- See FAMILY.md, "A caller that abandons a call abandons the connection".
-local function adrift(session, why)
-  if session.handle then
-    session.handle:close()
-    session.handle = nil
-  end
-  return (why or "the connection failed")
-    .. " — this connection is closed, because a reply left on the wire would answer the next call"
-end
-
--- Read exactly `n` bytes, however many reads that takes. Every read this library does is here, so
--- a failure taking the connection with it is settled once and a reader written later inherits it.
-local function exactly(session, n)
-  local parts, have = {}, 0
-  while have < n do
-    local chunk, why = session.handle:recv(n - have)
-    if not chunk then return nil, adrift(session, why) end
-    if #chunk == 0 then return nil, adrift(session, "the session closed the connection") end
-    parts[#parts + 1] = chunk
-    have = have + #chunk
-  end
-  return table.concat(parts)
-end
+-- The revision of the reply shape this library reads. A newer one is refused by name.
+local FAMILY_REVISION = 1
 
 -- ---------------------------------------------------------------- the session
 
@@ -246,30 +47,30 @@ Session.__index = Session
 
 --- Send one call and wait for its answer.
 ---
---- Every call says who is making it. That is not courtesy: a session answers `verbs` to anybody
---- and refuses everything else without a `from`, because every other verb is about that session
---- and a stranger has no standing to ask. The name is taken at face value — one user, one
---- directory, nothing to check it against — and what it buys is a *relation*, worked out at the
---- far end from the project directory rather than from anything in this frame.
+--- The handle frames it: the request is refused over the family's cap before a byte is sent, and
+--- any failure after the first byte leaves the handle closed, so the next call meets "this
+--- connection is closed" rather than the abandoned call's reply. See FAMILY.md, "A caller that
+--- abandons a call abandons the connection".
+---
+--- Every call carries `from`, for a reader of the frame. The far end never believes it: who is
+--- calling is read once when the connection is accepted, from the kernel and the calling
+--- process's environment, and placed in the tree off the project directory.
 function Session:call(name, ...)
   if not self.handle then return nil, "this connection is closed" end
-  local request = encode({ call = name, args = { ... }, from = self.from, token = self.token })
-  -- A send that failed may still have put part of the frame on the wire, and the far end reads
-  -- what follows as the rest of it.
-  local sent, why = self.handle:send(frame(request))
-  if not sent then return nil, adrift(self, why) end
-
-  local head, gone = exactly(self, 4)
-  if not head then return nil, gone end
-  local body, cut = exactly(self, be32(head))
-  if not body then return nil, cut end
-
-  local reply = decode(body)
+  local request = { call = name, from = self.from, token = self.token }
+  if select("#", ...) > 0 then request.args = { ... } end
+  local reply, why = self.handle:call(request, { deadline_ms = self.timeout_ms })
+  if not reply then return nil, why end
+  if type(reply.family) == "number" and reply.family > FAMILY_REVISION then
+    return nil, "the reply is written in family " .. reply.family .. ", newer than this library's "
+      .. FAMILY_REVISION
+  end
   -- A refusal is a reply, not a dropped connection: "only the session that started one may stop
   -- it" says what to fix where "connection reset" does not.
   if not reply.ok then return nil, reply.error or "the session refused the call" end
   -- `result` is a list of return values, so one Lua call answers with what the remote one did.
-  return table.unpack(reply.result or {}, 1, reply.n or #(reply.result or {}))
+  local result = reply.result or {}
+  return table.unpack(result, 1, reply.n or #result)
 end
 
 function Session:close()
@@ -295,8 +96,8 @@ local SURFACE = {
   -- verb reads a role, which is the only reason a session may name itself.
   "role",
   -- The adoption handshake, both halves. `adopt` puts the question and a person answers it;
-  -- `adopted` is that answer coming back, and is believed only from the session the directory
-  -- already calls this one's parent.
+  -- `adopted` is that answer coming back, and is believed only when it quotes the nonce the
+  -- asking session left for it.
   "adopt", "adopted",
   -- A session's own: every other caller is refused. Attached anyway, because the caller that
   -- may ask is the harness holding this very session, and it reaches it through this library.
@@ -338,11 +139,69 @@ end
 
 -- ---------------------------------------------------------------- who is where
 
---- The runtime directory sessions live under.
+--- An environment variable, or `nil` when it is unset, empty, or the host lends no `os.getenv`.
+local function env(name)
+  local getenv = type(os) == "table" and os.getenv or nil
+  local value = getenv and getenv(name) or nil
+  if value == "" then return nil end
+  return value
+end
+
+--- This user's uid, as the host says it: `<host>.uid`, a whole number or a function answering
+--- one. `nil` when no host says. `$UID` is never read.
+local function uid()
+  for _, name in ipairs(FAMILY) do
+    local host = _G[name]
+    local said = type(host) == "table" and host.uid or nil
+    if type(said) == "function" then said = said() end
+    if type(said) == "number" and said >= 0 and said == math.floor(said) then
+      return math.floor(said)
+    end
+  end
+  return nil
+end
+
+--- The first host's `fs.stat`, or `nil` when no host lends one.
+local function host_stat()
+  for _, name in ipairs(FAMILY) do
+    local host = _G[name]
+    local fs = type(host) == "table" and host.fs or nil
+    if type(fs) == "table" and type(fs.stat) == "function" then return fs.stat end
+  end
+  return nil
+end
+
+--- Whether the host's `stat` says `path` is `id`'s directory with no group or other bits. A host
+--- that names no type is taken at its word on owner and mode alone.
+local function private_dir(stat, path, id)
+  if not stat then return false end
+  local ok, s = pcall(stat, path)
+  if not ok or type(s) ~= "table" or type(s.mode) ~= "number" or s.uid ~= id then return false end
+  if s.type ~= nil and s.type ~= "directory" and s.type ~= "dir" then return false end
+  return math.floor(s.mode) % 64 == 0
+end
+
+--- The runtime directory sessions live under, by the family's rule: `$XDG_RUNTIME_DIR/melchior`
+--- when it is absolute and the host's `fs.stat` says it is this uid's and closed, else
+--- `<tmp>/melchior-<uid>`. `nil` when no host says the uid.
 local function runtime()
-  local dir = os.getenv("XDG_RUNTIME_DIR")
-  if dir and dir ~= "" then return dir .. "/melchior" end
-  return "/tmp/melchior-" .. (os.getenv("UID") or "0")
+  local id = uid()
+  if not id then return nil end
+  local dir = env("XDG_RUNTIME_DIR")
+  if dir and dir:sub(1, 1) == "/" and private_dir(host_stat(), dir, id) then
+    return (dir:gsub("/+$", "")) .. "/melchior"
+  end
+  local tmp = env("TMPDIR")
+  if not tmp or tmp:sub(1, 1) ~= "/" then tmp = "/tmp" end
+  return (tmp:gsub("/+$", "")) .. "/melchior-" .. string.format("%d", id)
+end
+
+--- One name as one path segment, the way the session that bound it flattened it: anything that is
+--- not a letter, a digit, `-` or `_` becomes `-`, so a name cannot climb out of its directory.
+local function safe(name)
+  local flat = tostring(name):gsub("[^%w_-]", "-")
+  if flat == "" then return "-" end
+  return flat
 end
 
 --- Who this process belongs to, if it belongs to a session at all.
@@ -359,28 +218,18 @@ function M.me()
   return { project = project, role = role, id = id, full = project .. "/" .. role .. "/" .. id }
 end
 
---- List a directory, however this host can.
----
---- Plain Lua cannot, so this asks the host two ways and gives up rather than guessing. A wrong
---- guess here is the worst kind: it reads as "nobody is running" and sends whoever asked away.
+--- List a directory through the host, or not at all: plain Lua cannot, and running a shell to
+--- do it is not this library's to do.
 local function entries(dir)
   for _, name in ipairs(FAMILY) do
     local host = _G[name]
-    if host and host.fs and host.fs.ls then
+    if type(host) == "table" and host.fs and host.fs.ls then
       local out = {}
       for _, entry in ipairs(host.fs.ls(dir) or {}) do out[#out + 1] = entry.name end
       return out
     end
   end
-  local ok, found = pcall(function()
-    local ls = io.popen("ls -1 '" .. dir .. "' 2>/dev/null")
-    if not ls then return nil end
-    local out = {}
-    for line in ls:lines() do out[#out + 1] = line end
-    ls:close()
-    return out
-  end)
-  return (ok and found) or {}
+  return {}
 end
 
 --- Every session listening in `project`, by id.
@@ -395,8 +244,10 @@ end
 function M.instances(project)
   project = project or (M.me() or {}).project
   if not project then return nil, "no project: pass one, or set MAGI_MELCHIOR_PROJECT" end
+  local base = runtime()
+  if not base then return nil, "no runtime directory: this host does not say whose uid it runs as" end
   local out = {}
-  for _, name in ipairs(entries(runtime() .. "/" .. project)) do
+  for _, name in ipairs(entries(base .. "/" .. safe(project))) do
     if not name:find("%.") and name ~= "" then out[#out + 1] = name end
   end
   table.sort(out)
@@ -408,7 +259,9 @@ end
 --- The id is the part that places it. A role in the path would be a second key for the same
 --- door, and a session that changed what it was for would move.
 local function socket_of(project, id)
-  return runtime() .. "/" .. project .. "/" .. id
+  local base = runtime()
+  if not base then return nil end
+  return base .. "/" .. safe(project) .. "/" .. safe(id)
 end
 
 --- Read a name the way a session would: `id`, `role/id`, or `project/role/id`.
@@ -456,6 +309,10 @@ function M.connect(where)
     end
     named = project .. "/" .. id
     path = socket_of(project, id)
+    if not path then
+      return nil, "no runtime directory to find " .. named
+        .. " in: this host does not say whose uid it runs as"
+    end
   end
 
   local timeout = type(where) == "table" and where.timeout_ms or nil
@@ -463,14 +320,20 @@ function M.connect(where)
   if not handle then
     return nil, "nothing is listening as " .. (named or path) .. (why and (" (" .. why .. ")") or "")
   end
+  if type(handle.call) ~= "function" then
+    handle:close()
+    return nil, "this host's stream has no `call`, and the framing is the stream's to do"
+  end
   return attach(setmetatable({
     handle = handle,
     path = path,
-    -- Put on every call. Without it a session answers `verbs` and refuses everything else,
-    -- which presents as "that instance does not work" rather than as a client that never
-    -- introduced itself.
+    timeout_ms = timeout,
+    -- Put on every call for a reader of the frame. The session takes who is calling from the
+    -- connecting process, never from this.
     from = mine and mine.full or nil,
-    token = os.getenv("MAGI_MELCHIOR_TOKEN") or os.getenv("MAGI_TOKEN"),
+    -- No secret is read from the environment: one never travels there. A caller that holds one
+    -- sets `session.token` itself.
+    token = nil,
   }, Session))
 end
 
@@ -503,7 +366,7 @@ end
 --- This file's own source, as the session it is talking to has it.
 ---
 --- `melchior lua-api` prints it, which is enough for a host that can shell out and useless to one
---- that cannot: a sandboxed VM with no `io.popen` has no way to run it. So a session hands the
+--- that cannot: a sandboxed VM that may not start a program has no way to run it. So a session hands the
 --- library out over the wire too, and a sibling that speaks the framing can fetch the right
 --- vocabulary using the wrong one, in code, with nothing written to disk.
 function M.client(where)

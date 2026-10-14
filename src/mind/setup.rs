@@ -92,7 +92,7 @@ pub fn assigned(name: &str) -> Option<serde_json::Value> {
             let _ = engine.run(&source, &path.display().to_string());
         }
     }
-    if let Ok(given) = std::fs::read_to_string(given()) {
+    if let Some(given) = given().and_then(|path| read_given(&path)) {
         let _ = engine.run(&given, "given");
     }
     engine.harvest();
@@ -104,11 +104,12 @@ pub fn assigned(name: &str) -> Option<serde_json::Value> {
 /// The chunk runs in a VM of its own, so what it changes is what the *next* turn is built from.
 /// A chunk that will not compile or raises is an error and applies nothing.
 pub fn configure(source: &str) -> Result<Applied, String> {
-    configure_into(&given(), source)
+    configure_into(given().as_deref(), source)
 }
 
 /// The same, with the path a parameter so a test can own one rather than share the live file.
-pub fn configure_into(path: &std::path::Path, source: &str) -> Result<Applied, String> {
+/// With no path there is nowhere to keep it, and a chunk that would be kept is refused.
+pub fn configure_into(path: Option<&std::path::Path>, source: &str) -> Result<Applied, String> {
     let mut engine = crate::mind::lua::engine::Engine::new();
     // What the VM holds before the chunk runs; the difference is what the coordinator said.
     engine.harvest();
@@ -147,35 +148,80 @@ pub fn configure_into(path: &std::path::Path, source: &str) -> Result<Applied, S
 
     // Written where the next VM will read it, so it outlives this call.
     if applied.whole() {
+        let Some(path) = path else {
+            return Err(format!(
+                "nowhere to keep it: a coordinator names this session's own directory in ${GIVEN}, \
+                 and none is named"
+            ));
+        };
         remember(path, source)?;
     }
     Ok(applied)
 }
 
-/// Where configuration sent over the wire is kept: the runtime directory rather than the config
-/// directory, so it goes when the machine restarts.
+/// Names the directory a coordinator keeps one session's configuration in.
+pub const GIVEN: &str = "NERV_GIVEN";
+
+/// Where configuration a coordinator sent this session is kept: `melchior.lua` in the directory
+/// `$NERV_GIVEN` names, one per session. No session named, nothing is kept or read.
 #[must_use]
-pub fn given() -> std::path::PathBuf {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("melchior").join("given.lua")
+pub fn given() -> Option<std::path::PathBuf> {
+    given_from(std::env::var_os(GIVEN))
 }
 
-fn remember(path: &std::path::Path, source: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|why| why.to_string())?;
+/// The same, from what the environment said.
+#[must_use]
+pub fn given_from(said: Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
+    let dir = std::path::PathBuf::from(said.filter(|dir| !dir.is_empty())?);
+    dir.is_absolute().then(|| dir.join("melchior.lua"))
+}
+
+/// What a coordinator said, read from a regular file and never through a link.
+#[must_use]
+pub fn read_given(path: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed())
+        .open(path)
+        .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
     }
-    std::fs::write(path, source).map_err(|why| why.to_string())
+    let mut said = String::new();
+    file.take(1 << 20).read_to_string(&mut said).ok()?;
+    Some(said)
+}
+
+/// Keep `source` at `path`: its directory this user's and closed, the file `0600`, written beside
+/// and renamed into place so a reader never meets half of it.
+fn remember(path: &std::path::Path, source: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    if let Some(parent) = path.parent() {
+        crate::places::ensure(parent)?;
+    }
+    let beside = path.with_extension(format!("lua.{}", std::process::id()));
+    let kept = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&beside)
+        .and_then(|mut file| file.write_all(source.as_bytes()))
+        .and_then(|()| std::fs::rename(&beside, path));
+    let _ = std::fs::remove_file(&beside);
+    kept.map_err(|why| format!("{}: {why}", path.display()))
 }
 
 /// Forget what a coordinator said, so a restart reads melchior's own files again.
 pub fn forget() {
-    forget_at(&given());
+    if let Some(path) = given() {
+        forget_at(&path);
+    }
 }
 
-/// The same, for a named file: [`given`] is one path shared by every melchior this user runs, so
-/// a test must forget its own rather than that one.
+/// The same, for a named file.
 pub fn forget_at(path: &std::path::Path) {
     let _ = std::fs::remove_file(path);
 }
@@ -226,7 +272,7 @@ mod tests {
     #[test]
     fn a_setting_it_takes_is_applied_and_named() {
         let path = mine("takes");
-        let applied = configure_into(&path, r#"melchior.thinking = "high""#).expect("runs");
+        let applied = configure_into(Some(&path), r#"melchior.thinking = "high""#).expect("runs");
         assert_eq!(applied.set, vec!["thinking".to_owned()], "{applied:?}");
         assert!(applied.whole());
         forget_at(&path);
@@ -235,7 +281,7 @@ mod tests {
     #[test]
     fn a_setting_it_does_not_take_is_refused_by_name() {
         let path = mine("refused");
-        let applied = configure_into(&path, r#"melchior.colour = "green""#).expect("runs");
+        let applied = configure_into(Some(&path), r#"melchior.colour = "green""#).expect("runs");
         assert!(!applied.whole(), "{applied:?}");
         assert_eq!(applied.refused[0].name, "colour");
         forget_at(&path);
@@ -245,7 +291,7 @@ mod tests {
     fn a_chunk_that_will_not_run_is_an_error_rather_than_a_partial_apply() {
         // The file this call was given, not the shared one `given()` answers.
         let path = mine("broken");
-        let why = configure_into(&path, "this is not lua at all !!").expect_err("must fail");
+        let why = configure_into(Some(&path), "this is not lua at all !!").expect_err("must fail");
         assert!(!why.is_empty());
         assert!(
             !path.exists(),
@@ -257,7 +303,7 @@ mod tests {
     fn a_provider_declared_over_the_wire_is_counted() {
         let path = mine("provider");
         let applied = configure_into(
-            &path,
+            Some(&path),
             r#"melchior.provider("wired", {
                  name = "Wired",
                  api = "openai-completions",
@@ -276,7 +322,7 @@ mod tests {
     #[test]
     fn what_was_given_outlives_the_call() {
         let path = mine("outlives");
-        configure_into(&path, r#"melchior.thinking = "low""#).expect("runs");
+        configure_into(Some(&path), r#"melchior.thinking = "low""#).expect("runs");
         let held = std::fs::read_to_string(&path).expect("kept");
         assert!(held.contains("thinking"), "{held}");
         forget_at(&path);
@@ -284,17 +330,33 @@ mod tests {
     }
 
     #[test]
-    fn forgetting_is_aimed_at_one_file_and_not_at_the_shared_one() {
-        let path = mine("aimed");
-        configure_into(&path, r#"melchior.thinking = "low""#).expect("runs");
-        let live = given();
-        let stood = live.exists();
-        forget_at(&path);
-        assert!(!path.exists(), "it did not forget what it was pointed at");
+    fn what_a_coordinator_said_is_kept_per_session_or_not_at_all() {
+        let dir = std::path::PathBuf::from("/run/session-7");
         assert_eq!(
-            live.exists(),
-            stood,
-            "forgetting one file disturbed the shared one"
+            given_from(Some(dir.clone().into_os_string())),
+            Some(dir.join("melchior.lua"))
         );
+        for unset in [None, Some("".into()), Some("relative/dir".into())] {
+            assert_eq!(given_from(unset.clone()), None, "{unset:?}");
+        }
+        let why = configure_into(None, r#"melchior.thinking = "low""#)
+            .expect_err("kept nowhere and said so");
+        assert!(why.contains(GIVEN), "{why}");
+    }
+
+    #[test]
+    fn what_is_kept_is_this_user_s_alone_and_never_read_through_a_link() {
+        use std::os::unix::fs::MetadataExt;
+        let path = mine("modes");
+        configure_into(Some(&path), r#"melchior.thinking = "low""#).expect("runs");
+        assert_eq!(
+            std::fs::metadata(&path).expect("kept").mode() & 0o777,
+            0o600
+        );
+        assert!(read_given(&path).is_some());
+
+        let link = path.with_file_name("linked.lua");
+        std::os::unix::fs::symlink(&*path, &link).expect("a link");
+        assert_eq!(read_given(&link), None, "a link was followed");
     }
 }

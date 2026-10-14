@@ -52,9 +52,13 @@ fn committed(ledger: &str) -> u64 {
         let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        let id = row["id"].as_str().unwrap_or_default().to_owned();
-        let micros = row["micros"].as_u64().unwrap_or(0);
-        match row["kind"].as_str() {
+        let text = |name: &str| row.get(name).and_then(serde_json::Value::as_str);
+        let id = text("id").unwrap_or_default().to_owned();
+        let micros = row
+            .get("micros")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        match text("kind") {
             Some("reserved") => {
                 open.insert(id, micros);
             }
@@ -106,29 +110,43 @@ fn settle(terms: &Terms, id: &str, row: &serde_json::Value) {
     };
     if rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive).is_ok() {
         let mut row = row.clone();
-        row["kind"] = "settled".into();
-        row["id"] = id.into();
+        if let Some(fields) = row.as_object_mut() {
+            fields.insert("kind".to_owned(), "settled".into());
+            fields.insert("id".to_owned(), id.into());
+        }
         let _ = writeln!(file, "{row}");
     }
 }
 
-/// What the provider said a request used, from the last event of its stream or from its body.
+/// What the provider said a request used, gathered from its body or from every event of its
+/// stream: OpenAI's `usage`, Anthropic's `usage` and `message.usage` split across events, and
+/// Gemini's `usageMetadata`. A count said more than once is taken at its largest.
 fn usage_of(answer: &str) -> Option<serde_json::Value> {
     let whole = serde_json::from_str::<serde_json::Value>(answer).ok();
     let events = answer
         .lines()
-        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|line| line.strip_prefix("data:").map(str::trim_start))
         .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok());
-    whole
-        .into_iter()
-        .chain(events)
-        .filter_map(|event| {
-            event
-                .get("usage")
-                .filter(|usage| usage.is_object())
-                .cloned()
-        })
-        .next_back()
+    let mut merged = serde_json::Map::new();
+    for event in whole.into_iter().chain(events) {
+        let said = [
+            event.get("usage"),
+            event.pointer("/message/usage"),
+            event.get("usageMetadata"),
+        ];
+        for usage in said.into_iter().flatten().filter_map(|it| it.as_object()) {
+            for (key, value) in usage {
+                let larger = merged
+                    .get(key)
+                    .and_then(serde_json::Value::as_f64)
+                    .is_none_or(|held| value.as_f64().is_some_and(|now| now > held));
+                if larger {
+                    merged.insert(key.clone(), value.clone());
+                }
+            }
+        }
+    }
+    (!merged.is_empty()).then_some(serde_json::Value::Object(merged))
 }
 
 /// What the provider said went wrong, from its body or from inside a stream it answered 200 to.
@@ -138,37 +156,63 @@ fn failure_of(answer: &str) -> Option<String> {
         .lines()
         .filter_map(|line| line.strip_prefix("data: "))
         .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok());
-    whole
-        .into_iter()
-        .chain(events)
-        .find_map(|event| event["error"]["message"].as_str().map(str::to_owned))
+    whole.into_iter().chain(events).find_map(|event| {
+        event
+            .get("error")?
+            .get("message")?
+            .as_str()
+            .map(str::to_owned)
+    })
 }
 
+/// The prompt and completion counts, under whichever names the provider used.
+const PROMPT: &[&str] = &["prompt_tokens", "input_tokens", "promptTokenCount"];
+const COMPLETION: &[&str] = &["completion_tokens", "output_tokens", "candidatesTokenCount"];
+
 /// What to charge: the provider's own figure where it gives one, else the tokens at list price,
-/// else — nothing having been reported — the reservation, which is the most it could have been.
+/// else — nothing it said being a count this reads — the reservation, the most it could have
+/// been. A figure that is not a number, or is below zero, is no figure.
 fn charge(terms: &Terms, usage: Option<&serde_json::Value>, reserved: u64) -> u64 {
     let Some(usage) = usage else {
         return reserved;
     };
     if let Some(cost) = usage.get("cost").and_then(serde_json::Value::as_f64) {
-        return (cost * 1_000_000.0).ceil() as u64;
+        if !cost.is_finite() || cost < 0.0 {
+            return reserved;
+        }
+        return (cost * 1_000_000.0).ceil().min(u64::MAX as f64) as u64;
     }
-    let count = |key: &str| {
-        usage
-            .get(key)
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0)
+    let count = |names: &[&str]| {
+        names
+            .iter()
+            .find_map(|name| usage.get(*name).and_then(serde_json::Value::as_u64))
     };
-    (count("prompt_tokens") * terms.input_price + count("completion_tokens") * terms.output_price)
+    let (Some(prompt), completion) = (count(PROMPT), count(COMPLETION)) else {
+        return reserved;
+    };
+    prompt
+        .saturating_mul(terms.input_price)
+        .saturating_add(completion.unwrap_or(0).saturating_mul(terms.output_price))
         .div_ceil(1_000_000)
 }
 
-async fn request(socket: &mut tokio::net::TcpStream) -> std::io::Result<Option<String>> {
+/// The most a request's headers and body may hold, checked before anything is allocated for them.
+const HEAD: usize = 64 * 1024;
+const BODY: usize = 32 * 1024 * 1024;
+
+/// How long the upstream may take to answer, and to say each next thing once it has begun.
+const QUIET: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// One request's body, or why it will not be read.
+async fn request<S: AsyncReadExt + Unpin>(socket: &mut S) -> std::io::Result<Result<String, u16>> {
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
+        if head.len() >= HEAD {
+            return Ok(Err(431));
+        }
         if socket.read(&mut byte).await? == 0 {
-            return Ok(None);
+            return Ok(Err(0));
         }
         head.push(byte[0]);
     }
@@ -180,9 +224,58 @@ async fn request(socket: &mut tokio::net::TcpStream) -> std::io::Result<Option<S
                 .and_then(|n| n.trim().parse::<usize>().ok())
         })
         .unwrap_or(0);
+    if size > BODY {
+        return Ok(Err(413));
+    }
     let mut body = vec![0; size];
     socket.read_exact(&mut body).await?;
-    Ok(Some(String::from_utf8_lossy(&body).into_owned()))
+    Ok(Ok(String::from_utf8_lossy(&body).into_owned()))
+}
+
+/// A reservation not yet settled: settled when this goes, however the request ended — a caller
+/// that hung up, an upstream that failed, or the task dropped.
+struct Unsettled<'a> {
+    terms: &'a Terms,
+    id: String,
+    reserved: u64,
+    began: std::time::Instant,
+    asked: serde_json::Value,
+    status: u16,
+    answer: Vec<u8>,
+}
+
+impl Drop for Unsettled<'_> {
+    fn drop(&mut self) {
+        let answer = String::from_utf8_lossy(&self.answer);
+        let usage = usage_of(&answer);
+        let failure = failure_of(&answer);
+        // A request refused outright, or failed inside its stream with nothing used, was not
+        // charged for; anything else is.
+        let refused = !(200..300).contains(&self.status) || failure.is_some();
+        let micros = if usage.is_none() && refused {
+            0
+        } else {
+            charge(self.terms, usage.as_ref(), self.reserved)
+        };
+        let row = serde_json::json!({
+            "micros": micros, "reserved": self.reserved, "status": self.status,
+            "ms": self.began.elapsed().as_millis() as u64, "usage": usage,
+            "model": self.terms.model, "error": failure,
+        });
+        settle(self.terms, &self.id, &row);
+        if let Some(path) = &self.terms.record
+            && let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+        {
+            let _ = writeln!(
+                file,
+                "{}",
+                serde_json::json!({"id": self.id, "request": self.asked, "outcome": row})
+            );
+        }
+    }
 }
 
 async fn refuse(socket: &mut tokio::net::TcpStream, status: u16, why: &str) -> std::io::Result<()> {
@@ -201,11 +294,18 @@ async fn serve(
     socket: &mut tokio::net::TcpStream,
     id: String,
 ) -> std::io::Result<()> {
-    let Some(body) = request(socket).await? else {
-        return Ok(());
+    let body = match request(socket).await? {
+        Ok(body) => body,
+        Err(0) => return Ok(()),
+        Err(status) => {
+            return refuse(socket, status, "that request is larger than this reads").await;
+        }
     };
     let asked: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-    let model = asked["model"].as_str().unwrap_or_default();
+    let model = asked
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
     if model != terms.model {
         let why = format!("only `{}` is authorized here, not `{model}`", terms.model);
         return refuse(socket, 403, &why).await;
@@ -214,82 +314,54 @@ async fn serve(
     if let Err(why) = reserve(terms, &id, reserved) {
         return refuse(socket, 402, &why).await;
     }
+    let mut held = Unsettled {
+        terms,
+        id,
+        reserved,
+        began: std::time::Instant::now(),
+        asked,
+        status: 0,
+        answer: Vec::new(),
+    };
 
-    let began = std::time::Instant::now();
     let sent = client
         .post(format!("{}{}", terms.upstream, terms.path))
         .bearer_auth(&terms.key)
         .header("Content-Type", "application/json")
-        .body(body.clone())
-        .send()
-        .await;
-    let mut answer = Vec::new();
-    let status = match sent {
-        Ok(mut reply) => {
-            let status = reply.status().as_u16();
-            let kind = reply
-                .headers()
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("application/json")
-                .to_owned();
-            let head = format!(
-                "HTTP/1.1 {status} Metered\r\nContent-Type: {kind}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
-            );
-            socket.write_all(head.as_bytes()).await?;
-            while let Ok(Some(part)) = reply.chunk().await {
-                answer.extend_from_slice(&part);
-                socket
-                    .write_all(format!("{:x}\r\n", part.len()).as_bytes())
-                    .await?;
-                socket.write_all(&part).await?;
-                socket.write_all(b"\r\n").await?;
-                socket.flush().await?;
-            }
-            socket.write_all(b"0\r\n\r\n").await?;
-            status
+        .body(body)
+        .send();
+    let mut reply = match tokio::time::timeout(QUIET, sent).await {
+        Ok(Ok(reply)) => reply,
+        Ok(Err(why)) => {
+            let why = format!("the provider could not be reached: {}", why.without_url());
+            return refuse(socket, 502, &why).await;
         }
-        Err(why) => {
-            refuse(
-                socket,
-                502,
-                &format!("the provider could not be reached: {why}"),
-            )
+        Err(_) => return refuse(socket, 504, "the provider did not answer in time").await,
+    };
+    held.status = reply.status().as_u16();
+    let kind = reply
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_owned();
+    let head = format!(
+        "HTTP/1.1 {} Metered\r\nContent-Type: {kind}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+        held.status
+    );
+    socket.write_all(head.as_bytes()).await?;
+    while let Ok(Ok(Some(part))) = tokio::time::timeout(QUIET, reply.chunk()).await {
+        if held.answer.len() < BODY {
+            held.answer.extend_from_slice(&part);
+        }
+        socket
+            .write_all(format!("{:x}\r\n", part.len()).as_bytes())
             .await?;
-            0
-        }
-    };
-
-    let answer = String::from_utf8_lossy(&answer);
-    let usage = usage_of(&answer);
-    let failure = failure_of(&answer);
-    // A request refused outright, or failed inside its stream with nothing used, was not charged
-    // for; anything else is.
-    let refused = !(200..300).contains(&status) || failure.is_some();
-    let micros = if usage.is_none() && refused {
-        0
-    } else {
-        charge(terms, usage.as_ref(), reserved)
-    };
-    let row = serde_json::json!({
-        "micros": micros, "reserved": reserved, "status": status,
-        "ms": began.elapsed().as_millis() as u64, "usage": usage, "model": terms.model,
-        "error": failure,
-    });
-    settle(terms, &id, &row);
-    if let Some(path) = &terms.record
-        && let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-    {
-        let _ = writeln!(
-            file,
-            "{}",
-            serde_json::json!({"id": id, "request": asked, "outcome": row})
-        );
+        socket.write_all(&part).await?;
+        socket.write_all(b"\r\n").await?;
+        socket.flush().await?;
     }
-    Ok(())
+    socket.write_all(b"0\r\n\r\n").await
 }
 
 fn flags() -> BTreeMap<String, String> {
@@ -334,7 +406,12 @@ async fn main() -> std::io::Result<()> {
         output_price: number("output-price"),
         output_bound: number("output-bound"),
     });
-    let client = reqwest::Client::new();
+    // A redirect followed would carry the key to wherever it pointed.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(std::io::Error::other)?;
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
     println!("PORT={}", listener.local_addr()?.port());
     std::io::stdout().flush()?;
@@ -356,5 +433,60 @@ async fn main() -> std::io::Result<()> {
         tokio::spawn(async move {
             let _ = serve(&terms, &client, &mut socket, id).await;
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn terms() -> Terms {
+        Terms {
+            upstream: String::new(),
+            path: String::new(),
+            model: "m".into(),
+            key: String::new(),
+            ledger: String::new(),
+            record: None,
+            cap_micros: 0,
+            input_price: 1_000_000,
+            output_price: 2_000_000,
+            output_bound: 0,
+        }
+    }
+
+    #[test]
+    fn every_provider_s_counts_are_charged_and_none_is_free() {
+        let anthropic = "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10}}}\n\
+                         data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n";
+        assert_eq!(charge(&terms(), usage_of(anthropic).as_ref(), 999), 20);
+        let gemini =
+            "data: {\"usageMetadata\":{\"promptTokenCount\":7,\"candidatesTokenCount\":3}}\n";
+        assert_eq!(charge(&terms(), usage_of(gemini).as_ref(), 999), 13);
+        let openai = r#"{"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+        assert_eq!(charge(&terms(), usage_of(openai).as_ref(), 999), 3);
+    }
+
+    #[test]
+    fn a_figure_that_is_no_figure_is_charged_at_the_reservation() {
+        let unknown = serde_json::json!({"tokens_in": 10});
+        assert_eq!(charge(&terms(), Some(&unknown), 777), 777);
+        for cost in [f64::NAN, -1.0, f64::INFINITY] {
+            let said = serde_json::json!({"cost": cost});
+            assert_eq!(charge(&terms(), Some(&said), 777), 777, "{cost}");
+        }
+        assert_eq!(charge(&terms(), None, 777), 777);
+    }
+
+    #[tokio::test]
+    async fn headers_and_a_body_past_their_bound_are_refused_unread() {
+        let mut long = std::io::Cursor::new(vec![b'x'; HEAD + 10]);
+        assert_eq!(request(&mut long).await.expect("read"), Err(431));
+        let huge = format!("POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n", BODY + 1);
+        let mut huge = std::io::Cursor::new(huge.into_bytes());
+        assert_eq!(request(&mut huge).await.expect("read"), Err(413));
+        let fine = b"POST / HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}".to_vec();
+        let mut fine = std::io::Cursor::new(fine);
+        assert_eq!(request(&mut fine).await.expect("read"), Ok("{}".to_owned()));
     }
 }

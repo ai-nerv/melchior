@@ -31,8 +31,12 @@ Every design decision in it follows from that:
   about itself; here the thing that publishes it is the thing being asked about.
 - **The walls are relations, not scopes.** `policy::between` decides what one session may do to
   another from *how they are related* — parent, child, sibling, cousin, elsewhere — read off the
-  directory, never from what the caller says. A2A has no notion of the caller's relationship to
-  the callee; authorisation is a bearer token and whatever the receiving service decides.
+  directory. Who is calling is pinned when the connection is accepted, never taken from the call:
+  the calling process's environment names a session, which is attribution and places it in the
+  tree; acting as a session's own takes the kernel's process tree, `/proc/<pid>/stat` read at
+  accept, and `stop` takes a secret the session was handed. A2A has no notion of the caller's
+  relationship to the callee; authorisation is a bearer token and whatever the receiving service
+  decides.
 - **A person is in the loop by construction.** `Then::Ask` carries a question up to a human and
   holds the call until they answer. A2A's task lifecycle has `input-required`, which is the same
   shape — but for a *remote* user, over a stream, with no way to say "the person at this

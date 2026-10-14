@@ -75,6 +75,9 @@ fn main() -> std::io::Result<()> {
     }
 }
 
+/// How many requests to be taken on may wait for a person at once.
+const ASKED_AT_ONCE: usize = 8;
+
 /// What a person gets from `melchior --help`, and from a bare `melchior` on stderr.
 const USAGE: &str = "\
 usage: melchior serve | tool | fork | brief | models | card | ask | client | verbs
@@ -89,6 +92,8 @@ usage: melchior serve | tool | fork | brief | models | card | ask | client | ver
   verbs     what a session answers           [--json|--cbor]
 ";
 
+#[path = "main/adopting.rs"]
+mod adopting;
 mod ending;
 #[path = "main/roster.rs"]
 mod roster;
@@ -107,10 +112,12 @@ enum Told {
         /// For how long, in seconds.
         #[serde(default)]
         working_for: u64,
-        /// Unread count to truncate the inbox to; `None` (a parked child that does not count) leaves
-        /// it alone rather than wiping it to zero.
+        /// How many are still unread, keeping the newest; `None` leaves the inbox alone.
         #[serde(default)]
         waiting: Option<usize>,
+        /// The ids of messages the harness has read, taken out by id; outranks `waiting`.
+        #[serde(default)]
+        read: Option<Vec<String>>,
         /// The coarse phase, if the harness reports one; defaulted so an older one still updates the rest.
         #[serde(default)]
         phase: Option<String>,
@@ -119,6 +126,9 @@ enum Told {
         #[serde(default)]
         spent: Option<Vec<serde_json::Value>>,
     },
+    /// The secret a `stop` must quote, handed over on this pipe rather than in the environment.
+    /// The first one is taken and any later one ignored.
+    Token { token: String },
     /// What the person said to a request this session was asked to answer.
     Answered {
         /// Which request, as [`Heard::Asked`] named it.
@@ -145,6 +155,8 @@ enum Heard {
     },
     /// A message arrived for this session.
     Message {
+        /// Which message, for the harness to name once it has read it.
+        id: String,
         /// Who sent it, as `project/role/id`.
         who: String,
         sort: String,
@@ -216,46 +228,6 @@ struct Peer {
     spent: Vec<serde_json::Value>,
 }
 
-/// Everyone listening in `project`, with each one's live status asked of its socket. Blocking — it
-/// dials every peer — so it runs on the poller thread, never the async loop. `me` is the asker each
-/// dial names.
-fn around(me: &melchior::identity::Identity) -> Vec<Peer> {
-    let project = &me.project;
-    // The claims once, mapped by the id of whoever holds each, rather than dialled per peer.
-    let claims: std::collections::BTreeMap<String, String> =
-        melchior::directory::claims::all(project)
-            .into_iter()
-            .map(|held| (id_of(&held.by), held.about))
-            .collect();
-    melchior::directory::listening(project)
-        .into_iter()
-        .map(|id| {
-            let status = status::status_of(project, &id, me).unwrap_or_default();
-            Peer {
-                role: melchior::directory::roles::role_in(project, &id)
-                    .map_or_else(|| melchior::directory::roles::MAIN.to_owned(), |it| it.name),
-                ui: melchior::directory::screens::ui_in(project, &id)
-                    .map(|at| at.display().to_string()),
-                parent: melchior::directory::parent_note(project, &id),
-                session: melchior::directory::sessions::session_in(project, &id),
-                claim: claims.get(&id).cloned(),
-                busy: status.busy,
-                working_for: status.working_for,
-                waiting: status.waiting,
-                phase: status.phase,
-                cause: status.cause,
-                spent: status.spent,
-                id,
-            }
-        })
-        .collect()
-}
-
-/// The id out of a `project/role/id`, or the whole of a bare one.
-fn id_of(full: &str) -> String {
-    full.rsplit('/').next().unwrap_or(full).to_owned()
-}
-
 /// `melchior fork` — a name and a secret for a session this one is about to start, printed as
 /// JSON. `--role` and `--role-description` say what the child is for at birth, so it is never on
 /// the roster described as `main` while a coordinator is routing by description.
@@ -286,7 +258,7 @@ fn fork(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<(
     let Some(child) = reply.result.first() else {
         return Err(std::io::Error::other("mint answered nothing"));
     };
-    melchior::noted!("fork: minted {child}");
+    melchior::noted!("fork: minted {}", melchior::noted::redacted(child));
     println!("{child}");
     Ok(())
 }
@@ -302,7 +274,20 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
 
     let me = match (melchior::directory::mine(), asked.get("project")) {
         (Some(me), _) => me,
-        (None, Some(project)) => melchior::directory::free_in(project),
+        // A root names itself, then becomes itself again with that name in its environment, so
+        // every call it makes is attributed to it the way a child's are. Same pid, same pipes.
+        (None, Some(project)) => {
+            use std::os::unix::process::CommandExt;
+            let me = melchior::directory::free_in(project);
+            let why = std::process::Command::new("/proc/self/exe")
+                .arg0(melchior::NAME)
+                .args(std::env::args_os().skip(1))
+                .env(melchior::inherited::PROJECT, &me.project)
+                .env(melchior::inherited::ID, &me.id)
+                .exec();
+            eprintln!("melchior serve: could not take the name {}: {why}", me.id);
+            std::process::exit(1);
+        }
         (None, None) => {
             eprintln!(
                 "melchior serve: no session to be. Pass --project, or set {} and {} — one of them \
@@ -352,7 +337,8 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         let (about_tx, about_rx) = tokio::sync::watch::channel(melchior::answering::About {
             me: me.clone(),
             parent: melchior::directory::parent_of(&me),
-            token: melchior::directory::token(),
+            // Only ever from the pipe: see `Told::Token`.
+            token: None,
             busy: false,
             working_for: 0,
             inbox: Vec::new(),
@@ -362,6 +348,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
             spent: Vec::new(),
             adopted_token: None,
         });
+        let about_tx = std::sync::Arc::new(about_tx);
         let (arrived_tx, mut arrived) = tokio::sync::mpsc::channel(64);
         let (asked_tx, mut asked) = tokio::sync::mpsc::channel(16);
         let (adopted_tx, mut adopted) = tokio::sync::mpsc::channel(4);
@@ -376,8 +363,9 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         {
             let me = me.clone();
             std::thread::spawn(move || {
+                let mut known = std::collections::BTreeMap::new();
                 loop {
-                    if roster_tx.blocking_send(around(&me)).is_err() {
+                    if roster_tx.blocking_send(roster::around(&me, &mut known)).is_err() {
                         return;
                     }
                     std::thread::sleep(std::time::Duration::from_secs(2));
@@ -385,23 +373,23 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
             });
         }
 
-        // The note beside the socket, so the tree can be read off the directory. Refused rather
-        // than served when it will not land: without it a session comes up as a main, with a
-        // main's reach.
-        if let Err(why) = melchior::directory::announce(&me, &role, ui.as_deref()) {
-            eprintln!("melchior serve: {why}");
-            std::process::exit(1);
-        }
+        // Bound first, under its lock, so a second session given the same name fails here and
+        // writes over none of the first's notes.
         let at = melchior::directory::listening_at(&me);
-
-        // Bound here, and only then announced: saying "listening" first announces a future.
-        let listener = match melchior::serving::listening_on(&at).await {
-            Ok(listener) => listener,
+        let (listener, lease) = match melchior::serving::listening_on(&at).await {
+            Ok(bound) => bound,
             Err(why) => {
                 eprintln!("melchior serve: {}: {why}", at.display());
                 std::process::exit(1);
             }
         };
+        // Then the notes, so the tree can be read off the directory. Refused rather than served
+        // when they will not land: without them a session reads as a main.
+        if let Err(why) = melchior::directory::announce(&me, &role, ui.as_deref()) {
+            eprintln!("melchior serve: {why}");
+            lease.release();
+            std::process::exit(1);
+        }
         say(&Heard::Listening {
             at: at.display().to_string(),
             named: me.full(),
@@ -450,25 +438,41 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
             }
         });
 
-        let mut inbox: Vec<melchior::wire::Message> = Vec::new();
         // Requests not yet answered. Held here because the answer arrives on the pipe, long after
         // the connection that carried the question has closed.
         let mut pending: Vec<melchior::wire::Request> = Vec::new();
         loop {
             tokio::select! {
+                // One inbox, the one `About` holds; bounded, so a ring runs out of room.
                 Some(message) = arrived.recv() => {
                     say(&Heard::Message {
+                        id: message.id.clone(),
                         who: message.from.clone(),
                         sort: name_of(message.sort),
                         text: message.text.clone(),
                         about: message.about.clone(),
                     });
-                    // Bounded, so a handoff that has come back round runs out of somewhere to go.
-                    melchior::answering::keeping::kept(&mut inbox, message);
-                    about_tx.send_modify(|about| about.inbox.clone_from(&inbox));
+                    about_tx.send_modify(|about| {
+                        melchior::answering::keeping::kept(&mut about.inbox, message);
+                    });
                 }
-                // Held until the person answers: the call that carried it was already replied to.
+                // Held until the person answers, one per asker and a few at most.
                 Some(request) = asked.recv() => {
+                    pending.retain(|held| held.from != request.from);
+                    if pending.len() >= ASKED_AT_ONCE {
+                        let (me, them) = (me.clone(), request.from.clone());
+                        tokio::task::spawn_blocking(move || {
+                            if let Some(them) = melchior::identity::Identity::read(&them) {
+                                let said = format!(
+                                    "`{}` has {ASKED_AT_ONCE} requests to be taken on waiting \
+                                     already; ask again later.",
+                                    me.full()
+                                );
+                                melchior::directory::answer_request(&them, &me, &said);
+                            }
+                        });
+                        continue;
+                    }
                     say(&Heard::Asked {
                         id: request.id.clone(),
                         who: request.from.clone(),
@@ -502,7 +506,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                 // `select!` arm whose pattern does not match is disabled, not taken.
                 told = told.recv() => match told {
                     None => break,
-                    Some(Told::Doing { busy, working_for, waiting, phase, cause, spent }) => {
+                    Some(Told::Doing { busy, working_for, waiting, read, phase, cause, spent }) => {
                         about_tx.send_modify(|about| {
                             about.busy = busy;
                             about.working_for = working_for;
@@ -511,46 +515,33 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                             if let Some(spent) = spent {
                                 about.spent = spent;
                             }
-                            // Only when the harness counts, so one that does not wipe ours to zero.
-                            if let Some(waiting) = waiting {
-                                about.inbox.truncate(waiting.min(about.inbox.len()));
+                            melchior::answering::keeping::consumed(
+                                &mut about.inbox,
+                                read.as_deref(),
+                                waiting,
+                            );
+                        });
+                    }
+                    Some(Told::Token { token }) => {
+                        about_tx.send_if_modified(|about| {
+                            let first = about.token.is_none();
+                            if first {
+                                about.token = Some(token);
                             }
+                            first
                         });
                     }
                     // Written by the side that consented: an asker writing its own note would be
-                    // a session appointing its own parent.
+                    // a session appointing its own parent. Told either way, off the loop.
                     Some(Told::Answered { id, accept, handover }) => {
                         let Some(at) = pending.iter().position(|held| held.id == id) else {
                             continue;
                         };
                         let request = pending.remove(at);
-                        // The acceptance is downgraded rather than reported as one when the note
-                        // will not write.
-                        let mut accept = accept;
-                        // The secret that lets this session stop the one it takes on, minted only
-                        // when the note wrote, held beside `mint`'s and handed over on the call.
-                        let mut secret: Option<String> = None;
-                        if accept && let Some(them) = melchior::identity::Identity::read(&request.from) {
-                            if let Err(why) = melchior::directory::adopted(&them, &me.id) {
-                                eprintln!("melchior: {} was not taken on: {why}", request.from);
-                                accept = false;
-                            } else {
-                                let minted = melchior::identity::secret();
-                                about_tx.send_modify(|about| {
-                                    about.minted.insert(them.id.clone(), minted.clone());
-                                });
-                                secret = Some(minted);
-                            }
-                        }
-                        // Told either way: a silence the asker could not tell from a refusal
-                        // would leave it waiting for good.
-                        melchior::directory::answer_request(
-                            &request.from,
-                            &me,
-                            accept,
-                            handover.as_deref(),
-                            secret.as_deref(),
-                        );
+                        let (me, about) = (me.clone(), std::sync::Arc::clone(&about_tx));
+                        tokio::task::spawn_blocking(move || {
+                            adopting::answered(&me, &request, accept, handover.as_deref(), &about);
+                        });
                     }
                 },
                 Some(()) = stopped.recv() => {
@@ -565,7 +556,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                         let watched =
                             melchior::directory::watches::watched_by(&me.project, &me.id);
                         for signal in
-                            signal_changes(&me.id, my_parent.as_deref(), &watched, &listed, &now)
+                            roster::signal_changes(&me.id, my_parent.as_deref(), &watched, &listed, &now)
                         {
                             say(&signal);
                         }
@@ -588,7 +579,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         }
         melchior::noted!("serve: {} ends", me.full());
         melchior::directory::forget(&me);
-        let _ = std::fs::remove_file(&at);
+        lease.release();
         // And the directory itself, which refuses while anybody else is still in the project.
         melchior::directory::leave(&me.project);
         Ok(())
@@ -600,53 +591,6 @@ fn name_of(sort: melchior::wire::Sort) -> String {
         .ok()
         .and_then(|value| value.as_str().map(ToOwned::to_owned))
         .unwrap_or_else(|| "note".to_owned())
-}
-
-/// A [`Heard::Signal`] for each watched agent whose phase changed since the last roster. Watched is
-/// this session's children (peers whose parent is `me`) and its parent — the mechanical edges a
-/// coordinator reacts to. Only a real change fires, a peer that reports no phase never does, and
-/// one that vanishes mid-work is signalled as `lost`.
-fn signal_changes(
-    me: &str,
-    my_parent: Option<&str>,
-    watched: &std::collections::BTreeSet<String>,
-    was: &[Peer],
-    now: &[Peer],
-) -> Vec<Heard> {
-    let kin_of = |peer: &Peer| {
-        if peer.parent.as_deref() == Some(me) {
-            Some("child")
-        } else if Some(peer.id.as_str()) == my_parent {
-            Some("parent")
-        } else {
-            watched.contains(&peer.id).then_some("watched")
-        }
-    };
-    let signal = |peer: &Peer, kin: &str, kind: &str| Heard::Signal {
-        from: peer.id.clone(),
-        kind: kind.to_owned(),
-        kin: kin.to_owned(),
-        cause: peer.cause.clone(),
-    };
-    let mut out = Vec::new();
-    for peer in now {
-        let (Some(kin), Some(phase)) = (kin_of(peer), peer.phase.as_deref()) else {
-            continue;
-        };
-        let before = was.iter().find(|p| p.id == peer.id);
-        if before.and_then(|p| p.phase.as_deref()) != Some(phase) {
-            out.push(signal(peer, kin, phase));
-        }
-    }
-    // One that left the roster mid-work was killed, and would be waited on for ever.
-    for left in was.iter().filter(|p| !now.iter().any(|q| q.id == p.id)) {
-        if let Some(kin) = kin_of(left)
-            && !matches!(left.phase.as_deref(), Some("gone" | "finished"))
-        {
-            out.push(signal(left, kin, "lost"));
-        }
-    }
-    out
 }
 
 /// One line to the parent, flushed every time because the parent is waiting on it.
@@ -703,7 +647,8 @@ fn brief(project: Option<&str>, asked: &std::collections::BTreeMap<String, Strin
     if named.is_empty() {
         return;
     }
-    let me = melchior::directory::mine().or_else(|| project.map(melchior::directory::free_in));
+    let me = melchior::directory::mine()
+        .or_else(|| project.map(|project| melchior::identity::free_of(project, &[])));
     let standing = me.map(|me| melchior::verbs::Standing {
         inbox: melchior::directory::inbox_of(&me),
         forked: melchior::directory::children(&me),

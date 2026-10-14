@@ -11,9 +11,31 @@ use serde::de::DeserializeOwned;
 use std::io::{Read, Write};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-/// The largest frame either end will read or write: the socket is reachable by anything running
-/// as this user, and an unbounded read is a way to make a session allocate until it dies.
-pub const MOST: usize = 1 << 20;
+/// The largest frame either end will read or write, the family's one number: 16 MiB.
+pub const MOST: usize = 1 << 24;
+
+/// A frame over [`MOST`], told apart from a body that will not decode: the first is answered
+/// `failed` and the second `refused`.
+#[derive(Debug)]
+pub struct TooLarge(pub usize);
+
+impl std::fmt::Display for TooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "a frame of {} bytes is over the family's cap of {MOST} bytes",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for TooLarge {}
+
+/// Whether `why` is a frame over the cap.
+#[must_use]
+pub fn too_large(why: &std::io::Error) -> bool {
+    why.get_ref().is_some_and(|inner| inner.is::<TooLarge>())
+}
 
 /// Which encoding a body is in. Nothing is negotiated: a body says which it is in its first
 /// byte, since JSON's top level here is an object or an array and so begins `{` or `[`, while
@@ -57,11 +79,11 @@ impl Wire {
     }
 }
 
-/// Encode one value in `how`, framed.
-fn framed<T: Serialize>(how: Wire, value: &T) -> std::io::Result<Vec<u8>> {
+/// Encode one value in `how`, framed, refused with [`TooLarge`] over the cap.
+pub fn framed<T: Serialize>(how: Wire, value: &T) -> std::io::Result<Vec<u8>> {
     let body = how.encode(value)?;
     if body.len() > MOST {
-        return Err(std::io::Error::other("that is too much to say at once"));
+        return Err(std::io::Error::other(TooLarge(body.len())));
     }
     let mut out = Vec::with_capacity(body.len() + 4);
     out.extend_from_slice(&u32::try_from(body.len()).unwrap_or(u32::MAX).to_be_bytes());
@@ -73,9 +95,13 @@ fn framed<T: Serialize>(how: Wire, value: &T) -> std::io::Result<Vec<u8>> {
 fn expecting(header: [u8; 4]) -> std::io::Result<usize> {
     let len = u32::from_be_bytes(header) as usize;
     if len > MOST {
-        return Err(std::io::Error::other(format!(
-            "a frame of {len} bytes is beyond what this socket reads"
-        )));
+        return Err(std::io::Error::other(TooLarge(len)));
+    }
+    if len == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "a frame of no bytes is malformed",
+        ));
     }
     Ok(len)
 }
@@ -93,6 +119,30 @@ pub async fn read_wire<T: DeserializeOwned, R: AsyncRead + Unpin>(
     from.read_exact(&mut header).await?;
     let mut body = vec![0_u8; expecting(header)?];
     from.read_exact(&mut body).await?;
+    Ok((Wire::read_any(&body)?, Wire::of(&body)))
+}
+
+/// [`read_wire`] under two deadlines: `idle` for the first byte to come, then `frame` for the rest
+/// of the frame. Either passing is `TimedOut`.
+pub async fn read_wire_within<T: DeserializeOwned, R: AsyncRead + Unpin>(
+    from: &mut R,
+    idle: std::time::Duration,
+    frame: std::time::Duration,
+) -> std::io::Result<(T, Wire)> {
+    let late = |what: &str| std::io::Error::new(std::io::ErrorKind::TimedOut, what.to_owned());
+    let mut header = [0_u8; 4];
+    tokio::time::timeout(idle, from.read_exact(&mut header[..1]))
+        .await
+        .map_err(|_| late("nothing was said in time"))??;
+    let rest = async {
+        from.read_exact(&mut header[1..]).await?;
+        let mut body = vec![0_u8; expecting(header)?];
+        from.read_exact(&mut body).await?;
+        Ok::<_, std::io::Error>(body)
+    };
+    let body = tokio::time::timeout(frame, rest)
+        .await
+        .map_err(|_| late("a frame stopped half way"))??;
     Ok((Wire::read_any(&body)?, Wire::of(&body)))
 }
 
@@ -116,11 +166,17 @@ pub async fn write_as<T: Serialize, W: AsyncWrite + Unpin>(
 
 /// Read one message from a blocking stream.
 pub fn read_from<T: DeserializeOwned, R: Read>(from: &mut R) -> std::io::Result<T> {
+    Wire::read_any(&read_body(from)?)
+}
+
+/// Read one frame's body from a blocking stream, its length checked against [`MOST`] before
+/// anything is allocated for it.
+pub fn read_body<R: Read>(from: &mut R) -> std::io::Result<Vec<u8>> {
     let mut header = [0_u8; 4];
     from.read_exact(&mut header)?;
     let mut body = vec![0_u8; expecting(header)?];
     from.read_exact(&mut body)?;
-    Wire::read_any(&body)
+    Ok(body)
 }
 
 /// Write one message to a blocking stream.
@@ -205,6 +261,32 @@ mod tests {
     }
 
     #[test]
+    fn the_cap_is_sixteen_mebibytes_and_a_frame_of_nothing_is_malformed() {
+        assert_eq!(MOST, 16_777_216);
+        let at = u32::try_from(MOST).expect("fits").to_be_bytes();
+        assert_eq!(expecting(at).expect("the cap itself is allowed"), MOST);
+        let over = expecting(u32::try_from(MOST + 1).expect("fits").to_be_bytes())
+            .expect_err("over the cap");
+        assert!(too_large(&over), "{over}");
+        let empty = expecting([0; 4]).expect_err("a frame of nothing");
+        assert!(!too_large(&empty));
+        assert_eq!(empty.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_call_over_the_cap_is_refused_before_a_byte_is_sent() {
+        let huge = Call {
+            call: "tell".to_owned(),
+            args: vec![serde_json::json!("z".repeat(MOST))],
+            ..Call::default()
+        };
+        let mut wire = Vec::new();
+        let why = write_to(&mut wire, &huge).expect_err("too much to say");
+        assert!(too_large(&why), "{why}");
+        assert!(wire.is_empty(), "{} bytes went out", wire.len());
+    }
+
+    #[test]
     fn a_body_that_is_not_json_is_an_error_rather_than_a_panic() {
         let mut wire = 3_u32.to_be_bytes().to_vec();
         wire.extend_from_slice(b"not");
@@ -242,6 +324,27 @@ mod encoding_tests {
         let back_cbor: Call = Wire::read_any(&as_cbor).expect("cbor");
         assert_eq!(back_json.call, back_cbor.call, "one shape, two encodings");
         assert_eq!(back_json.args, back_cbor.args);
+    }
+
+    #[tokio::test]
+    async fn a_caller_that_goes_quiet_or_stops_half_way_is_given_up_on() {
+        use std::time::Duration;
+        let (mut far, mut near) = tokio::io::duplex(64);
+        let quiet: std::io::Result<(Call, Wire)> =
+            read_wire_within(&mut near, Duration::from_millis(50), Duration::from_secs(5)).await;
+        assert_eq!(
+            quiet.expect_err("idle").kind(),
+            std::io::ErrorKind::TimedOut
+        );
+
+        tokio::io::AsyncWriteExt::write_all(&mut far, &[0, 0])
+            .await
+            .expect("half a header");
+        let half: std::io::Result<(Call, Wire)> =
+            read_wire_within(&mut near, Duration::from_secs(5), Duration::from_millis(50)).await;
+        let why = half.expect_err("mid-frame");
+        assert_eq!(why.kind(), std::io::ErrorKind::TimedOut, "{why}");
+        assert!(why.to_string().contains("half way"), "{why}");
     }
 
     #[tokio::test]

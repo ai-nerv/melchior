@@ -23,10 +23,10 @@ fn about(me: &Identity) -> About {
     }
 }
 
-/// A `mint` or `minted` as this session's own process makes it. `serving::caller_of` derives the
-/// caller of an authority verb from the kernel — the connecting process's `/proc/environ` — and a
-/// session's own fork process carries the session's id there, so the caller it hands `answer` is
-/// this session. Placing the caller here as `about.whom()` is exactly that.
+/// A `mint` or `minted` as this session's own process makes it. `serving::callers::caller_of`
+/// takes the caller to be this session only when `/proc/<pid>/stat`, read at accept, places the
+/// connecting process as the session's own or one it started, and that process's environment
+/// names no other session. Placing the caller here as `about.whom()` is that case.
 fn as_myself(verb: &str, about: &About) -> (crate::wire::Reply, Then) {
     let mine = about.whom();
     answer(
@@ -77,10 +77,14 @@ fn a_session_names_a_child_and_keeps_the_secret_it_minted() {
     assert_eq!(child["parent"], me.id, "and it knows whose it is");
     assert_eq!(token.len(), 32, "sixteen bytes as hex: {token}");
 
-    // The environment a harness starts it with, so it need not know which variables melchior reads.
+    // The environment a harness starts it with, so it need not know which variables melchior reads,
+    // and never the secret: that goes to the child's `serve` on its stdin.
     let env = &child["environment"];
     assert_eq!(env[crate::inherited::PARENT], me.id);
-    assert_eq!(env[crate::inherited::TOKEN], token);
+    assert!(
+        !env.to_string().contains(&token),
+        "the secret is in the child's environment: {env}"
+    );
     assert_eq!(env[crate::inherited::ID], id);
     assert_eq!(
         env[crate::inherited::SESSION],

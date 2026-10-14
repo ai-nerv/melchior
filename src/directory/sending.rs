@@ -109,7 +109,7 @@ pub fn allow(me: &Identity, what: &str) -> Result<(), String> {
     }
     held.push((now, mark));
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        let _ = crate::places::ensure(dir);
     }
     let written: String = held
         .iter()

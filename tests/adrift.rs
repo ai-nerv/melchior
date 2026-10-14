@@ -6,8 +6,10 @@
 //! client that keeps its connection after a failed read hands the abandoned reply to whoever
 //! calls next. See FAMILY.md, "A caller that abandons a call abandons the connection".
 
+#![allow(clippy::expect_used, clippy::indexing_slicing)]
+
 use melchior::mind::lua::engine::Engine;
-use melchior::scratch::Scratch;
+use melchior::scratch::Project;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -42,18 +44,20 @@ fn read_frame(sock: &mut UnixStream) -> Option<Vec<u8>> {
     Some(body)
 }
 
-/// A socket in a directory that goes when the test does.
+/// A socket in a directory that goes when the test does, where the family's sockets live: the
+/// client's VM dials nothing else.
 struct Fixture {
-    _dir: Scratch,
+    _dir: Project,
     at: std::path::PathBuf,
     listening: Option<UnixListener>,
 }
 
 impl Fixture {
     fn new(name: &str) -> Self {
-        let dir = Scratch::new("mlc-t", name);
+        let dir = Project::new("mlc-t", name);
+        let dir_path = dir.home();
         // Short: a unix socket path is capped at `SUN_LEN`, and this one is bound for real.
-        let at = dir.join("s");
+        let at = dir_path.join("s");
         let listening = UnixListener::bind(&at).expect("bind");
         Self {
             _dir: dir,
@@ -203,4 +207,94 @@ fn a_frame_read_in_half_takes_the_connection_with_it() {
 
     drop(engine);
     ended.join().expect("the fixture ends");
+}
+
+#[test]
+fn a_reply_header_over_the_cap_is_refused_before_its_body_is_read() {
+    let over = (16_777_216_u32 + 1).to_be_bytes().to_vec();
+    let mut fixture = Fixture::new("cap");
+    let (cue, ended) = session(&mut fixture, over, Vec::new());
+
+    let mut engine = dialled(&fixture.at);
+    call(&mut engine, "first");
+    let (first, why) = said(&mut engine, "first");
+    assert_eq!(first, "nil");
+    assert!(why.contains("16777216"), "{why}");
+    assert!(why.contains("closed"), "{why}");
+
+    cue.give_up.send(()).expect("the fixture is listening");
+    cue.landed.recv().expect("released");
+    drop(engine);
+    ended.join().expect("the fixture ends");
+}
+
+#[test]
+fn a_reply_that_will_not_decode_is_refused_and_takes_the_connection_with_it() {
+    let mut fixture = Fixture::new("garbled");
+    let (cue, ended) = session(&mut fixture, framed(r#"{"ok":tru"#), Vec::new());
+
+    let mut engine = dialled(&fixture.at);
+    call(&mut engine, "first");
+    let (first, why) = said(&mut engine, "first");
+    assert_eq!(first, "nil");
+    assert!(why.contains("bad reply"), "{why}");
+    assert!(why.contains("closed"), "{why}");
+
+    cue.give_up.send(()).expect("the fixture is listening");
+    cue.landed.recv().expect("released");
+    call(&mut engine, "second");
+    let (second, why) = said(&mut engine, "second");
+    assert_eq!(second, "nil");
+    assert_eq!(why, "this connection is closed");
+
+    drop(engine);
+    ended.join().expect("the fixture ends");
+}
+
+#[test]
+fn a_reply_in_a_newer_family_is_refused_by_name_and_the_line_stays_open() {
+    let newer = framed(r#"{"ok":true,"family":2,"n":1,"result":["from the future"]}"#);
+    let mut fixture = Fixture::new("family");
+    let (cue, ended) = session(&mut fixture, newer, Vec::new());
+
+    let mut engine = dialled(&fixture.at);
+    call(&mut engine, "first");
+    let (first, why) = said(&mut engine, "first");
+    assert_eq!(first, "nil");
+    assert!(why.contains("newer"), "{why}");
+
+    cue.give_up.send(()).expect("the fixture is listening");
+    cue.landed.recv().expect("released");
+    call(&mut engine, "second");
+    let (second, why) = said(&mut engine, "second");
+    assert_eq!(second, "the answer to the second call", "{why}");
+
+    drop(engine);
+    ended.join().expect("the fixture ends");
+}
+
+#[test]
+fn a_name_is_flattened_into_its_socket_path_and_no_shell_is_run_to_list_one() {
+    assert!(
+        !melchior::CLIENT.contains("io.popen"),
+        "the client runs a shell"
+    );
+    let mut engine = Engine::new();
+    let chunk = format!(
+        "local asked = {{}}\n\
+         hexe = {{ uid = 1000 }}\n\
+         local fake = {{ connect = function(path) asked[#asked + 1] = path; return nil, 'no' end }}\n\
+         local client = load([=====[\n{source}]=====])(fake)\n\
+         client.connect('p.q/main/a.b')\n\
+         client.connect('../../etc')\n\
+         melchior.dialled = tostring(asked[1])\n\
+         melchior.count = #asked\n",
+        source = melchior::CLIENT,
+    );
+    engine.run(&chunk, "flat.lua").expect("the client loads");
+    engine.harvest();
+    let config = engine.config();
+    let dialled = config.string("dialled").unwrap_or_default().to_owned();
+    assert!(dialled.ends_with("/p-q/a-b"), "{dialled}");
+    assert!(!dialled.contains(".."), "{dialled}");
 }

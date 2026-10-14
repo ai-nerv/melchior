@@ -9,6 +9,7 @@
 //!     iota-mu.session      <- "alpha-rho": which run it belongs to
 //!     iota-mu.role         <- "reviewer", and a line saying what that means
 //!     iota-mu.sent         <- what it has sent lately, so a loop runs out of window
+//!     iota-mu.adopting     <- 0600: who it asked to take it on, and the nonce
 //!     .claims/             <- one file per piece of work somebody has taken
 //!       the-parser
 //!   other-project/
@@ -16,10 +17,12 @@
 //! ```
 //!
 //! Every name beside a socket carries a dot, and the claims directory begins with one, because
-//! [`listening`] dials each dotless entry as a socket. `stop` carries the secret from [`TOKEN`],
-//! which only whoever started the session ever held; `ask` and `tell` take a name at face value.
+//! [`listening`] dials each dotless entry as a socket. `stop` carries the secret its parent minted,
+//! which only the parent and the session itself ever held.
 
 pub mod claims;
+pub mod pending;
+pub mod reserved;
 pub mod roles;
 pub mod screens;
 pub mod sending;
@@ -27,7 +30,7 @@ pub mod sessions;
 pub mod watches;
 
 use crate::identity::Identity;
-use crate::inherited::{ID, PARENT, PROJECT, TOKEN, said};
+use crate::inherited::{ID, PARENT, PROJECT, said};
 
 use crate::policy::{self, Whom};
 use std::path::{Path, PathBuf};
@@ -84,16 +87,14 @@ pub fn root_of(project: &str, id: &str) -> Option<String> {
 }
 
 /// The run `id`'s branch belongs to as the tree stands now: the walked-up root's own run, or its
-/// id when it left no note. A run is named `<id>-<started>`, so an ancestor's bare id compared
-/// against one put every child outside its own crew.
+/// id when it left no note.
 #[must_use]
 pub fn run_of(project: &str, id: &str) -> Option<String> {
     root_of(project, id).map(|top| sessions::session_in(project, &top).unwrap_or(top))
 }
 
 /// The deepest chain below `id` among the sessions listening in `project` — `0` when nothing
-/// answers to it. Used to check that grafting a branch on by adoption keeps the tree inside
-/// [`MAX_DEPTH`]. Ring-safe: the walk down is bounded by the same depth.
+/// answers to it. Ring-safe: the walk down is bounded by [`MAX_DEPTH`].
 #[must_use]
 pub fn height_below(project: &str, id: &str) -> u32 {
     let kin: Vec<(String, Option<String>)> = listening(project)
@@ -141,11 +142,6 @@ pub fn depth_of(me: &Identity) -> u32 {
     depth
 }
 
-#[must_use]
-pub fn token() -> Option<String> {
-    said(TOKEN)
-}
-
 /// Which session a spawned process belongs to, from its environment. `None` outside one.
 #[must_use]
 pub fn mine() -> Option<Identity> {
@@ -177,19 +173,35 @@ pub fn children(me: &Identity) -> Vec<String> {
 /// memory. Empty when nothing answers.
 #[must_use]
 pub fn inbox_of(me: &Identity) -> Vec<crate::wire::Message> {
+    let mut out: Vec<crate::wire::Message> = Vec::new();
+    let mut seen = 0;
     let Ok(mut held) = dial(me, me) else {
-        return Vec::new();
+        return out;
     };
-    let Ok(reply) = held.call("inbox", Vec::new()) else {
-        return Vec::new();
-    };
-    // A row is a message. Reading the first row as the whole inbox is the other half of the
-    // mistake FAMILY.md names, and it is what a consumer holding a stale client would do.
-    reply
-        .result
-        .iter()
-        .filter_map(|value| serde_json::from_value(value.clone()).ok())
-        .collect()
+    // A page at a time, each a row per message, until a page comes back empty.
+    loop {
+        let reply = match held.call("inbox", vec![serde_json::json!(seen)]) {
+            Ok(reply) if reply.ok => reply,
+            Ok(reply) => {
+                crate::noted!("directory: the inbox was refused: {:?}", reply.error);
+                return out;
+            }
+            Err(why) => {
+                crate::noted!("directory: the inbox could not be read: {why}");
+                return out;
+            }
+        };
+        if reply.result.is_empty() {
+            return out;
+        }
+        seen += reply.result.len();
+        out.extend(
+            reply
+                .result
+                .iter()
+                .filter_map(|value| serde_json::from_value(value.clone()).ok()),
+        );
+    }
 }
 
 /// The secrets this session minted for the children it started, by id. Never written to the
@@ -262,8 +274,7 @@ impl Address {
     }
 
     /// The full name, with the gaps filled in: the project from whoever is asking, the role from
-    /// the target's own note. An unqualified name borrowing the asker's role reported every
-    /// message as landing in an inbox belonging to somebody with a role the target does not have.
+    /// the target's own note.
     #[must_use]
     pub fn against(&self, asker: &Identity) -> Identity {
         let project = self
@@ -283,7 +294,7 @@ impl Address {
 
 #[must_use]
 pub fn home(project: &str) -> PathBuf {
-    runtime().join(crate::NAME).join(safe(project))
+    root().join(safe(project))
 }
 
 /// Where a session's socket is. No role in the path: an id is already unique inside a project,
@@ -304,10 +315,10 @@ pub fn kin_at(me: &Identity) -> PathBuf {
     home(&me.project).join(format!("{}.parent", safe(&me.id)))
 }
 
-fn runtime() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
+/// Where every project directory sits: the trusted runtime directory, or `<tmp>/melchior-<uid>`.
+#[must_use]
+pub fn root() -> PathBuf {
+    crate::places::base(crate::NAME)
 }
 
 /// Flatten one name into one path segment, so a project called `../../etc` cannot name a
@@ -340,26 +351,29 @@ fn safe(name: &str) -> String {
 /// When a note cannot be written. A child that could not write `.parent` reads as a main to every
 /// peer, with a main's reach, so the caller must refuse to come up rather than serve under it.
 pub fn announce(me: &Identity, role: &roles::Role, ui: Option<&Path>) -> Result<(), String> {
+    reserved::release(&me.project, &me.id);
     sessions::began(me)?;
     roles::began(me, role)?;
     screens::began(me, ui)?;
     let Some(parent) = parent() else {
+        // A main says so by having no note, so one an earlier holder of this name left goes.
+        let _ = std::fs::remove_file(kin_at(me));
         return Ok(());
     };
     wrote(&kin_at(me), &parent)
 }
 
-/// Write one note beside a socket, naming the path in the error so a full filesystem and an
-/// unwritable runtime directory are told apart.
+/// Write one note beside a socket, naming the path in the error.
 pub(crate) fn wrote(path: &Path, said: &str) -> Result<(), String> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|why| format!("{}: {why}", dir.display()))?;
+        crate::places::ensure(dir)?;
     }
     std::fs::write(path, said).map_err(|why| format!("{}: {why}", path.display()))
 }
 
 pub fn forget(me: &Identity) {
     let _ = std::fs::remove_file(kin_at(me));
+    pending::forget_in(&me.project, &me.id);
     sessions::ended(me);
     roles::ended(me);
     screens::ended(me);
@@ -375,55 +389,74 @@ pub fn adopted(them: &Identity, parent: &str) -> Result<(), String> {
     wrote(&kin_at(them), parent)
 }
 
-/// Tell whoever asked what was decided, either way, as an ordinary message. `handover` and the
-/// stop `secret` go by a separate `adopted` call so what a harness lends, and the token that ends
-/// the session, never land in an inbox a model reads.
-pub fn answer_request(
-    who: &str,
+/// Hand `them` what this session lends it and the secret to stop it by, quoting its nonce.
+///
+/// # Errors
+/// When `them` cannot be reached or does not take it, with its reason.
+pub fn hand_over(
+    them: &Identity,
     me: &Identity,
-    accept: bool,
     handover: Option<&str>,
-    secret: Option<&str>,
-) {
-    let Some(them) = Identity::read(who) else {
-        return;
-    };
-    let Ok(mut held) = dial(&them, me) else {
-        return;
-    };
-    let said = if accept {
-        format!("`{}` accepted: it is this session's parent now.", me.full())
+    secret: &str,
+    nonce: &str,
+) -> Result<(), String> {
+    let text = |value: Option<&str>| value.map_or(serde_json::Value::Null, serde_json::Value::from);
+    let reply = dial(them, me)
+        .and_then(|mut held| {
+            held.call(
+                "adopted",
+                vec![
+                    serde_json::Value::String(me.full()),
+                    text(handover),
+                    text(Some(secret)),
+                    text(Some(nonce)),
+                ],
+            )
+        })
+        .map_err(|why| why.to_string())?;
+    if reply.ok {
+        Ok(())
     } else {
-        format!("`{}` declined to take this session on.", me.full())
-    };
-    let _ = held.call(
-        "tell",
-        vec![
-            serde_json::Value::String(said),
-            serde_json::Value::String("answer".to_owned()),
-        ],
-    );
-    if accept {
-        let text = |value: Option<&str>| {
-            value.map_or(serde_json::Value::Null, |said| {
-                serde_json::Value::String(said.to_owned())
-            })
-        };
+        Err(reply
+            .error
+            .unwrap_or_else(|| "it gave no reason".to_owned()))
+    }
+}
+
+/// Tell whoever asked to be taken on what was decided, as an ordinary message.
+pub fn answer_request(them: &Identity, me: &Identity, said: &str) {
+    if let Ok(mut held) = dial(them, me) {
         let _ = held.call(
-            "adopted",
+            "tell",
             vec![
-                serde_json::Value::String(me.full()),
-                text(handover),
-                text(secret),
+                serde_json::Value::String(said.to_owned()),
+                serde_json::Value::String("answer".to_owned()),
             ],
         );
     }
 }
 
-/// A name nothing in `project` is already listening under.
+/// A name nothing in `project` is listening under or holds, reserved for the caller as it is
+/// handed out: see [`reserved`].
 #[must_use]
 pub fn free_in(project: &str) -> Identity {
-    crate::identity::free_of(project, &listening(project))
+    free_beside(project, &[])
+}
+
+/// The same, never one of `also` either: a session naming a child is not always listening yet.
+#[must_use]
+pub fn free_beside(project: &str, also: &[String]) -> Identity {
+    let mut taken = listening(project);
+    taken.extend(reserved::taken(project));
+    taken.extend(also.iter().cloned());
+    for _ in 0..64 {
+        let picked = crate::identity::free_of(project, &taken);
+        if reserved::reserve(project, &picked.id) == Ok(true) {
+            return picked;
+        }
+        taken.push(picked.id);
+    }
+    crate::identity::free_of(project, &taken)
 }
 
 /// Open a connection to the session named `them`, as `me`.
@@ -453,9 +486,18 @@ pub fn listening(project: &str) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(home(project)) else {
         return Vec::new();
     };
-    let mut out: Vec<String> = entries
+    let names: Vec<String> = entries
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    // A `.parent` note whose socket is gone makes the next holder of that name read as a child.
+    for id in names.iter().filter_map(|name| name.strip_suffix(".parent")) {
+        if !names.iter().any(|name| name == id) && !reserved::fresh(project, id) {
+            let _ = std::fs::remove_file(home(project).join(format!("{id}.parent")));
+        }
+    }
+    let mut out: Vec<String> = names
+        .into_iter()
         // The notes sit beside the sockets, and an id is two Greek words and a dash.
         .filter(|name| !name.contains('.') && !name.is_empty())
         .filter(|id| {
@@ -470,17 +512,20 @@ pub fn listening(project: &str) -> Vec<String> {
     out
 }
 
-/// Whether anything is serving at `path`. A listener answers from the moment it is bound, so this
-/// is never a false negative against a session that is merely busy.
+/// Whether anything may be serving at `path`: gone only on `ECONNREFUSED` or `ENOENT`, asked
+/// without waiting, so a busy or stopped peer is never swept and never stalls the asker.
 #[must_use]
 pub fn answers(path: &Path) -> bool {
-    std::os::unix::net::UnixStream::connect(path).is_ok()
+    crate::asking::alive(path)
 }
 
 /// Take a dead session out of the directory: its socket, the notes beside it, and its claims.
 fn forget_id(project: &str, id: &str) {
     let _ = std::fs::remove_file(socket(project, id));
     let _ = std::fs::remove_file(home(project).join(format!("{}.parent", safe(id))));
+    let _ = std::fs::remove_file(home(project).join(format!("{}.lock", safe(id))));
+    reserved::release(project, id);
+    pending::forget_in(project, id);
     sessions::forget_in(project, id);
     roles::forget_in(project, id);
     screens::forget_in(project, id);
@@ -515,7 +560,7 @@ pub fn reachable(me: &Whom) -> Vec<(Whom, policy::Relation)> {
 /// more, so neither half of a name that came off a wire can climb.
 #[must_use]
 pub fn inside(path: &Path) -> bool {
-    let root = runtime().join(crate::NAME);
+    let root = root();
     path.parent()
         .and_then(Path::parent)
         .is_some_and(|grand| grand == root)

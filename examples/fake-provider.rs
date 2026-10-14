@@ -184,7 +184,8 @@ async fn stream(socket: &mut tokio::net::TcpStream, turn: &Turn) -> std::io::Res
                     .iter()
                     .position(|byte| *byte >= 0x80)
                     .map_or(bytes.len() / 2, |first| first + 1);
-                for part in [&bytes[..at], &bytes[at..]] {
+                let (head, tail) = bytes.split_at_checked(at).unwrap_or((&bytes, &[]));
+                for part in [head, tail] {
                     let mut framed = format!("{:x}\r\n", part.len()).into_bytes();
                     framed.extend_from_slice(part);
                     framed.extend_from_slice(b"\r\n");
@@ -234,25 +235,25 @@ fn choose(turns: &[Turn], used: &mut [bool], body: &str) -> Option<usize> {
     };
     // A rule answers as often as it holds and is never used up, because helper jobs and a
     // session's own turns arrive in no fixed order. The rest are handed out in turn.
-    let rule = |at: usize| turns[at].when.as_ref().is_some_and(When::is_rule);
-    let once = |at: usize| turns[at].when.as_ref().is_some_and(|w| w.once);
+    let when = |at: usize| turns.get(at).and_then(|turn| turn.when.as_ref());
+    let rule = |at: usize| when(at).is_some_and(When::is_rule);
+    let once = |at: usize| when(at).is_some_and(|w| w.once);
+    let spent = |at: usize| used.get(at).copied().unwrap_or(true);
     let named = (0..turns.len()).find(|&at| {
-        rule(at)
-            && !(used[at] && once(at))
-            && turns[at]
-                .when
-                .as_ref()
-                .is_some_and(|w| w.holds(body, tools))
+        rule(at) && !(spent(at) && once(at)) && when(at).is_some_and(|w| w.holds(body, tools))
     });
-    let chosen = named.or_else(|| (0..turns.len()).find(|&at| !used[at] && !rule(at)))?;
-    used[chosen] = !rule(chosen) || once(chosen);
+    let chosen = named.or_else(|| (0..turns.len()).find(|&at| !spent(at) && !rule(at)))?;
+    let mark = !rule(chosen) || once(chosen);
+    *used.get_mut(chosen)? = mark;
     Some(chosen)
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
     let flags = flags();
-    let script = flags.get("script").expect("--script <file>");
+    let script = flags
+        .get("script")
+        .ok_or_else(|| std::io::Error::other("--script <file> is required"))?;
     let turns: std::sync::Arc<Vec<Turn>> =
         std::sync::Arc::new(serde_json::from_str(&std::fs::read_to_string(script)?)?);
     let port: u16 = flags.get("port").map_or(0, |p| p.parse().unwrap_or(0));
@@ -286,7 +287,7 @@ async fn main() -> std::io::Result<()> {
                 .lock()
                 .ok()
                 .and_then(|mut used| choose(&turns, &mut used, &body));
-            let _ = match chosen.map(|at| &turns[at]) {
+            let _ = match chosen.and_then(|at| turns.get(at)) {
                 Some(turn) => match &turn.refuse {
                     Some(no) => refuse(&mut socket, no.status, &no.message).await,
                     None => stream(&mut socket, turn).await,

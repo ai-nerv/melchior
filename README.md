@@ -25,9 +25,10 @@ whatever a tool looks like on its side.
 ## Where sessions live
 
 ```
-$XDG_RUNTIME_DIR/melchior/
-  myproject/                 one directory per project
+$XDG_RUNTIME_DIR/melchior/   or <tmp>/melchior-<uid>/ when that is unset, empty or open to others
+  myproject/                 one directory per project, 0700
     alpha-rho                a socket, named by the id and nothing else
+    alpha-rho.lock           held for as long as alpha-rho listens
     iota-mu
     iota-mu.parent           "alpha-rho": who started it
 ```
@@ -55,10 +56,13 @@ EventSource reconnection implementation.
 Error bodies and OAuth control responses retain at most 64 KiB of decoded text and have a
 10-second absolute deadline. OAuth's deadline includes request headers and body. Error-body
 failure preserves the HTTP status's retry/refusal class; a complete bounded body can identify
-context overflow. Diagnostics omit response bodies and credential-bearing URLs.
+context overflow. A refusal says the `message` of a JSON error body, cut to one line with anything
+shaped like a key taken out; any other body, and credential-bearing URLs, are never repeated. A
+`Retry-After` or `Retry-After-Ms` is waited out, spread by up to a tenth. No redirect is followed.
 
-Successful generations have no total-duration or total-byte cap from this control policy;
-their existing 180-second inactivity timeout remains. Cancellation closes the active request.
+A stream is held to 4 MiB a line, 8 MiB an event and 256 MiB in all, and one past those is not
+asked again. Successful generations have no total-duration cap; their 180-second inactivity
+timeout remains. Cancellation closes the active request.
 `oslo make test-streaming` runs parser partitions and local-HTTP boundary fixtures without
 provider credentials.
 
@@ -121,12 +125,14 @@ stops being answered.
 $ melchior fork
 {"project":"demo","role":"main","id":"iota-mu","parent":"alpha-rho","token":"…",
  "environment":{"MAGI_MELCHIOR_PROJECT":"demo","MAGI_MELCHIOR_ID":"iota-mu",
-                "MAGI_MELCHIOR_PARENT":"alpha-rho","MAGI_MELCHIOR_TOKEN":"…"}}
+                "MAGI_MELCHIOR_PARENT":"alpha-rho"}}
 ```
 
 **melchior names, the harness spawns.** A layer that started harnesses would have to know what
 one is; this hands down a name and a secret, and whoever asked starts the process with the
-environment it was given. A session started that way comes up a *child*: it writes the note that
+environment it was given. The secret is `token`, never in that environment: the child's harness
+hands it to its own `melchior serve` as the first line on serve's stdin,
+`{"event":"token","token":"…"}`. A session started that way comes up a *child*: it writes the note that
 makes the tree readable, it is inside the walls `policy::between` draws, and the session that
 minted its secret is the only one that can end it.
 
@@ -136,8 +142,9 @@ receives a known child's bare id in `about`, with `who` omitted or matching it, 
 that child's current agent status through the normal policy checks instead of rejecting the
 id as a malformed handle. This does not create an `ask` task or infer completion from a report.
 
-`tool --verb=report --message=<text>` stores the caller's report. For large reports,
-`tool --verb=report --about=-` reads the complete UTF-8 body from stdin. Submission atomically
+`tool --verb=report --message=<text>` stores the caller's report; the body comes only in the
+message — no file and no standard input is read for it. One argument holds at most 128 KiB, so a
+larger report goes through the socket's `tool` verb, whose frame holds 16 MiB. Submission atomically
 replaces the agent's stored report and sends its parent a non-interrupting `report` notification
 with a distinct submission revision. Repeating identical text on another turn is a new revision.
 Read with `--who=<id>` for pages, or add `--about=json` for the whole body, revision and SHA-256
@@ -146,8 +153,10 @@ that the child or its delegated work has finished; check current status separate
 
 ## Talking to it from Lua
 
-`melchior lua-api` prints a plain-Lua client — framing, encoding, discovery and the verbs — with no
-dependencies of its own. Siblings copy it rather than port it.
+`melchior lua-api` prints a plain-Lua client — discovery and the verbs — with no dependencies of
+its own. Siblings copy it rather than port it. The host's stream does the framing:
+`handle:call(request_table, { deadline_ms = N })` sends one frame, under the 16 MiB cap, and
+returns the decoded reply, or `nil` and the reason.
 
 ```lua
 local melchior = load(src)(host.stream)
@@ -167,8 +176,6 @@ Failed requests keep the last cached listing. The reply includes `refreshed: tru
 
 ## Commands
 
-## Commands
-
 The build is `.make.lua`, read by [oslo](https://github.com/termworks/oslo). At an oslo prompt in
 this directory `make` is enough; anywhere else it is `oslo make`.
 
@@ -177,3 +184,20 @@ make build
 make test
 make verify
 ```
+
+## Nix
+
+Each release tag publishes a static build for x86_64 and aarch64 Linux to the `ai-nerv` cache,
+with `config/` and the Lua client under `share/melchior/`.
+
+```sh
+cachix use ai-nerv
+nix run github:ai-nerv/melchior -- verbs
+nix build github:ai-nerv/melchior
+```
+
+The flake names the cache itself, so `--accept-flake-config` does the same as `cachix use`. In
+another flake, take `inputs.melchior.packages.${system}.default`, and configure the cache on the
+consuming machine: an input's `nixConfig` is not inherited.
+
+Here, `make nix-build` builds it into `result/`, and `make nix-check` checks the flake.

@@ -284,7 +284,7 @@ fn get(url: &str, key: Option<&str>) -> Option<Value> {
             .build()
             .ok()?;
         runtime.block_on(async move {
-            let client = reqwest::Client::builder()
+            let client = crate::mind::provider::http()
                 .timeout(crate::mind::discovering::PATIENCE)
                 .build()
                 .ok()?;
