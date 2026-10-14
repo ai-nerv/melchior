@@ -1,97 +1,74 @@
-//! Answering another instance: one pure function taking a [`Call`], what this instance knows, and
-//! who the far end worked out to be, and returning a [`Reply`]. The socket loop above it frames
-//! bytes and reads the caller's place in the tree off the directory; it decides nothing.
+//! Answering another instance: one function taking a [`Call`], what this instance knows, and who
+//! the far end was pinned as, and returning a [`Reply`] and what the loop should do next.
 
 pub mod keeping;
 mod roles;
+mod taking;
 
 use crate::identity::Identity;
 use crate::policy::Reach;
 use crate::policy::{self, Whom};
 use crate::wire::{Call, Message, Reply, VERBS};
 
-/// What this instance is willing to say about itself, gathered by the caller and handed in: the
-/// session is behind a lock in the UI thread, and a socket handler that reached into it would hold
-/// that lock while a peer decides how fast to read.
+/// What this instance is willing to say about itself, gathered by the loop and handed in.
 #[derive(Debug, Clone)]
 pub struct About {
-    /// Who this is.
     pub me: Identity,
     /// Who started it, or `None` if it is a main.
     pub parent: Option<String>,
-    /// The secret it was started with, which a `stop` has to quote back.
+    /// The secret a `stop` has to quote back, handed to `serve` on its stdin.
     pub token: Option<String>,
-    /// Whether a turn is running.
     pub busy: bool,
     /// How long it has been running, in seconds.
     pub working_for: u64,
-    /// The coarse phase the harness reports, answered by `status` so a sibling's roster carries it.
+    /// The coarse phase the harness reports.
     pub phase: Option<String>,
     pub cause: Option<String>,
-    /// What it has spent, a row per model, as the harness last said; answered by `status`.
+    /// What it has spent, a row per model, as the harness last said.
     pub spent: Vec<serde_json::Value>,
-    /// What has arrived and not been read.
     pub inbox: Vec<Message>,
-    /// Each started session's secret, by id: written only by `mint`, and never to disk.
+    /// Each started session's secret, by id; never written to disk.
     pub minted: std::collections::BTreeMap<String, String>,
-    /// A stop-token a new parent minted on adopting this session, taken by `stop` beside `token`.
+    /// The secret a parent minted on adopting this session.
     pub adopted_token: Option<String>,
 }
 
 impl About {
-    /// This session's place in the tree.
+    /// This session's place in the tree, read off the directory as a caller would read it.
     #[must_use]
     pub fn whom(&self) -> Whom {
         Whom {
             project: self.me.project.clone(),
             id: self.me.id.clone(),
             parent: self.parent.clone(),
-            // Read rather than held, so this answers the same as what a caller reads off the
-            // directory about us.
             session: crate::directory::sessions::session_of(&self.me),
-            // Walked off the directory, so an adopted session reads its new branch, not the run it
-            // was born in.
             root: crate::directory::run_of(&self.me.project, &self.me.id),
         }
     }
 }
 
-/// What a reply asks the caller to do afterwards, beyond sending it.
+/// What a reply asks the loop to do afterwards, beyond sending it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Then {
     Nothing,
     /// Put this in the inbox.
     Keep(Message),
-    /// Put this in front of the person, and hold it until they answer: whether one session may
-    /// direct another is the one thing this layer never decides for itself.
+    /// Put this in front of the person, and hold it until they answer.
     Ask(crate::wire::Request),
-    /// A parent has taken this session on, and handed it this.
-    ///
-    /// Carried up to the harness rather than into the inbox: what a parent lends is not something
-    /// a model should read.
+    /// A parent has taken this session on: what it lends goes to the harness, never the inbox.
     Adopted {
         /// Who took it on, as `project/role/id`.
         by: String,
-        /// What they handed over, unread by anything here.
         handover: Option<String>,
-        /// The stop secret the new parent minted; held by the loop, never surfaced to the model.
+        /// The stop secret the new parent minted.
         secret: Option<String>,
     },
-    /// A child has been named and its secret minted; hold on to it.
-    ///
-    /// Carried up rather than written here: this function decides and the loop that owns the state
-    /// records, and the secret never goes near the directory.
+    /// A child has been named and its secret minted, for the loop to hold.
     Minted {
-        /// The child's id, which is what `stop` names.
         id: String,
-        /// What it will be started with, and what a `stop` has to quote back.
         token: String,
     },
-    /// This session has been told what it is for — by itself, or by the one that started it.
-    ///
-    /// Carried up rather than written where it is decided, for the same reason [`Then::Minted`]
-    /// is: the loop owns the note, and a connection handler writing it too would be a second
-    /// writer for one file.
+    /// This session has been told what it is for, for the loop to write down.
     Named(crate::directory::roles::Role),
     /// End this instance.
     Stop,
@@ -99,68 +76,63 @@ pub enum Then {
 
 /// Answer one call.
 ///
-/// `caller` is read off the project directory rather than taken from the frame, so a session
-/// cannot describe its own place in the tree. `None` means it did not say who it was, and then
-/// only `verbs` and `client` are answered.
+/// `caller` is who the connection was pinned as when it was accepted, placed in the tree off the
+/// project directory; nothing in the frame names it. `None` means nobody could be named, and then
+/// only `verbs`, `client` and an `adopted` that proves itself are answered.
 #[must_use]
 pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then) {
-    // Answered before any permission check, so a client never has to guess the vocabulary.
+    // The vocabulary and the library answer anybody; `adopted` proves itself with its nonce.
     if call.call == "verbs" {
-        // A listing is the rows, and every row carries a `door`: both are FAMILY.md's.
         let mut listed = Reply::rows(
             VERBS
                 .iter()
                 .map(|(verb, about)| serde_json::json!({"verb": verb, "about": about, "door": "socket"}))
                 .collect::<Vec<_>>(),
         );
-        // What a plugin writes against, on the self-description and nowhere else.
         listed.surface = Some(crate::wire::SURFACE);
         return (listed, Then::Nothing);
     }
-    // Hands over the client library, before the permission check as `verbs` is. Safe to answer a
-    // stranger: it is a file this crate ships, and it says nothing about *this* session.
     if call.call == "client" {
         return (Reply::of(serde_json::json!(crate::CLIENT)), Then::Nothing);
     }
+    if call.call == "adopted" {
+        return taking::adopted(call, about);
+    }
     let Some(caller) = caller else {
         return (
-            Reply::refused("say who is calling: every call but `verbs` needs a `from`"),
+            Reply::refused(
+                "nobody this session can name is calling: a caller is named by the session that \
+                 started it, never by its call",
+            ),
             Then::Nothing,
         );
     };
     let me = about.whom();
-    // Two relations, because the question has a direction: `relation` is how the caller stands to
-    // this session, which is what `kin` reports, and `theirs` is how this session stands to the
-    // caller, which is what decides whether they may. Deciding on the first would let a child stop
-    // its parent.
+    // `relation` is how the caller stands to this session, what `kin` reports; `theirs` is how
+    // this session stands to the caller, what decides whether it may.
     let relation = policy::between(&me, caller);
     let theirs = policy::between(caller, &me);
-    // Settled by relation before the ladder, because no `Reach` says "nobody but this session":
-    // `Stop` would refuse the only legitimate caller, since a session may not stop itself, and
-    // `Tell` would let a parent mint children in its child's name and hold the secrets.
-    if matches!(call.call.as_str(), "mint" | "minted") && relation != policy::Relation::Myself {
+    if matches!(call.call.as_str(), "mint" | "minted" | "inbox")
+        && relation != policy::Relation::Myself
+    {
         return (
             Reply::refused(format!(
-                "`{}` is this session's own: a name and the secret that ends the session wearing \
-                 it are not something another instance may ask for",
+                "`{}` is this session's own: its children's names and secrets, and what was sent \
+                 to it, are not something another instance may ask for",
                 call.call
             )),
             Then::Nothing,
         );
     }
 
-    // Settled by relation before the ladder, the way `mint` is: `Ask` would let a cousin rename us
-    // at the `project` setting.
+    // A parent proves itself with the secret it minted.
     if call.call == "role"
-        && let Some(refusal) = roles::refused(relation, theirs)
+        && let Some(refusal) = roles::refused(relation, theirs, proven(call, about))
     {
         return (refusal, Then::Nothing);
     }
 
-    // The model's coordination vocabulary — the same `verbs::answer` surface `melchior tool` runs
-    // on the command line, offered here on the socket too so a harness reaches it through the
-    // client library exactly as it reaches balthasar's. This session's own only: it acts with this
-    // session's authority — sending, claiming and assigning as it — which no other instance borrows.
+    // The model's coordination vocabulary, as `melchior tool` runs it, for this session only.
     if call.call == "tool" {
         if relation != policy::Relation::Myself {
             return (
@@ -191,14 +163,10 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
     }
 
     let wanted = match call.call.as_str() {
-        "identity" | "kin" | "status" | "inbox" | "needs" => Reach::Ask,
-        // Already settled above: only this session and its parent ask this, and they have.
-        "role" => Reach::Ask,
-        // Already settled above: only this session asks these, and it has.
-        "mint" | "minted" => Reach::Ask,
-
-        // Reaching as far as a message does, and no further.
-        "tell" | "adopt" | "adopted" => Reach::Tell,
+        "identity" | "kin" | "status" | "inbox" | "needs" | "role" | "mint" | "minted" => {
+            Reach::Ask
+        }
+        "tell" | "adopt" => Reach::Tell,
         "stop" => Reach::Stop,
 
         other => {
@@ -215,9 +183,7 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
         );
     }
     match call.call.as_str() {
-        // Read-only, so it answers anyone the walls allow. `configure` has no verb here: it runs
-        // Lua, and a socket that runs things is remote code execution.
-        // One row per declaration, which is the case FAMILY.md tells the story about.
+        // One row per declaration.
         "needs" => (
             Reply::rows(
                 crate::mind::setup::needs()
@@ -270,14 +236,11 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
             ),
             Then::Nothing,
         ),
-        // One row: a map of id to secret is looked up by key, not walked.
+        // One row: a map of id to secret.
         "minted" => (Reply::of(serde_json::json!(about.minted)), Then::Nothing),
         "role" => roles::set(call, about),
-        // Names a child and mints its secret; starting the process is the harness's job, so
-        // nothing is spawned here.
+        // Names a child and mints its secret; the harness starts the process.
         "mint" => {
-            // A tree that has reached its depth spawns no deeper: the child would be one level
-            // past what [`crate::directory::MAX_DEPTH`] allows.
             if crate::directory::depth_of(&about.me) + 1 >= crate::directory::MAX_DEPTH {
                 return (
                     Reply::refused(format!(
@@ -289,8 +252,6 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
                     Then::Nothing,
                 );
             }
-            // Nor more children at once than [`crate::directory::MAX_CHILDREN`]; ending one and
-            // letting it be swept makes room for another.
             let running = crate::directory::children(&about.me).len();
             if running >= crate::directory::MAX_CHILDREN {
                 return (
@@ -303,11 +264,8 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
             }
             let child = crate::directory::free_in(&about.me.project);
             let secret = crate::identity::secret();
-            // Ours, not the child's, and handed down unchanged however deep the tree gets: a child
-            // that worked out its own run would start a second one under every coordinator.
+            // This session's run, handed down unchanged however deep the tree gets.
             let run = about.whom().session.unwrap_or_else(|| about.me.id.clone());
-            // What the child will be started as, if the caller said. Named at birth rather than
-            // assigned once it is up, or it sits on the roster described as `main` in between.
             let role = match roles::asked(call) {
                 Ok(role) => role,
                 Err(refusal) => return (refusal, Then::Nothing),
@@ -326,15 +284,13 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
                     "parent": about.me.id,
                     "token": secret.clone(),
                     "session": run.clone(),
-                    // Everything the child inherits, named so a harness does not have to know any
-                    // of it. The role travels as one string, name then description, so the child
-                    // writes its own note from it.
+                    // Everything the child inherits but its secret, which is `token` and never in
+                    // an environment.
                     "environment": {
                         crate::inherited::PROJECT: child.project,
                         crate::inherited::ROLE: role.written(),
                         crate::inherited::ID: child.id,
                         crate::inherited::PARENT: about.me.id,
-                        crate::inherited::TOKEN: secret,
                         crate::inherited::SESSION: run,
                     },
                 })),
@@ -349,19 +305,18 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
                 .and_then(|name| crate::wire::Sort::read(&name))
                 .unwrap_or_default();
             let about_what = text_at(call, 2);
-            // Project and id come from the connection, never from an argument: a message that
-            // could name its own sender is one anybody can forge into anybody's inbox. The role is
-            // the exception, because it grants nothing.
-            let role = Identity::read(call.from.as_deref().unwrap_or_default())
-                .map_or_else(|| "main".to_owned(), |claimed| claimed.role);
+            // From the connection and the role's note, never from an argument.
+            let role = crate::directory::roles::role_in(&caller.project, &caller.id).map_or_else(
+                || crate::directory::roles::MAIN.to_owned(),
+                |role| role.name,
+            );
             let from = Identity {
                 project: caller.project.clone(),
                 role,
                 id: caller.id.clone(),
             }
             .full();
-            // Believed as sent: the count is refused at the *sender*, and what stops a caller that
-            // reports zero on every pass of a ring is `keeping::AT_MOST`.
+            // Believed as sent; `keeping::AT_MOST` bounds a ring whose members report zero.
             let hops = call
                 .args
                 .get(3)
@@ -369,105 +324,25 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
                 .and_then(|deep| u32::try_from(deep).ok())
                 .unwrap_or_default();
             let message = Message::sent(&from, &text, sort, about_what).carried(hops);
-            // The id is minted here, where the message lands, and said out loud so the sender can
-            // name what it sent; it is the same id the far end quotes in `about`.
+            // The id is minted where the message lands, and said back to the sender.
             (
                 Reply::of(serde_json::json!({"id": message.id})),
                 Then::Keep(message),
             )
         }
-        // The other half of the handshake, arriving at the session that asked. Believed only from
-        // the session the *directory* says is this one's parent, and that note is written by
-        // whoever accepted, so a session that never accepted anything gets nowhere.
-        "adopted" => {
-            if about.parent.as_deref() != Some(caller.id.as_str()) {
-                return (
-                    Reply::refused(format!(
-                        "`{}` is not this session's parent, so it has nothing to hand over",
-                        caller.id
-                    )),
-                    Then::Nothing,
-                );
-            }
-            (
-                Reply::done(),
-                Then::Adopted {
-                    by: text_at(call, 0).unwrap_or_else(|| caller.id.clone()),
-                    handover: text_at(call, 1),
-                    // Minted by the parent that accepted, so it can stop what it took on.
-                    secret: text_at(call, 2),
-                },
-            )
-        }
-        // Asked, never granted here: the reply says the question has been put, not that it was
-        // answered.
-        "adopt" => {
-            // A main, and only a main: two lines of authority over one session would make "who may
-            // direct this" unanswerable.
-            if about.parent.is_some() {
-                return (
-                    Reply::refused(format!(
-                        "`{}` already answers to `{}`, so it cannot take another session on",
-                        about.me.full(),
-                        about.parent.as_deref().unwrap_or_default()
-                    )),
-                    Then::Nothing,
-                );
-            }
-            if !caller.is_main() {
-                return (
-                    Reply::refused(
-                        "only a main may ask to be adopted: a session that already has a parent \
-                         would be changing who directs it behind that parent's back",
-                    ),
-                    Then::Nothing,
-                );
-            }
-            // Grafting the asker's whole branch on must keep the tree inside its depth.
-            let combined = crate::directory::depth_of(&about.me)
-                + 1
-                + crate::directory::height_below(&caller.project, &caller.id);
-            if combined >= crate::directory::MAX_DEPTH {
-                return (
-                    Reply::refused(format!(
-                        "taking `{}` on would make a branch {combined} deep, and a tree of agents \
-                         goes {} levels and no further",
-                        caller.id,
-                        crate::directory::MAX_DEPTH
-                    )),
-                    Then::Nothing,
-                );
-            }
-            let why = text_at(call, 0).unwrap_or_default();
-            let from = Identity {
-                project: caller.project.clone(),
-                role: Identity::read(call.from.as_deref().unwrap_or_default())
-                    .map_or_else(|| "main".to_owned(), |claimed| claimed.role),
-                id: caller.id.clone(),
-            }
-            .full();
-            let request = crate::wire::Request::made(&from, &why);
-            (
-                Reply::of(serde_json::json!({
-                    "asked": request.id,
-                    "of": about.me.full(),
-                })),
-                Then::Ask(request),
-            )
-        }
+        // Asked, never granted here: the reply says the question has been put.
+        "adopt" => taking::adopt(call, about, caller),
+        // The relation says the caller started this session; the secret says it is them.
         "stop" => {
-            // The relation says the caller started this session; the secret says it is actually
-            // them. Either the one it was spawned with, or the one a parent minted on adopting it —
-            // a root taken on has only the latter.
-            let Some(mine) = about.token.as_deref().or(about.adopted_token.as_deref()) else {
+            if about.token.is_none() && about.adopted_token.is_none() {
                 return (
                     Reply::refused(
                         "this session was not started by another, so nothing may stop it",
                     ),
                     Then::Nothing,
                 );
-            };
-            if call.token.as_deref() != Some(mine) {
+            }
+            if !proven(call, about) {
                 return (
                     Reply::refused("that is not the secret this session was started with"),
                     Then::Nothing,
@@ -479,315 +354,27 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
     }
 }
 
+/// Whether `call` quotes this session's stop secret: the one it was given at start, or the one a
+/// parent minted on adopting it.
+fn proven(call: &Call, about: &About) -> bool {
+    let Some(quoted) = call.token.as_deref() else {
+        return false;
+    };
+    [about.token.as_deref(), about.adopted_token.as_deref()]
+        .into_iter()
+        .flatten()
+        .any(|mine| crate::identity::same(mine, quoted))
+}
+
 /// A string argument, if there is one there.
 fn text_at(call: &Call, at: usize) -> Option<String> {
     call.args.get(at)?.as_str().map(ToOwned::to_owned)
 }
 
+/// The vocabulary, answered to the caller each verb is for.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn about() -> About {
-        About {
-            me: Identity {
-                project: "magi".to_owned(),
-                role: "main".to_owned(),
-                id: "alpha-rho".to_owned(),
-            },
-            parent: None,
-            token: None,
-            busy: false,
-            working_for: 0,
-            inbox: Vec::new(),
-            minted: std::collections::BTreeMap::new(),
-            phase: None,
-            cause: None,
-            spent: Vec::new(),
-            adopted_token: None,
-        }
-    }
-
-    fn whom(project: &str, id: &str, parent: Option<&str>) -> Whom {
-        Whom {
-            project: project.to_owned(),
-            id: id.to_owned(),
-            parent: parent.map(ToOwned::to_owned),
-            session: None,
-            root: None,
-        }
-    }
-
-    fn call(verb: &str) -> Call {
-        Call {
-            call: verb.to_owned(),
-            ..Call::default()
-        }
-    }
-
-    #[test]
-    fn verbs_is_answered_before_anybody_has_said_who_they_are() {
-        let (reply, then) = answer(&call("verbs"), &about(), None);
-        assert!(reply.ok, "{reply:?}");
-        assert_eq!(reply.n, reply.result.len());
-        assert_eq!(then, Then::Nothing);
-    }
-
-    #[test]
-    fn everything_else_needs_a_caller() {
-        for verb in ["identity", "status", "inbox", "tell", "stop"] {
-            let (reply, then) = answer(&call(verb), &about(), None);
-            assert!(!reply.ok, "{verb} answered a stranger");
-            assert_eq!(then, Then::Nothing);
-        }
-    }
-
-    #[test]
-    fn a_main_answers_another_main_in_the_same_project() {
-        let them = whom("magi", "beta-nu", None);
-        let (reply, _) = answer(&call("status"), &about(), Some(&them));
-        assert!(reply.ok, "{reply:?}");
-    }
-
-    #[test]
-    fn nothing_from_another_project_is_answered() {
-        let them = whom("other", "beta-nu", None);
-        for verb in ["identity", "status", "inbox", "tell", "stop"] {
-            let (reply, _) = answer(&call(verb), &about(), Some(&them));
-            assert!(!reply.ok, "{verb} crossed the wall");
-            let why = reply.error.unwrap_or_default();
-            assert!(why.contains("projects"), "{why}");
-        }
-    }
-
-    #[test]
-    fn a_cousin_is_refused_at_the_default_and_told_what_would_help() {
-        let mut about = about();
-        about.parent = Some("beta-nu".to_owned());
-        let them = whom("magi", "tau-chi", Some("gamma-xi"));
-        let (reply, _) = answer(&call("status"), &about, Some(&them));
-        assert!(!reply.ok);
-        let why = reply.error.unwrap_or_default();
-        assert!(why.contains("agent_talk"), "{why}");
-    }
-
-    #[test]
-    fn a_message_is_stamped_with_who_actually_sent_it() {
-        let them = whom("magi", "beta-nu", None);
-        let call = Call {
-            call: "tell".to_owned(),
-            args: vec![serde_json::json!("the parser is done")],
-            from: Some("magi/main/somebody-else".to_owned()),
-            token: None,
-        };
-        let (reply, then) = answer(&call, &about(), Some(&them));
-        assert!(reply.ok, "{reply:?}");
-        let Then::Keep(message) = then else {
-            panic!("it was not kept: {then:?}");
-        };
-        assert_eq!(message.from, "magi/main/beta-nu");
-    }
-
-    #[test]
-    fn a_message_carries_the_sort_it_was_sent_as() {
-        let them = whom("magi", "beta-nu", None);
-        let call = Call {
-            call: "tell".to_owned(),
-            args: vec![
-                serde_json::json!("I am stuck"),
-                serde_json::json!("trouble"),
-            ],
-            ..Call::default()
-        };
-        let (_, then) = answer(&call, &about(), Some(&them));
-        let Then::Keep(message) = then else {
-            panic!("it was not kept");
-        };
-        assert!(message.sort.interrupts(), "{:?}", message.sort);
-    }
-
-    #[test]
-    fn a_main_nobody_started_cannot_be_stopped_by_anything() {
-        let them = whom("magi", "beta-nu", None);
-        let (reply, then) = answer(&call("stop"), &about(), Some(&them));
-        assert!(!reply.ok);
-        assert_eq!(then, Then::Nothing);
-    }
-
-    #[test]
-    fn a_parent_that_knows_the_secret_may_stop_its_child() {
-        let mut about = about();
-        about.parent = Some("beta-nu".to_owned());
-        about.token = Some("s3cret".to_owned());
-        let parent = whom("magi", "beta-nu", None);
-        let call = Call {
-            call: "stop".to_owned(),
-            token: Some("s3cret".to_owned()),
-            ..Call::default()
-        };
-        let (reply, then) = answer(&call, &about, Some(&parent));
-        assert!(reply.ok, "{reply:?}");
-        assert_eq!(then, Then::Stop);
-    }
-
-    #[test]
-    fn the_name_alone_is_not_enough_to_stop_anything() {
-        // Any process of this user can connect claiming to be the parent.
-        let mut about = about();
-        about.parent = Some("beta-nu".to_owned());
-        about.token = Some("s3cret".to_owned());
-        let pretending = whom("magi", "beta-nu", None);
-        for token in [None, Some("guessed".to_owned())] {
-            let call = Call {
-                call: "stop".to_owned(),
-                token,
-                ..Call::default()
-            };
-            let (reply, then) = answer(&call, &about, Some(&pretending));
-            assert!(!reply.ok, "a stop went through without the secret");
-            assert_eq!(then, Then::Nothing);
-        }
-    }
-
-    #[test]
-    fn a_sibling_holding_the_secret_still_may_not_stop_it() {
-        // The secret is proof of identity, not a permission.
-        let mut about = about();
-        about.parent = Some("beta-nu".to_owned());
-        about.token = Some("s3cret".to_owned());
-        let sibling = whom("magi", "zeta-pi", Some("beta-nu"));
-        let call = Call {
-            call: "stop".to_owned(),
-            token: Some("s3cret".to_owned()),
-            ..Call::default()
-        };
-        let (reply, then) = answer(&call, &about, Some(&sibling));
-        assert!(!reply.ok, "{reply:?}");
-        assert_eq!(then, Then::Nothing);
-    }
-
-    #[test]
-    fn an_adopted_root_is_stopped_with_the_secret_its_new_parent_minted() {
-        // A root has no token of its own; adoption hands it one, held in `adopted_token`, and the
-        // parent that took it on may stop it by quoting that.
-        let mut about = about();
-        about.parent = Some("beta-nu".to_owned());
-        about.adopted_token = Some("granted".to_owned());
-        let parent = whom("magi", "beta-nu", None);
-
-        let bare = Call {
-            call: "stop".to_owned(),
-            ..Call::default()
-        };
-        let (reply, then) = answer(&bare, &about, Some(&parent));
-        assert!(!reply.ok, "stopped with no secret");
-        assert_eq!(then, Then::Nothing);
-
-        let with = Call {
-            call: "stop".to_owned(),
-            token: Some("granted".to_owned()),
-            ..Call::default()
-        };
-        let (reply, then) = answer(&with, &about, Some(&parent));
-        assert!(reply.ok, "{reply:?}");
-        assert_eq!(then, Then::Stop);
-    }
-
-    #[test]
-    fn adoption_hands_the_new_parent_a_secret_to_stop_by() {
-        // The `adopted` call carries the stop secret in its third argument; it comes up as part of
-        // `Then::Adopted` for the loop to hold, never into the inbox.
-        let mut about = about();
-        about.parent = Some("beta-nu".to_owned());
-        let parent = whom("magi", "beta-nu", None);
-        let call = Call {
-            call: "adopted".to_owned(),
-            args: vec![
-                serde_json::json!("magi/main/beta-nu"),
-                serde_json::Value::Null,
-                serde_json::json!("the-secret"),
-            ],
-            from: Some("magi/main/beta-nu".to_owned()),
-            token: None,
-        };
-        let (reply, then) = answer(&call, &about, Some(&parent));
-        assert!(reply.ok, "{reply:?}");
-        let Then::Adopted { secret, .. } = then else {
-            panic!("not an adoption: {then:?}");
-        };
-        assert_eq!(secret.as_deref(), Some("the-secret"));
-    }
-
-    #[test]
-    fn kin_says_how_the_caller_stands_and_whether_it_may_stop() {
-        let mut about = about();
-        about.parent = Some("beta-nu".to_owned());
-        let parent = whom("magi", "beta-nu", None);
-        let (reply, _) = answer(&call("kin"), &about, Some(&parent));
-        assert!(reply.ok, "{reply:?}");
-        assert_eq!(reply.result[0]["relation"], "parent");
-        assert_eq!(reply.result[0]["may_stop"], true);
-    }
-
-    #[test]
-    fn a_verb_nothing_answers_says_so_rather_than_dropping_the_connection() {
-        let them = whom("magi", "beta-nu", None);
-        let (reply, _) = answer(&call("nope"), &about(), Some(&them));
-        assert!(!reply.ok);
-        assert!(
-            reply.error.unwrap_or_default().contains("nope"),
-            "it did not say which"
-        );
-    }
-
-    /// The session a listed verb is put to, and the caller entitled to put it. Three of them are
-    /// answered only for a particular caller, so one parent-shaped caller would not do.
-    fn entitled(verb: &str) -> (About, Whom) {
-        let mut about = about();
-        match verb {
-            // Asked by the session itself, over the socket it bound.
-            "mint" | "minted" | "tool" => (about, whom("magi", "alpha-rho", None)),
-            // A main asking a main, so this one is deliberately left without a parent.
-            "adopt" => (about, whom("magi", "beta-nu", None)),
-            _ => {
-                about.parent = Some("beta-nu".to_owned());
-                about.token = Some("s3cret".to_owned());
-                (about, whom("magi", "beta-nu", None))
-            }
-        }
-    }
-
-    #[test]
-    fn every_verb_the_family_is_told_about_is_one_that_answers() {
-        for (name, _) in VERBS {
-            let (about, caller) = entitled(name);
-            // `tool`'s one argument is the coordination map, not a bare value; `help` is the verb
-            // that always answers.
-            let arg = if *name == "tool" {
-                serde_json::json!({ "verb": "help" })
-            } else {
-                serde_json::json!("something")
-            };
-            let call = Call {
-                call: (*name).to_owned(),
-                args: vec![arg],
-                token: Some("s3cret".to_owned()),
-                from: None,
-            };
-            let (reply, _) = answer(&call, &about, Some(&caller));
-            assert!(reply.ok, "{name} is listed and refuses: {reply:?}");
-        }
-    }
-
-    #[test]
-    fn a_verb_answered_only_for_one_caller_is_still_advertised() {
-        // Refusing a caller is not the same as not having the verb, and only the list says which.
-        let listed: Vec<&str> = VERBS.iter().map(|(name, _)| *name).collect();
-        for verb in ["mint", "minted", "adopt", "adopted"] {
-            assert!(listed.contains(&verb), "`{verb}` is answered and unlisted");
-        }
-    }
-}
+#[path = "answering/basics.rs"]
+mod basics;
 
 /// Being adopted is asked for, never taken.
 #[cfg(test)]

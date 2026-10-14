@@ -512,6 +512,12 @@ pub struct Request {
     pub why: String,
     /// When, in milliseconds since the epoch.
     pub at: u64,
+    /// What the answer must quote back to the asker. Held here and never put on a wire but that.
+    #[serde(skip)]
+    pub nonce: String,
+    /// The run the asker was in when it asked, so an answer reaches the same session or none.
+    #[serde(skip)]
+    pub session: Option<String>,
 }
 
 impl Request {
@@ -523,6 +529,8 @@ impl Request {
             from: from.to_owned(),
             why: why.to_owned(),
             at,
+            nonce: String::new(),
+            session: None,
         }
     }
 }

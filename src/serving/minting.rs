@@ -77,10 +77,14 @@ fn a_session_names_a_child_and_keeps_the_secret_it_minted() {
     assert_eq!(child["parent"], me.id, "and it knows whose it is");
     assert_eq!(token.len(), 32, "sixteen bytes as hex: {token}");
 
-    // The environment a harness starts it with, so it need not know which variables melchior reads.
+    // The environment a harness starts it with, so it need not know which variables melchior reads,
+    // and never the secret: that goes to the child's `serve` on its stdin.
     let env = &child["environment"];
     assert_eq!(env[crate::inherited::PARENT], me.id);
-    assert_eq!(env[crate::inherited::TOKEN], token);
+    assert!(
+        !env.to_string().contains(&token),
+        "the secret is in the child's environment: {env}"
+    );
     assert_eq!(env[crate::inherited::ID], id);
     assert_eq!(
         env[crate::inherited::SESSION],

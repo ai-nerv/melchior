@@ -1,6 +1,7 @@
 //! Being told what you are for: by the session itself, or by the session that started it, and by
-//! nobody else. A role grants nothing — [`crate::policy`] has no field for one — so no token is
-//! asked for. Everything else is refused by *relation* rather than by a name in the frame.
+//! nobody else. A role grants nothing — [`crate::policy`] has no field for one — but a parent is
+//! named by its environment, which anything can set, so it proves itself with the secret it
+//! minted for this session.
 
 use super::{About, Then};
 use crate::directory::roles::{AT_MOST, Role};
@@ -11,9 +12,10 @@ use crate::wire::{Call, Reply};
 ///
 /// `theirs` is how *this* session stands to the caller, so `Child` means the caller started us;
 /// asking the other way round would let anything somebody's parent set that somebody's role.
+/// `proven` is whether the call quoted this session's stop secret.
 #[must_use]
-pub(super) fn refused(relation: Relation, theirs: Relation) -> Option<Reply> {
-    if relation == Relation::Myself || theirs == Relation::Child {
+pub(super) fn refused(relation: Relation, theirs: Relation, proven: bool) -> Option<Reply> {
+    if relation == Relation::Myself || (theirs == Relation::Child && proven) {
         return None;
     }
     Some(Reply::refused(format!(
@@ -136,14 +138,25 @@ mod tests {
     }
 
     #[test]
-    fn the_session_that_started_it_may_say_so_without_the_secret() {
-        // The same relation `stop` needs and none of the proof. A secret makes ending a life
-        // refusable; a role is a word, and guarding it with the token would say otherwise.
-        let call = Call {
-            from: Some("magi/main/beta-nu".to_owned()),
-            ..naming("reviewer", Some("reads diffs"))
+    fn the_session_that_started_it_may_say_so_with_the_secret_it_minted() {
+        // A parent is named by its environment, which any process can set, so the relation is
+        // proved the way `stop` proves it.
+        let mut held = about(Some("beta-nu"));
+        held.token = Some("s3cret".to_owned());
+        let parent = whom("beta-nu", None);
+        let bare = naming("reviewer", Some("reads diffs"));
+        let (reply, then) = answer(&bare, &held, Some(&parent));
+        assert!(
+            !reply.ok,
+            "a parent's name alone assigned a role: {reply:?}"
+        );
+        assert_eq!(then, Then::Nothing);
+
+        let proved = Call {
+            token: Some("s3cret".to_owned()),
+            ..bare
         };
-        let (reply, then) = answer(&call, &about(Some("beta-nu")), Some(&whom("beta-nu", None)));
+        let (reply, then) = answer(&proved, &held, Some(&parent));
         assert!(reply.ok, "a parent could not assign: {reply:?}");
         assert!(matches!(then, Then::Named(_)), "{then:?}");
     }

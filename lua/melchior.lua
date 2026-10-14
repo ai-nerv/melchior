@@ -252,11 +252,9 @@ Session.__index = Session
 
 --- Send one call and wait for its answer.
 ---
---- Every call says who is making it. That is not courtesy: a session answers `verbs` to anybody
---- and refuses everything else without a `from`, because every other verb is about that session
---- and a stranger has no standing to ask. The name is taken at face value — one user, one
---- directory, nothing to check it against — and what it buys is a *relation*, worked out at the
---- far end from the project directory rather than from anything in this frame.
+--- Every call carries `from`, for a reader of the frame. The far end never believes it: who is
+--- calling is read once when the connection is accepted, from the kernel and the calling
+--- process's environment, and placed in the tree off the project directory.
 function Session:call(name, ...)
   if not self.handle then return nil, "this connection is closed" end
   local request = encode({ call = name, args = { ... }, from = self.from, token = self.token })
@@ -315,8 +313,8 @@ local SURFACE = {
   -- verb reads a role, which is the only reason a session may name itself.
   "role",
   -- The adoption handshake, both halves. `adopt` puts the question and a person answers it;
-  -- `adopted` is that answer coming back, and is believed only from the session the directory
-  -- already calls this one's parent.
+  -- `adopted` is that answer coming back, and is believed only when it quotes the nonce the
+  -- asking session left for it.
   "adopt", "adopted",
   -- A session's own: every other caller is refused. Attached anyway, because the caller that
   -- may ask is the harness holding this very session, and it reaches it through this library.
@@ -490,7 +488,9 @@ function M.connect(where)
     -- which presents as "that instance does not work" rather than as a client that never
     -- introduced itself.
     from = mine and mine.full or nil,
-    token = os.getenv("MAGI_MELCHIOR_TOKEN") or os.getenv("MAGI_TOKEN"),
+    -- No secret is read from the environment: one never travels there. A caller that holds one
+    -- sets `session.token` itself.
+    token = nil,
   }, Session))
 end
 

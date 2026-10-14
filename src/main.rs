@@ -89,6 +89,8 @@ usage: melchior serve | tool | fork | brief | models | card | ask | client | ver
   verbs     what a session answers           [--json|--cbor]
 ";
 
+#[path = "main/adopting.rs"]
+mod adopting;
 mod ending;
 #[path = "main/roster.rs"]
 mod roster;
@@ -119,6 +121,9 @@ enum Told {
         #[serde(default)]
         spent: Option<Vec<serde_json::Value>>,
     },
+    /// The secret a `stop` must quote, handed over on this pipe rather than in the environment.
+    /// The first one is taken and any later one ignored.
+    Token { token: String },
     /// What the person said to a request this session was asked to answer.
     Answered {
         /// Which request, as [`Heard::Asked`] named it.
@@ -286,7 +291,7 @@ fn fork(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<(
     let Some(child) = reply.result.first() else {
         return Err(std::io::Error::other("mint answered nothing"));
     };
-    melchior::noted!("fork: minted {child}");
+    melchior::noted!("fork: minted {}", melchior::noted::redacted(child));
     println!("{child}");
     Ok(())
 }
@@ -302,7 +307,20 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
 
     let me = match (melchior::directory::mine(), asked.get("project")) {
         (Some(me), _) => me,
-        (None, Some(project)) => melchior::directory::free_in(project),
+        // A root names itself, then becomes itself again with that name in its environment, so
+        // every call it makes is attributed to it the way a child's are. Same pid, same pipes.
+        (None, Some(project)) => {
+            use std::os::unix::process::CommandExt;
+            let me = melchior::directory::free_in(project);
+            let why = std::process::Command::new("/proc/self/exe")
+                .arg0(melchior::NAME)
+                .args(std::env::args_os().skip(1))
+                .env(melchior::inherited::PROJECT, &me.project)
+                .env(melchior::inherited::ID, &me.id)
+                .exec();
+            eprintln!("melchior serve: could not take the name {}: {why}", me.id);
+            std::process::exit(1);
+        }
         (None, None) => {
             eprintln!(
                 "melchior serve: no session to be. Pass --project, or set {} and {} — one of them \
@@ -352,7 +370,8 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         let (about_tx, about_rx) = tokio::sync::watch::channel(melchior::answering::About {
             me: me.clone(),
             parent: melchior::directory::parent_of(&me),
-            token: melchior::directory::token(),
+            // Only ever from the pipe: see `Told::Token`.
+            token: None,
             busy: false,
             working_for: 0,
             inbox: Vec::new(),
@@ -362,6 +381,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
             spent: Vec::new(),
             adopted_token: None,
         });
+        let about_tx = std::sync::Arc::new(about_tx);
         let (arrived_tx, mut arrived) = tokio::sync::mpsc::channel(64);
         let (asked_tx, mut asked) = tokio::sync::mpsc::channel(16);
         let (adopted_tx, mut adopted) = tokio::sync::mpsc::channel(4);
@@ -517,40 +537,26 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
                             }
                         });
                     }
+                    Some(Told::Token { token }) => {
+                        about_tx.send_if_modified(|about| {
+                            let first = about.token.is_none();
+                            if first {
+                                about.token = Some(token);
+                            }
+                            first
+                        });
+                    }
                     // Written by the side that consented: an asker writing its own note would be
-                    // a session appointing its own parent.
+                    // a session appointing its own parent. Told either way, off the loop.
                     Some(Told::Answered { id, accept, handover }) => {
                         let Some(at) = pending.iter().position(|held| held.id == id) else {
                             continue;
                         };
                         let request = pending.remove(at);
-                        // The acceptance is downgraded rather than reported as one when the note
-                        // will not write.
-                        let mut accept = accept;
-                        // The secret that lets this session stop the one it takes on, minted only
-                        // when the note wrote, held beside `mint`'s and handed over on the call.
-                        let mut secret: Option<String> = None;
-                        if accept && let Some(them) = melchior::identity::Identity::read(&request.from) {
-                            if let Err(why) = melchior::directory::adopted(&them, &me.id) {
-                                eprintln!("melchior: {} was not taken on: {why}", request.from);
-                                accept = false;
-                            } else {
-                                let minted = melchior::identity::secret();
-                                about_tx.send_modify(|about| {
-                                    about.minted.insert(them.id.clone(), minted.clone());
-                                });
-                                secret = Some(minted);
-                            }
-                        }
-                        // Told either way: a silence the asker could not tell from a refusal
-                        // would leave it waiting for good.
-                        melchior::directory::answer_request(
-                            &request.from,
-                            &me,
-                            accept,
-                            handover.as_deref(),
-                            secret.as_deref(),
-                        );
+                        let (me, about) = (me.clone(), std::sync::Arc::clone(&about_tx));
+                        tokio::task::spawn_blocking(move || {
+                            adopting::answered(&me, &request, accept, handover.as_deref(), &about);
+                        });
                     }
                 },
                 Some(()) = stopped.recv() => {

@@ -9,6 +9,7 @@
 //!     iota-mu.session      <- "alpha-rho": which run it belongs to
 //!     iota-mu.role         <- "reviewer", and a line saying what that means
 //!     iota-mu.sent         <- what it has sent lately, so a loop runs out of window
+//!     iota-mu.adopting     <- 0600: who it asked to take it on, and the nonce
 //!     .claims/             <- one file per piece of work somebody has taken
 //!       the-parser
 //!   other-project/
@@ -16,10 +17,11 @@
 //! ```
 //!
 //! Every name beside a socket carries a dot, and the claims directory begins with one, because
-//! [`listening`] dials each dotless entry as a socket. `stop` carries the secret from [`TOKEN`],
-//! which only whoever started the session ever held; `ask` and `tell` take a name at face value.
+//! [`listening`] dials each dotless entry as a socket. `stop` carries the secret its parent minted,
+//! which only the parent and the session itself ever held.
 
 pub mod claims;
+pub mod pending;
 pub mod roles;
 pub mod screens;
 pub mod sending;
@@ -27,7 +29,7 @@ pub mod sessions;
 pub mod watches;
 
 use crate::identity::Identity;
-use crate::inherited::{ID, PARENT, PROJECT, TOKEN, said};
+use crate::inherited::{ID, PARENT, PROJECT, said};
 
 use crate::policy::{self, Whom};
 use std::path::{Path, PathBuf};
@@ -84,16 +86,14 @@ pub fn root_of(project: &str, id: &str) -> Option<String> {
 }
 
 /// The run `id`'s branch belongs to as the tree stands now: the walked-up root's own run, or its
-/// id when it left no note. A run is named `<id>-<started>`, so an ancestor's bare id compared
-/// against one put every child outside its own crew.
+/// id when it left no note.
 #[must_use]
 pub fn run_of(project: &str, id: &str) -> Option<String> {
     root_of(project, id).map(|top| sessions::session_in(project, &top).unwrap_or(top))
 }
 
 /// The deepest chain below `id` among the sessions listening in `project` — `0` when nothing
-/// answers to it. Used to check that grafting a branch on by adoption keeps the tree inside
-/// [`MAX_DEPTH`]. Ring-safe: the walk down is bounded by the same depth.
+/// answers to it. Ring-safe: the walk down is bounded by [`MAX_DEPTH`].
 #[must_use]
 pub fn height_below(project: &str, id: &str) -> u32 {
     let kin: Vec<(String, Option<String>)> = listening(project)
@@ -139,11 +139,6 @@ pub fn depth_of(me: &Identity) -> u32 {
         above = parent_note(&me.project, &id);
     }
     depth
-}
-
-#[must_use]
-pub fn token() -> Option<String> {
-    said(TOKEN)
 }
 
 /// Which session a spawned process belongs to, from its environment. `None` outside one.
@@ -262,8 +257,7 @@ impl Address {
     }
 
     /// The full name, with the gaps filled in: the project from whoever is asking, the role from
-    /// the target's own note. An unqualified name borrowing the asker's role reported every
-    /// message as landing in an inbox belonging to somebody with a role the target does not have.
+    /// the target's own note.
     #[must_use]
     pub fn against(&self, asker: &Identity) -> Identity {
         let project = self
@@ -359,6 +353,7 @@ pub(crate) fn wrote(path: &Path, said: &str) -> Result<(), String> {
 
 pub fn forget(me: &Identity) {
     let _ = std::fs::remove_file(kin_at(me));
+    pending::forget_in(&me.project, &me.id);
     sessions::ended(me);
     roles::ended(me);
     screens::ended(me);
@@ -374,46 +369,48 @@ pub fn adopted(them: &Identity, parent: &str) -> Result<(), String> {
     wrote(&kin_at(them), parent)
 }
 
-/// Tell whoever asked what was decided, either way, as an ordinary message. `handover` and the
-/// stop `secret` go by a separate `adopted` call so what a harness lends, and the token that ends
-/// the session, never land in an inbox a model reads.
-pub fn answer_request(
-    who: &str,
+/// Hand `them` what this session lends it and the secret to stop it by, quoting its nonce.
+///
+/// # Errors
+/// When `them` cannot be reached or does not take it, with its reason.
+pub fn hand_over(
+    them: &Identity,
     me: &Identity,
-    accept: bool,
     handover: Option<&str>,
-    secret: Option<&str>,
-) {
-    let Some(them) = Identity::read(who) else {
-        return;
-    };
-    let Ok(mut held) = dial(&them, me) else {
-        return;
-    };
-    let said = if accept {
-        format!("`{}` accepted: it is this session's parent now.", me.full())
+    secret: &str,
+    nonce: &str,
+) -> Result<(), String> {
+    let text = |value: Option<&str>| value.map_or(serde_json::Value::Null, serde_json::Value::from);
+    let reply = dial(them, me)
+        .and_then(|mut held| {
+            held.call(
+                "adopted",
+                vec![
+                    serde_json::Value::String(me.full()),
+                    text(handover),
+                    text(Some(secret)),
+                    text(Some(nonce)),
+                ],
+            )
+        })
+        .map_err(|why| why.to_string())?;
+    if reply.ok {
+        Ok(())
     } else {
-        format!("`{}` declined to take this session on.", me.full())
-    };
-    let _ = held.call(
-        "tell",
-        vec![
-            serde_json::Value::String(said),
-            serde_json::Value::String("answer".to_owned()),
-        ],
-    );
-    if accept {
-        let text = |value: Option<&str>| {
-            value.map_or(serde_json::Value::Null, |said| {
-                serde_json::Value::String(said.to_owned())
-            })
-        };
+        Err(reply
+            .error
+            .unwrap_or_else(|| "it gave no reason".to_owned()))
+    }
+}
+
+/// Tell whoever asked to be taken on what was decided, as an ordinary message.
+pub fn answer_request(them: &Identity, me: &Identity, said: &str) {
+    if let Ok(mut held) = dial(them, me) {
         let _ = held.call(
-            "adopted",
+            "tell",
             vec![
-                serde_json::Value::String(me.full()),
-                text(handover),
-                text(secret),
+                serde_json::Value::String(said.to_owned()),
+                serde_json::Value::String("answer".to_owned()),
             ],
         );
     }
@@ -480,6 +477,7 @@ pub fn answers(path: &Path) -> bool {
 fn forget_id(project: &str, id: &str) {
     let _ = std::fs::remove_file(socket(project, id));
     let _ = std::fs::remove_file(home(project).join(format!("{}.parent", safe(id))));
+    pending::forget_in(project, id);
     sessions::forget_in(project, id);
     roles::forget_in(project, id);
     screens::forget_in(project, id);

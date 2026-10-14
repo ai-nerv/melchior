@@ -115,6 +115,17 @@ pub fn secret() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Whether two secrets are the same, compared in time that depends on their length only.
+#[must_use]
+pub fn same(one: &str, other: &str) -> bool {
+    one.len() == other.len()
+        && one
+            .bytes()
+            .zip(other.bytes())
+            .fold(0_u8, |seen, (a, b)| seen | (a ^ b))
+            == 0
+}
+
 /// The name a seed picks, always a pair of different words — `delta-rho`, never `delta` and
 /// never `rho-rho`.
 #[must_use]

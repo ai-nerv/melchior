@@ -121,12 +121,14 @@ stops being answered.
 $ melchior fork
 {"project":"demo","role":"main","id":"iota-mu","parent":"alpha-rho","token":"…",
  "environment":{"MAGI_MELCHIOR_PROJECT":"demo","MAGI_MELCHIOR_ID":"iota-mu",
-                "MAGI_MELCHIOR_PARENT":"alpha-rho","MAGI_MELCHIOR_TOKEN":"…"}}
+                "MAGI_MELCHIOR_PARENT":"alpha-rho"}}
 ```
 
 **melchior names, the harness spawns.** A layer that started harnesses would have to know what
 one is; this hands down a name and a secret, and whoever asked starts the process with the
-environment it was given. A session started that way comes up a *child*: it writes the note that
+environment it was given. The secret is `token`, never in that environment: the child's harness
+hands it to its own `melchior serve` as the first line on serve's stdin,
+`{"event":"token","token":"…"}`. A session started that way comes up a *child*: it writes the note that
 makes the tree readable, it is inside the walls `policy::between` draws, and the session that
 minted its secret is the only one that can end it.
 

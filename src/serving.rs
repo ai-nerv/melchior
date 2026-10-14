@@ -5,9 +5,8 @@
 //! vocabulary live.
 
 use crate::answering::{About, Then, answer};
-use crate::directory::{inside, whom};
+use crate::directory::inside;
 use crate::framing;
-use crate::policy::Whom;
 use crate::wire::{Call, Message, Reply};
 use std::path::Path;
 use tokio::sync::mpsc;
@@ -47,15 +46,19 @@ pub async fn serve(path: &Path, serving: Serving) -> std::io::Result<()> {
     accept(listening_on(path).await?, serving).await
 }
 
-/// Take the socket, and hand it back before anything is served on it.
-///
-/// Split from [`accept`] so a caller can say "I am reachable" at the moment it becomes true.
-/// Announcing before the bind announces a future, and a parent that started sending on the
-/// strength of it met its own session as "nothing is listening".
+/// The same, vouching only for what `origin` started: `None` vouches for nobody.
+pub async fn serve_from(
+    path: &Path,
+    serving: Serving,
+    origin: Option<crate::kin::Origin>,
+) -> std::io::Result<()> {
+    accept_from(listening_on(path).await?, serving, origin).await
+}
+
+/// Take the socket, and hand it back before anything is served on it, so a caller can say "I am
+/// reachable" at the moment it becomes true.
 pub async fn listening_on(path: &Path) -> std::io::Result<tokio::net::UnixListener> {
     if !inside(path) {
-        // Belt and braces: the path is built from a project name, which is the working
-        // directory's and can be anything.
         return Err(std::io::Error::other("that is not an instance socket"));
     }
     bind(path).await
@@ -63,6 +66,16 @@ pub async fn listening_on(path: &Path) -> std::io::Result<tokio::net::UnixListen
 
 /// Accept callers on a socket already taken, and serve them until the process ends.
 pub async fn accept(listener: tokio::net::UnixListener, serving: Serving) -> std::io::Result<()> {
+    // The session that started this one, as the kernel names it, read once.
+    accept_from(listener, serving, crate::kin::Origin::here()).await
+}
+
+/// [`accept`], vouching for what `origin` started.
+pub async fn accept_from(
+    listener: tokio::net::UnixListener,
+    serving: Serving,
+    origin: Option<crate::kin::Origin>,
+) -> std::io::Result<()> {
     let held = std::sync::Arc::new(tokio::sync::Semaphore::new(CALLERS));
 
     loop {
@@ -87,18 +100,21 @@ pub async fn accept(listener: tokio::net::UnixListener, serving: Serving) -> std
             minted: serving.minted.clone(),
             named: serving.named.clone(),
         };
+        let pinned = callers::pinned(&stream, origin.as_ref());
         tokio::spawn(async move {
             let _permit = permit;
-            let _ = talk(stream, serving).await;
+            let _ = talk(stream, pinned, serving).await;
         });
     }
 }
 
 /// One connection, for as many calls as it cares to make. It keeps serving after replying: a
 /// client that holds its connection dies on its second call against a server that closes.
-async fn talk(stream: tokio::net::UnixStream, serving: Serving) -> std::io::Result<()> {
-    // Which of the user's sessions the caller is, from the kernel — the one thing it cannot forge.
-    let peer = stream.peer_cred().ok().and_then(|cred| cred.pid());
+async fn talk(
+    stream: tokio::net::UnixStream,
+    pinned: callers::Pinned,
+    serving: Serving,
+) -> std::io::Result<()> {
     let (mut reader, mut writer) = stream.into_split();
 
     loop {
@@ -122,8 +138,8 @@ async fn talk(stream: tokio::net::UnixStream, serving: Serving) -> std::io::Resu
         // This session's own parent changes from outside — another session accepts it as a child
         // and writes the note — so it is re-read per call rather than trusted from startup.
         about.parent = crate::directory::parent_of(&about.me);
-        // And the caller's, per call rather than per connection: a session may fork mid-call.
-        let caller = caller_of(&call, peer, &about);
+        // Who the connection is was pinned when it was accepted; where it sits is read per call.
+        let caller = callers::caller_of(&call, &pinned, &about);
         let began = std::time::Instant::now();
         let (reply, then) = answer(&call, &about, caller.as_ref());
         // A `status` answered is the roster's two-second poll: a change in it is logged as `roster`.
@@ -132,7 +148,7 @@ async fn talk(stream: tokio::net::UnixStream, serving: Serving) -> std::io::Resu
                 "serve: {} from {} → {} in {}ms",
                 call.call,
                 caller.as_ref().map_or_else(
-                    || call.from.clone().unwrap_or_else(|| "?".to_owned()),
+                    || "nobody".to_owned(),
                     |them| format!("{}/{}", them.project, them.id)
                 ),
                 if reply.ok {
@@ -228,80 +244,7 @@ async fn bind(path: &Path) -> std::io::Result<tokio::net::UnixListener> {
     tokio::net::UnixListener::bind(path)
 }
 
-/// Where a caller sits in the tree, from the name it gave. The name is the caller's; the place is
-/// looked up in the project directory, so a session cannot claim to be somebody's child and be
-/// believed. A name from another project resolves to a stranger, and `None` — a caller that said
-/// nothing at all — is a different mistake with a different answer.
-fn placed(from: Option<&str>, about: &About) -> Option<Whom> {
-    // Parsed as a whole name, never split at the first slash: `magi/review/iota-mu` cut that way
-    // is a session called `review/iota-mu`, which is nobody. The role is dropped on purpose.
-    let them = crate::identity::Identity::read(from?)?;
-    Some(place(&them.project, &them.id, about))
-}
-
-/// Where a session by this project and id sits in the tree. Another project's is placed with no
-/// parent and no run: its directory is not one this session lists.
-fn place(project: &str, id: &str, about: &About) -> Whom {
-    if project != about.me.project {
-        return Whom {
-            project: project.to_owned(),
-            id: id.to_owned(),
-            parent: None,
-            session: None,
-            root: None,
-        };
-    }
-    whom(project, id)
-}
-
-/// Who to treat as the caller. An [`is_authority`] verb takes its caller only from the kernel, so
-/// none can pass for a session that did not spawn it; any other verb falls back to the `from` it
-/// sent, which is never taken over the kernel.
-fn caller_of(call: &Call, peer: Option<i32>, about: &About) -> Option<Whom> {
-    let verified = claimed(peer, about);
-    if is_authority(&call.call) {
-        verified
-    } else {
-        verified.or_else(|| placed(call.from.as_deref(), about))
-    }
-}
-
-/// The verbs whose authority is being the session itself, so their caller comes from the kernel.
-fn is_authority(verb: &str) -> bool {
-    matches!(
-        verb,
-        "mint" | "minted" | "role" | "adopt" | "adopted" | "tool"
-    )
-}
-
-/// The caller as the kernel names it: the session id in the connecting process's own environment.
-/// `None` — the most restricted caller — when it names none, or the process is gone.
-fn claimed(peer: Option<i32>, about: &About) -> Option<Whom> {
-    let body = std::fs::read(format!("/proc/{}/environ", peer?)).ok()?;
-    let project = var_in(&body, crate::inherited::PROJECT)?;
-    let id = var_in(&body, crate::inherited::ID)?;
-    Some(place(&project, &id, about))
-}
-
-/// One variable out of a NUL-separated `/proc/<pid>/environ` block, the older `MAGI_*` spelling too.
-fn var_in(environ: &[u8], name: &str) -> Option<String> {
-    let find = |key: &str| {
-        let prefix = format!("{key}=");
-        environ
-            .split(|byte| *byte == 0)
-            .filter_map(|entry| std::str::from_utf8(entry).ok())
-            .find_map(|entry| entry.strip_prefix(&prefix))
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-    };
-    find(name).or_else(|| {
-        find(&format!(
-            "MAGI_{}",
-            name.trim_start_matches("MAGI_MELCHIOR_")
-        ))
-    })
-}
+pub mod callers;
 
 /// Two instances, one socket, and a message that actually arrives. The one thing that cannot be
 /// settled without a socket is that the client half and the server half agree about the wire.
@@ -336,7 +279,17 @@ mod tests {
         _stopped: mpsc::Receiver<()>,
     }
 
+    /// A session nothing is vouched to: every dial from this process is a stranger's.
     pub(super) async fn listening(me: &Identity) -> Bound {
+        listening_from(me, None).await
+    }
+
+    /// A session this test process speaks for, the way a harness speaks for its own `serve`.
+    pub(super) async fn listening_as_own(me: &Identity) -> Bound {
+        listening_from(me, crate::kin::Origin::here()).await
+    }
+
+    async fn listening_from(me: &Identity, origin: Option<crate::kin::Origin>) -> Bound {
         let (about, about_rx) = tokio::sync::watch::channel(About {
             me: me.clone(),
             parent: None,
@@ -364,7 +317,7 @@ mod tests {
         });
         let at = crate::directory::listening_at(me);
         tokio::spawn(async move {
-            let _ = serve(
+            let _ = serve_from(
                 &at,
                 Serving {
                     asked: tokio::sync::mpsc::channel(4).0,
@@ -375,6 +328,7 @@ mod tests {
                     minted: minted_tx,
                     named: tokio::sync::mpsc::channel(4).0,
                 },
+                origin,
             )
             .await;
         });
@@ -394,11 +348,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_message_sent_by_one_instance_arrives_at_another() {
+    async fn a_message_is_from_whom_the_kernel_names_never_whom_the_call_names() {
+        // This process is what the session started, as far as the kernel can tell, and it says
+        // `alpha-rho` on every frame: the message is the session's own, never alpha-rho's.
         let it = alone("arrives");
         let them = named(&it, "beta-nu");
         let me = named(&it, "alpha-rho");
-        let mut bound = listening(&them).await;
+        let mut bound = listening_as_own(&them).await;
 
         // From a blocking thread, because that is where it happens for real: the client half is
         // a tool peer, which has no runtime and wants none.
@@ -424,8 +380,12 @@ mod tests {
             .expect("it arrived")
             .expect("the channel is open");
         assert_eq!(message.text, "the parser is done");
-        // Never from an argument: a message that names its own sender is one anybody can forge.
-        assert_eq!(message.from, me.full());
+        assert_eq!(message.from, them.full());
+        assert_ne!(
+            message.from,
+            me.full(),
+            "the call's own `from` was believed"
+        );
         assert_eq!(message.sort, Sort::Attention);
         assert!(message.sort.interrupts());
     }
@@ -437,7 +397,7 @@ mod tests {
         let it = alone("held");
         let them = named(&it, "gamma-xi");
         let me = named(&it, "delta-pi");
-        let _bound = listening(&them).await;
+        let _bound = listening_as_own(&them).await;
 
         let (they, i) = (them.clone(), me.clone());
         let answers = tokio::task::spawn_blocking(move || {
@@ -458,13 +418,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_main_refuses_a_stop_from_another_main_at_the_wall() {
-        // Two gates stand between a caller and a stop, and this is the outer one: nobody started
-        // this session, so no relation makes the caller its parent.
+    async fn a_session_refuses_a_stop_from_itself_at_the_wall() {
+        // Two gates stand between a caller and a stop, and this is the outer one: whatever it
+        // claims, a process this session speaks for is the session, and none may stop itself.
         let it = alone("wall");
         let them = named(&it, "epsilon-tau");
         let me = named(&it, "zeta-nu");
-        let _bound = listening(&them).await;
+        let _bound = listening_as_own(&them).await;
 
         let (they, i) = (them.clone(), me.clone());
         let reply = tokio::task::spawn_blocking(move || {
@@ -480,90 +440,6 @@ mod tests {
         assert!(
             why.contains("only the session that started one may stop it"),
             "it did not say why: {why}"
-        );
-    }
-
-    #[tokio::test]
-    async fn claiming_to_be_the_parent_is_not_enough_to_stop_a_child() {
-        // The inner gate. Every session in a project runs as one user, so any process here can
-        // call itself the parent and the directory will agree; what it cannot do is produce the
-        // secret.
-        let it = alone("secret");
-        let them = named(&it, "iota-mu");
-        let me = named(&it, "kappa-rho");
-        let mut about = About {
-            me: them.clone(),
-            parent: Some(me.id.clone()),
-            token: Some("the-real-one".to_owned()),
-            busy: false,
-            working_for: 0,
-            inbox: Vec::new(),
-            minted: std::collections::BTreeMap::new(),
-            phase: None,
-            cause: None,
-            spent: Vec::new(),
-            adopted_token: None,
-        };
-        // The note a child leaves beside its socket. Written by hand here; a session writes its
-        // own.
-        std::fs::write(crate::directory::kin_at(&them), &me.id).expect("the note");
-
-        let (about_tx, about_rx) = tokio::sync::watch::channel(about.clone());
-        about.busy = false;
-        let (arrived_tx, _arrived) = mpsc::channel(8);
-        let (stopped_tx, mut stopped) = mpsc::channel(1);
-        let at = crate::directory::listening_at(&them);
-        tokio::spawn(async move {
-            let _ = serve(
-                &at,
-                Serving {
-                    asked: tokio::sync::mpsc::channel(4).0,
-                    adopted: tokio::sync::mpsc::channel(4).0,
-                    about: about_rx,
-                    arrived: arrived_tx,
-                    stopped: stopped_tx,
-                    minted: tokio::sync::mpsc::channel(4).0,
-                    named: tokio::sync::mpsc::channel(4).0,
-                },
-            )
-            .await;
-        });
-        let at = crate::directory::listening_at(&them);
-        for _ in 0..100 {
-            if Held::at(&at, &me).is_ok() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let _keep = about_tx;
-
-        let (they, i) = (them.clone(), me.clone());
-        let (guessed, right) = tokio::task::spawn_blocking(move || {
-            let mut held = crate::directory::dial(&they, &i).expect("it is listening");
-            (
-                held.call_with("stop", Vec::new(), "guessed")
-                    .expect("answered"),
-                held.call_with("stop", Vec::new(), "the-real-one")
-                    .expect("answered"),
-            )
-        })
-        .await
-        .expect("the thread finished");
-
-        assert!(!guessed.ok, "a guess stopped it: {guessed:?}");
-        assert!(
-            guessed.error.unwrap_or_default().contains("secret"),
-            "and it did not say what was wrong"
-        );
-        assert!(
-            right.ok,
-            "the parent could not stop its own child: {right:?}"
-        );
-        assert!(
-            tokio::time::timeout(Duration::from_secs(5), stopped.recv())
-                .await
-                .expect("the session was told")
-                .is_some()
         );
     }
 

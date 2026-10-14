@@ -1,8 +1,6 @@
-//! Seven variables a session inherited from whoever started it, and one reader.
+//! Six variables naming the session that started a process, and one reader; none is a secret.
 
 pub const PARENT: &str = "MAGI_MELCHIOR_PARENT";
-
-pub const TOKEN: &str = "MAGI_MELCHIOR_TOKEN";
 
 pub const PROJECT: &str = "MAGI_MELCHIOR_PROJECT";
 pub const ROLE: &str = "MAGI_MELCHIOR_ROLE";

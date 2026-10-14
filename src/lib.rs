@@ -8,6 +8,7 @@ pub mod directory;
 pub mod framing;
 pub mod identity;
 pub mod inherited;
+pub mod kin;
 pub mod mind;
 pub mod noted;
 pub mod places;
