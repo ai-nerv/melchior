@@ -282,6 +282,7 @@ fn a_name_is_flattened_into_its_socket_path_and_no_shell_is_run_to_list_one() {
     let mut engine = Engine::new();
     let chunk = format!(
         "local asked = {{}}\n\
+         hexe = {{ uid = 1000 }}\n\
          local fake = {{ connect = function(path) asked[#asked + 1] = path; return nil, 'no' end }}\n\
          local client = load([=====[\n{source}]=====])(fake)\n\
          client.connect('p.q/main/a.b')\n\

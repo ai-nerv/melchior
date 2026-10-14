@@ -358,29 +358,61 @@ end
 
 -- ---------------------------------------------------------------- who is where
 
---- This user's id, from the host when it says, else from `$UID`; `nil` when nothing says.
+--- An environment variable, or `nil` when it is unset, empty, or the host lends no `os.getenv`.
+local function env(name)
+  local getenv = type(os) == "table" and os.getenv or nil
+  local value = getenv and getenv(name) or nil
+  if value == "" then return nil end
+  return value
+end
+
+--- This user's uid, as the host says it: `<host>.uid`, a whole number or a function answering
+--- one. `nil` when no host says. `$UID` is never read.
 local function uid()
   for _, name in ipairs(FAMILY) do
     local host = _G[name]
-    local said = type(host) == "table" and host.uid
+    local said = type(host) == "table" and host.uid or nil
     if type(said) == "function" then said = said() end
-    if type(said) == "number" or type(said) == "string" then return tostring(said) end
+    if type(said) == "number" and said >= 0 and said == math.floor(said) then
+      return math.floor(said)
+    end
   end
-  local said = os.getenv("UID")
-  if said and said:match("^%d+$") then return said end
   return nil
 end
 
+--- The first host's `fs.stat`, or `nil` when no host lends one.
+local function host_stat()
+  for _, name in ipairs(FAMILY) do
+    local host = _G[name]
+    local fs = type(host) == "table" and host.fs or nil
+    if type(fs) == "table" and type(fs.stat) == "function" then return fs.stat end
+  end
+  return nil
+end
+
+--- Whether the host's `stat` says `path` is `id`'s directory with no group or other bits. A host
+--- that names no type is taken at its word on owner and mode alone.
+local function private_dir(stat, path, id)
+  if not stat then return false end
+  local ok, s = pcall(stat, path)
+  if not ok or type(s) ~= "table" or type(s.mode) ~= "number" or s.uid ~= id then return false end
+  if s.type ~= nil and s.type ~= "directory" and s.type ~= "dir" then return false end
+  return math.floor(s.mode) % 64 == 0
+end
+
 --- The runtime directory sessions live under, by the family's rule: `$XDG_RUNTIME_DIR/melchior`
---- when that is an absolute path, else `<tmp>/melchior-<uid>`. `nil` when neither can be said.
+--- when it is absolute and the host's `fs.stat` says it is this uid's and closed, else
+--- `<tmp>/melchior-<uid>`. `nil` when no host says the uid.
 local function runtime()
-  local dir = os.getenv("XDG_RUNTIME_DIR")
-  if dir and dir:sub(1, 1) == "/" then return dir .. "/melchior" end
   local id = uid()
   if not id then return nil end
-  local tmp = os.getenv("TMPDIR")
+  local dir = env("XDG_RUNTIME_DIR")
+  if dir and dir:sub(1, 1) == "/" and private_dir(host_stat(), dir, id) then
+    return (dir:gsub("/+$", "")) .. "/melchior"
+  end
+  local tmp = env("TMPDIR")
   if not tmp or tmp:sub(1, 1) ~= "/" then tmp = "/tmp" end
-  return tmp:gsub("/+$", "") .. "/melchior-" .. id
+  return (tmp:gsub("/+$", "")) .. "/melchior-" .. string.format("%d", id)
 end
 
 --- One name as one path segment, the way the session that bound it flattened it: anything that is
@@ -432,7 +464,7 @@ function M.instances(project)
   project = project or (M.me() or {}).project
   if not project then return nil, "no project: pass one, or set MAGI_MELCHIOR_PROJECT" end
   local base = runtime()
-  if not base then return nil, "no runtime directory: set XDG_RUNTIME_DIR, or UID" end
+  if not base then return nil, "no runtime directory: this host does not say whose uid it runs as" end
   local out = {}
   for _, name in ipairs(entries(base .. "/" .. safe(project))) do
     if not name:find("%.") and name ~= "" then out[#out + 1] = name end
@@ -497,7 +529,8 @@ function M.connect(where)
     named = project .. "/" .. id
     path = socket_of(project, id)
     if not path then
-      return nil, "no runtime directory to find " .. named .. " in: set XDG_RUNTIME_DIR, or UID"
+      return nil, "no runtime directory to find " .. named
+        .. " in: this host does not say whose uid it runs as"
     end
   end
 
