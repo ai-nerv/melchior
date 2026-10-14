@@ -52,9 +52,13 @@ fn committed(ledger: &str) -> u64 {
         let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        let id = row["id"].as_str().unwrap_or_default().to_owned();
-        let micros = row["micros"].as_u64().unwrap_or(0);
-        match row["kind"].as_str() {
+        let text = |name: &str| row.get(name).and_then(serde_json::Value::as_str);
+        let id = text("id").unwrap_or_default().to_owned();
+        let micros = row
+            .get("micros")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        match text("kind") {
             Some("reserved") => {
                 open.insert(id, micros);
             }
@@ -106,8 +110,10 @@ fn settle(terms: &Terms, id: &str, row: &serde_json::Value) {
     };
     if rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive).is_ok() {
         let mut row = row.clone();
-        row["kind"] = "settled".into();
-        row["id"] = id.into();
+        if let Some(fields) = row.as_object_mut() {
+            fields.insert("kind".to_owned(), "settled".into());
+            fields.insert("id".to_owned(), id.into());
+        }
         let _ = writeln!(file, "{row}");
     }
 }
@@ -150,10 +156,13 @@ fn failure_of(answer: &str) -> Option<String> {
         .lines()
         .filter_map(|line| line.strip_prefix("data: "))
         .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok());
-    whole
-        .into_iter()
-        .chain(events)
-        .find_map(|event| event["error"]["message"].as_str().map(str::to_owned))
+    whole.into_iter().chain(events).find_map(|event| {
+        event
+            .get("error")?
+            .get("message")?
+            .as_str()
+            .map(str::to_owned)
+    })
 }
 
 /// The prompt and completion counts, under whichever names the provider used.
@@ -293,7 +302,10 @@ async fn serve(
         }
     };
     let asked: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-    let model = asked["model"].as_str().unwrap_or_default();
+    let model = asked
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
     if model != terms.model {
         let why = format!("only `{}` is authorized here, not `{model}`", terms.model);
         return refuse(socket, 403, &why).await;
@@ -399,7 +411,7 @@ async fn main() -> std::io::Result<()> {
         .connect_timeout(std::time::Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .expect("an HTTP client");
+        .map_err(std::io::Error::other)?;
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
     println!("PORT={}", listener.local_addr()?.port());
     std::io::stdout().flush()?;
