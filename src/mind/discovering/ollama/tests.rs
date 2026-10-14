@@ -1,5 +1,28 @@
 use super::*;
 
+#[test]
+fn thinking_metadata_uses_exact_named_or_boolean_controls() {
+    for (values, expected) in [
+        (serde_json::json!([false, true]), vec!["off", "on"]),
+        (
+            serde_json::json!(["low", "medium", "high"]),
+            vec!["low", "medium", "high"],
+        ),
+        (serde_json::json!([false]), vec!["off"]),
+    ] {
+        let model = apply(
+            listed("m"),
+            &serde_json::json!({
+                "capabilities": ["thinking", "vision"], "thinking": {"values": values}
+            }),
+        );
+        let caps = model.capabilities.expect("Ollama capabilities");
+        assert_eq!(caps.input, ["text", "image"]);
+        assert_eq!(caps.thinking.expect("advertised levels"), expected);
+        assert_eq!(model.reasoning, expected != ["off"]);
+    }
+}
+
 /// A model as `/v1/models` gives it: a name and nothing else, so everything is assumed.
 fn listed(id: &str) -> Model {
     crate::mind::discovering::parse(&serde_json::json!({

@@ -105,6 +105,12 @@ pub struct Model {
     /// Dollars per million tokens.
     #[serde(default)]
     pub cost: Cost,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<crate::mind::model::Pricing>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub popularity_rank: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<crate::mind::model::Capabilities>,
     /// How this model names each thinking level. A missing key takes the provider default; an
     /// explicit `None` marks the level unsupported, which is different from unmapped.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -150,6 +156,9 @@ mod tests {
             context_window: 1000,
             max_tokens: 100,
             cost: Cost::default(),
+            pricing: None,
+            popularity_rank: None,
+            capabilities: None,
             thinking: BTreeMap::new(),
             compat: None,
         }

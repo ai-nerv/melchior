@@ -7,9 +7,20 @@
 
 mod usage;
 
-pub use usage::{Cost, Usage};
+pub use usage::{Cost, Pricing, Usage};
 
 use serde::{Deserialize, Serialize};
+
+/// Provider-advertised modalities and native thinking levels.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Capabilities {
+    #[serde(default)]
+    pub input: Vec<String>,
+    #[serde(default)]
+    pub output: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<Vec<String>>,
+}
 
 /// Why a turn stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

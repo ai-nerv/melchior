@@ -19,6 +19,9 @@ pub fn plain_model() -> Model {
         context_window: 200_000,
         max_tokens: 8192,
         cost: Cost::default(),
+        pricing: None,
+        popularity_rank: None,
+        capabilities: None,
         thinking: BTreeMap::new(),
         compat: None,
     }

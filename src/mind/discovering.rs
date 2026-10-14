@@ -9,6 +9,7 @@ use crate::mind::provider::model::Model;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
+mod capabilities;
 mod ollama;
 
 /// How long a fetched catalog is used before it is asked for again.
@@ -43,7 +44,17 @@ pub fn discover_with_refresh(providers: &mut [Provider], refresh: bool) -> Vec<S
             .map(|held| held.models)
             .or_else(|| {
                 let key = key_for(provider);
-                let fetched = fetch(&base, key.as_deref(), provider.details.as_deref());
+                let popularity = provider.details.as_deref() == Some("openrouter")
+                    || reqwest::Url::parse(&base).is_ok_and(|url| {
+                        url.host_str() == Some("openrouter.ai")
+                            && url.path().trim_end_matches('/') == "/api/v1"
+                    });
+                let fetched = fetch(
+                    &base,
+                    key.as_deref(),
+                    provider.details.as_deref(),
+                    popularity,
+                );
                 match fetched {
                     Some(models) => {
                         write_cache(&provider.id, &models);
@@ -135,8 +146,16 @@ pub(crate) fn key_for(provider: &Provider) -> Option<String> {
 /// Ask `<base>/models` what there is, on a thread with a runtime of its own: the synchronous
 /// caller is reached from an async daemon too, and building a runtime inside a running one
 /// panics.
-fn fetch(base: &str, key: Option<&str>, details: Option<&str>) -> Option<Vec<Model>> {
-    let url = format!("{}/models", base.trim_end_matches('/'));
+fn fetch(
+    base: &str,
+    key: Option<&str>,
+    details: Option<&str>,
+    popularity: bool,
+) -> Option<Vec<Model>> {
+    let mut url = reqwest::Url::parse(&format!("{}/models", base.trim_end_matches('/'))).ok()?;
+    if popularity {
+        url.query_pairs_mut().append_pair("sort", "most-popular");
+    }
     let key = key.map(ToOwned::to_owned);
     let ollama = (details == Some("ollama")).then(|| ollama::root(base));
     std::thread::spawn(move || {
@@ -149,7 +168,7 @@ fn fetch(base: &str, key: Option<&str>, details: Option<&str>) -> Option<Vec<Mod
                 .timeout(PATIENCE)
                 .build()
                 .ok()?;
-            let mut request = client.get(&url);
+            let mut request = client.get(url);
             if let Some(key) = key {
                 request = request.bearer_auth(key);
             }
@@ -163,7 +182,7 @@ fn fetch(base: &str, key: Option<&str>, details: Option<&str>) -> Option<Vec<Mod
                 .await
                 .ok()?;
             let entries = body.get("data")?.as_array()?;
-            let listed = parse(&body);
+            let listed = ranked(&body, popularity);
             if !entries.is_empty() && listed.is_empty() {
                 return None;
             }
@@ -194,6 +213,21 @@ pub fn parse(body: &serde_json::Value) -> Vec<Model> {
     entries.iter().filter_map(one).collect()
 }
 
+fn ranked(body: &serde_json::Value, popularity: bool) -> Vec<Model> {
+    let Some(entries) = body.get("data").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let mut model = one(entry)?;
+            model.popularity_rank = popularity.then_some(index as u64 + 1);
+            Some(model)
+        })
+        .collect()
+}
+
 /// One entry of a `/models` answer.
 fn one(entry: &serde_json::Value) -> Option<Model> {
     let id = entry.get("id")?.as_str()?.to_owned();
@@ -222,10 +256,25 @@ fn one(entry: &serde_json::Value) -> Option<Model> {
         context_window: window,
         max_tokens: ceiling,
         cost: cost(entry),
+        pricing: pricing(entry),
+        popularity_rank: None,
+        capabilities: Some(capabilities::from_entry(entry)),
         // Overwritten by the provider, which knows its own id and protocol.
         provider: String::new(),
         api: crate::mind::provider::model::Api::OpenAiCompletions,
-        input: vec![crate::mind::provider::model::Modality::Text],
+        input: {
+            use crate::mind::provider::model::Modality;
+            let mut input = vec![Modality::Text];
+            if entry
+                .pointer("/architecture/input_modalities")
+                .or_else(|| entry.get("input"))
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|items| items.iter().any(|item| item.as_str() == Some("image")))
+            {
+                input.push(Modality::Image);
+            }
+            input
+        },
         thinking: levels(entry),
         compat: None,
     })
@@ -282,21 +331,26 @@ fn reasons(entry: &serde_json::Value) -> bool {
 /// Price per million tokens, from the dollars-per-token decimal string providers quote; an
 /// unreadable price is no price rather than a wrong one.
 fn cost(entry: &serde_json::Value) -> crate::mind::model::Cost {
-    let Some(pricing) = entry.get("pricing") else {
-        return crate::mind::model::Cost::default();
-    };
-    let each = |name: &str| -> f64 {
-        pricing
-            .get(name)
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<f64>().ok())
-            .map_or(0.0, |per_token| per_token * 1_000_000.0)
-    };
     crate::mind::model::Cost {
-        input: each("prompt"),
-        output: each("completion"),
+        input: rate(entry, "prompt").unwrap_or_default(),
+        output: rate(entry, "completion").unwrap_or_default(),
         ..crate::mind::model::Cost::default()
     }
+}
+
+fn pricing(entry: &serde_json::Value) -> Option<crate::mind::model::Pricing> {
+    let input = rate(entry, "prompt").map(|rate| rate.to_string());
+    let output = rate(entry, "completion").map(|rate| rate.to_string());
+    (input.is_some() || output.is_some()).then_some(crate::mind::model::Pricing { input, output })
+}
+
+fn rate(entry: &serde_json::Value, name: &str) -> Option<f64> {
+    let value = entry.get("pricing")?.get(name)?;
+    let per_token = value
+        .as_f64()
+        .or_else(|| value.as_str()?.parse::<f64>().ok())?;
+    let per_million = per_token * 1_000_000.0;
+    (per_million.is_finite() && per_million >= 0.0).then_some(per_million)
 }
 
 /// A number that may have arrived as a float, an integer, or a string.
@@ -312,6 +366,56 @@ fn number(value: &serde_json::Value, name: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalogs_advertise_vision_only_when_the_provider_does() {
+        let body = serde_json::json!({"data":[
+            {"id":"vision", "architecture":{"input_modalities":["text","image","audio"]}},
+            {"id":"text", "architecture":{"input_modalities":["text"]}},
+            {"id":"unspecified"},
+            {"id":"native", "input":["text","image"]}
+        ]});
+        let models = parse(&body);
+        assert!(models[0].accepts_images());
+        assert!(!models[1].accepts_images());
+        assert!(!models[2].accepts_images());
+        assert!(models[3].accepts_images());
+    }
+
+    #[test]
+    fn published_prices_preserve_free_unknown_and_invalid_rates() {
+        let entry = serde_json::json!({"pricing":{"prompt":"0","completion":0.000002}});
+        let prices = pricing(&entry).expect("published prices");
+        assert_eq!(prices.input.as_deref(), Some("0"));
+        assert_eq!(prices.output.as_deref(), Some("2"));
+        assert_eq!(cost(&entry).output, 2.0);
+        assert!(pricing(&serde_json::json!({})).is_none());
+        for invalid in ["-1", "NaN", "inf", "1e308", "not-a-price"] {
+            let entry = serde_json::json!({"pricing":{"prompt":invalid,"completion":"0"}});
+            let prices = pricing(&entry).expect("free output is known");
+            assert!(prices.input.is_none());
+            assert_eq!(prices.output.as_deref(), Some("0"));
+            assert_eq!(cost(&entry).input, 0.0);
+        }
+    }
+
+    #[test]
+    fn only_a_popularity_sorted_catalog_supplies_weekly_positions() {
+        let body = serde_json::json!({"data":[{"id":"popular"},{"not_an_id":true},{"id":"next"}]});
+        let found = ranked(&body, true);
+        assert_eq!(found[0].popularity_rank, Some(1));
+        assert_eq!(found[1].popularity_rank, Some(3));
+        assert!(
+            ranked(&body, false)
+                .iter()
+                .all(|model| model.popularity_rank.is_none())
+        );
+        assert!(
+            parse(&body)
+                .iter()
+                .all(|model| model.popularity_rank.is_none())
+        );
+    }
 
     /// One entry in the shape OpenRouter answers with.
     fn rich() -> serde_json::Value {

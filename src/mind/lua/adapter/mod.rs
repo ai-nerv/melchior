@@ -300,6 +300,9 @@ mod thinking_tests {
             context_window: 1000,
             max_tokens: 100,
             cost: crate::mind::model::Cost::default(),
+            pricing: None,
+            popularity_rank: None,
+            capabilities: None,
             thinking,
             compat: None,
         }

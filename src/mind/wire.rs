@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 /// One model, as melchior describes it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Card {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vision: bool,
     /// How an [`Ask`] names it: `provider/model`.
     pub id: String,
     pub provider: String,
@@ -23,6 +25,13 @@ pub struct Card {
     pub context_window: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<crate::mind::model::Pricing>,
+    /// Position in OpenRouter's weekly popularity-sorted model catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub popularity_rank: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<crate::mind::model::Capabilities>,
     /// Whether it reasons, so a caller knows whether asking for thinking means anything.
     #[serde(default)]
     pub reasons: bool,
@@ -272,6 +281,10 @@ mod tests {
             api: "openai".into(),
             context_window: Some(200_000),
             max_output: None,
+            pricing: None,
+            popularity_rank: None,
+            capabilities: None,
+            vision: false,
             reasons: true,
             ready: false,
             needs: Some("OPENROUTER_API_KEY".into()),
