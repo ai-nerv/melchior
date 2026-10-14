@@ -44,6 +44,10 @@ anyhow = "1"
 
 [dev-dependencies]
 
+# An overflow is a panic in the shipped binary as it is in the tests, never a silent wrap.
+[profile.release]
+overflow-checks = true
+
 # The same gate this code was written under, not a stricter one. Tightening it on the way out
 # would mean rewriting working code to satisfy a rule nobody had chosen, in the same change that
 # is meant to prove it moved unaltered.
