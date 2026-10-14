@@ -142,23 +142,15 @@ fn identical_large_reports_on_separate_turns_have_distinct_receipts() {
     let runtime = Scratch::new("mt", "repeat");
     let parent = Agent::start(&runtime, "parent", None);
     let child = Agent::start(&runtime, "psi-zeta", Some("parent"));
-    let body = "No findings from this scan.\n".repeat(8000);
+    // Just under what one argument may carry: the body comes only in the message.
+    let body = "No findings from this scan.\n".repeat(4000);
     let mut revisions = Vec::new();
     for _ in 0..2 {
-        let mut submit = command(&runtime, &child.id, child.parent.as_deref())
-            .args(["tool", "--verb=report", "--about=-"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("stdin report submission");
-        submit
-            .stdin
-            .take()
-            .expect("piped stdin")
-            .write_all(body.as_bytes())
-            .expect("large report input");
-        let output = submit.wait_with_output().expect("submission completes");
+        let output = command(&runtime, &child.id, child.parent.as_deref())
+            .args(["tool", "--verb=report", &format!("--message={body}")])
+            .stdin(Stdio::null())
+            .output()
+            .expect("report submission");
         assert!(
             output.status.success(),
             "{}",

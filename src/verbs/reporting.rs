@@ -98,30 +98,18 @@ pub fn report(arguments: &Value, standing: &Standing) -> Answer {
              session's own. Give one or the other.",
         ),
         (Some(who), None) => read(who, text("about"), standing),
-        (None, said) => hand_in(said, text("about"), standing),
+        (None, Some(said)) => hand_in(said, standing),
+        (None, None) => Answer::refused(
+            "`report` needs the report: the whole of it in `message`, however long. Nothing \
+             else is read for it — not a file, not standard input.",
+        ),
     }
 }
 
 /// Keep this session's report, and tell whoever started it that it is there.
-fn hand_in(said: Option<&str>, path: Option<&str>, standing: &Standing) -> Answer {
+fn hand_in(said: &str, standing: &Standing) -> Answer {
     let me = standing.identity();
-    let body = match (said, path) {
-        (Some(said), _) => said.to_owned(),
-        (None, Some(path)) => match if path == "-" {
-            std::io::read_to_string(std::io::stdin())
-        } else {
-            std::fs::read_to_string(path)
-        } {
-            Ok(body) => body,
-            Err(why) => return Answer::refused(format!("could not read `{path}`: {why}")),
-        },
-        (None, None) => {
-            return Answer::refused(
-                "`report` needs the report: the whole of it in `message`, however long, or the \
-                 path of a file holding it in `about`.",
-            );
-        }
-    };
+    let body = said.to_owned();
     let stored = Stored {
         parent: standing.parent.clone(),
         session: crate::directory::sessions::session_of(&me),
@@ -331,6 +319,21 @@ mod tests {
         // The name is an address and never a path.
         let lead = standing(&project, "iota-omega");
         assert!(report(&serde_json::json!({"who": "../../etc/passwd"}), &lead).failed);
+    }
+
+    #[test]
+    fn a_report_is_never_read_from_a_file_or_standard_input() {
+        let project = Project::new("melchior-reporting", "paths");
+        let scout = standing(&project, "pi-mu");
+        let secret = crate::scratch::Scratch::file("melchior-reporting", "paths", "secret.txt");
+        std::fs::write(&secret, "the private key").expect("a file");
+        for about in [secret.display().to_string(), "-".to_owned()] {
+            let out = report(&serde_json::json!({"about": about}), &scout);
+            assert!(out.failed, "`{about}` was taken as a report: {}", out.said);
+        }
+        let lead = standing(&project, "iota-omega");
+        let read = report(&serde_json::json!({"who": "pi-mu", "about": "json"}), &lead);
+        assert!(read.failed, "something was kept: {}", read.said);
     }
 
     #[test]

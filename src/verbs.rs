@@ -176,9 +176,9 @@ pub const VERBS: &[(&str, &str)] = &[
     // A result is a report and not a message: any length, handed in once, read when wanted.
     (
         "report",
-        "hand in this session's result, whole and of any length, in `message` (or the path of a \
-         file holding it in `about`) — never cut it into messages. With `who`, read the report \
-         that agent handed in, a page at a time (`about` is the line to start from)",
+        "hand in this session's result, whole and of any length, in `message` — never cut it \
+         into messages. With `who`, read the report that agent handed in, a page at a time \
+         (`about` is the line to start from)",
     ),
     (
         "task",

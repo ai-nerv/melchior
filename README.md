@@ -138,8 +138,9 @@ receives a known child's bare id in `about`, with `who` omitted or matching it, 
 that child's current agent status through the normal policy checks instead of rejecting the
 id as a malformed handle. This does not create an `ask` task or infer completion from a report.
 
-`tool --verb=report --message=<text>` stores the caller's report. For large reports,
-`tool --verb=report --about=-` reads the complete UTF-8 body from stdin. Submission atomically
+`tool --verb=report --message=<text>` stores the caller's report; the body comes only in the
+message — no file and no standard input is read for it. One argument holds at most 128 KiB, so a
+larger report goes through the socket's `tool` verb, whose frame holds 16 MiB. Submission atomically
 replaces the agent's stored report and sends its parent a non-interrupting `report` notification
 with a distinct submission revision. Repeating identical text on another turn is a new revision.
 Read with `--who=<id>` for pages, or add `--about=json` for the whole body, revision and SHA-256
