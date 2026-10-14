@@ -138,6 +138,10 @@ body "$SANDBOX" '^pub fn apply[(]' | grep -q 'guard_setmetatable(ctx)' || {
   echo "gate-sandbox: setmetatable no longer refuses __gc, and nothing here runs finalizers" >&2
   fail=1
 }
+body "$SANDBOX" '^pub fn apply[(]' | grep -q 'hide_userdata_metatables(ctx)' || {
+  echo "gate-sandbox: getmetatable hands out a userdata's metatable again" >&2
+  fail=1
+}
 
 # ---- every chunk runs on a budget ---------------------------------------------------------------
 body "$ENGINE" 'pub fn run_within[(]' | grep -q 'Fuel::with(' || {

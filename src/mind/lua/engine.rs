@@ -606,4 +606,29 @@ mod finalizer_tests {
         let after = engine.lua.total_memory();
         assert!(after < before + (1 << 20), "{before} -> {after} bytes");
     }
+
+    #[test]
+    fn an_error_lends_no_metatable_that_would_enrol_every_later_error() {
+        let mut engine = Engine::new();
+        engine.lua.gc_collect();
+        let before = engine.lua.total_memory();
+        engine
+            .run(
+                "local _, raised = pcall(string.rep)\n\
+                 local shared = getmetatable(raised)\n\
+                 if type(shared) == 'table' then shared.__gc = function() end end\n\
+                 for _ = 1, 50000 do pcall(string.rep) end\n\
+                 melchior.raised, melchior.shared = type(raised), type(shared)",
+                "raised.lua",
+            )
+            .expect("runs");
+        engine.harvest();
+        let config = engine.config();
+        assert_eq!(config.string("raised"), Some("userdata"));
+        assert_eq!(config.string("shared"), Some("nil"));
+        engine.lua.gc_collect();
+        engine.lua.gc_collect();
+        let after = engine.lua.total_memory();
+        assert!(after < before + (1 << 20), "{before} -> {after} bytes");
+    }
 }

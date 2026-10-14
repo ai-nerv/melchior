@@ -47,7 +47,27 @@ pub fn apply(lua: &mut Lua) {
         }
         guard_load(ctx);
         guard_setmetatable(ctx);
+        hide_userdata_metatables(ctx);
     });
+}
+
+/// Replace `getmetatable` with one that answers `nil` for a userdata: luna attaches one shared
+/// metatable to every error it raises as a userdata.
+fn hide_userdata_metatables(ctx: Context<'_>) {
+    let Ok(original) = ctx.get_global::<Function>("getmetatable") else {
+        return;
+    };
+    let hidden = Callback::from_fn_with(&ctx, original, |original, ctx, _exec, mut stack| {
+        if matches!(stack.get(0), Value::UserData(_)) {
+            stack.replace(ctx, Value::Nil);
+            return Ok(CallbackReturn::Return);
+        }
+        Ok(CallbackReturn::Call {
+            function: *original,
+            then: None,
+        })
+    });
+    ctx.set_global("getmetatable", hidden);
 }
 
 /// Replace `setmetatable` with one that refuses a metatable carrying `__gc`, so nothing is ever
