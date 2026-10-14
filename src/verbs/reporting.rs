@@ -7,6 +7,7 @@
 //! wants to, a page at a time.
 
 use super::{Answer, Standing};
+use crate::policy::{self, Reach, Relation, Whom};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::io::Write;
@@ -18,6 +19,12 @@ struct Stored {
     revision: String,
     digest: String,
     report: String,
+    /// Who started the writer and which run it was in, so a reader can be placed against it
+    /// after it has gone.
+    #[serde(default)]
+    parent: Option<String>,
+    #[serde(default)]
+    session: Option<String>,
 }
 
 fn stored(body: String) -> Stored {
@@ -37,6 +44,8 @@ fn stored(body: String) -> Stored {
         revision,
         digest,
         report: body,
+        parent: None,
+        session: None,
     }
 }
 
@@ -113,7 +122,11 @@ fn hand_in(said: Option<&str>, path: Option<&str>, standing: &Standing) -> Answe
             );
         }
     };
-    let stored = stored(body.clone());
+    let stored = Stored {
+        parent: standing.parent.clone(),
+        session: crate::directory::sessions::session_of(&me),
+        ..stored(body.clone())
+    };
     let at = kept_at(&me.project, &me.id);
     if let Err(why) = std::fs::create_dir_all(crate::directory::home(&me.project))
         .and_then(|()| keep(&at, &stored))
@@ -154,6 +167,39 @@ fn hand_in(said: Option<&str>, path: Option<&str>, standing: &Standing) -> Answe
     })
 }
 
+/// Why this session may not read `id`'s report, if it may not: the same wall an `ask` meets, with
+/// `id` placed by the tree as it is now or, for an agent that has gone, as its report recorded.
+/// A report written in a run the agent now answering under that id was never part of is not its.
+fn barred(id: &str, stored: Option<&Stored>, standing: &Standing) -> Option<Answer> {
+    let me = standing.whom();
+    let live = crate::directory::whom(&me.project, id);
+    let kept = stored.and_then(|stored| stored.session.clone());
+    if let (Some(kept), Some(now)) = (&kept, &live.session)
+        && kept != now
+    {
+        return Some(Answer::refused(format!(
+            "`{id}` has handed in no report in the run it is part of now."
+        )));
+    }
+    let them = Whom {
+        parent: live
+            .parent
+            .clone()
+            .or_else(|| stored.and_then(|stored| stored.parent.clone())),
+        session: live.session.clone().or(kept),
+        ..live
+    };
+    let relation = if id == me.id {
+        Relation::Myself
+    } else if standing.forked.iter().any(|child| child == id) {
+        Relation::Child
+    } else {
+        policy::between(&me, &them)
+    };
+    (!policy::may(&me, relation, Reach::Ask))
+        .then(|| Answer::refused(policy::refusal(&me, relation, Reach::Ask)))
+}
+
 /// One page of `who`'s report, starting at the line `from` names.
 fn read(who: &str, from: Option<&str>, standing: &Standing) -> Answer {
     let me = standing.identity();
@@ -167,6 +213,9 @@ fn read(who: &str, from: Option<&str>, standing: &Standing) -> Answer {
     let stored = serde_json::from_str::<Stored>(&body)
         .ok()
         .filter(|stored| stored.format == "melchior-report-v1");
+    if let Some(refused) = barred(id, stored.as_ref(), standing) {
+        return refused;
+    }
     let (body, revision, digest) = match stored {
         Some(stored) => (stored.report, stored.revision, stored.digest),
         None => {
@@ -293,6 +342,43 @@ mod tests {
         let lead = standing(&project, "iota-omega");
         let read = report(&serde_json::json!({"who": "pi-mu"}), &lead);
         assert!(read.said.ends_with("final"), "{}", read.said);
+    }
+
+    #[test]
+    fn a_report_is_read_only_across_the_walls_an_ask_crosses() {
+        let project = Project::new("melchior-reporting", "walled");
+        let mut scout = standing(&project, "gamma-xi");
+        scout.parent = Some("alpha-rho".to_owned());
+        let them = crate::identity::Identity::read(&scout.me).expect("a name");
+        crate::directory::adopted(&them, "alpha-rho").expect("the note");
+        assert!(!report(&serde_json::json!({"message": "mine"}), &scout).failed);
+
+        let stranger = standing(&project, "iota-omega");
+        let refused = report(&serde_json::json!({"who": "gamma-xi"}), &stranger);
+        assert!(refused.failed, "another main read a subagent's report");
+        assert!(refused.said.contains("agent_talk"), "{}", refused.said);
+
+        let mut lead = standing(&project, "alpha-rho");
+        lead.forked.push("gamma-xi".to_owned());
+        let read = report(&serde_json::json!({"who": "gamma-xi"}), &lead);
+        assert!(!read.failed, "{}", read.said);
+    }
+
+    #[test]
+    fn a_report_left_by_an_earlier_agent_of_the_same_name_is_not_this_one_s() {
+        let project = Project::new("melchior-reporting", "recycled");
+        let scout = standing(&project, "pi-mu");
+        let them = crate::identity::Identity::read(&scout.me).expect("a name");
+        std::fs::write(crate::directory::sessions::session_at(&them), "pi-mu-1").expect("note");
+        report(&serde_json::json!({"message": "old work"}), &scout);
+        std::fs::write(crate::directory::sessions::session_at(&them), "pi-mu-2").expect("note");
+        let lead = standing(&project, "iota-omega");
+        let read = report(&serde_json::json!({"who": "pi-mu"}), &lead);
+        assert!(
+            read.failed,
+            "a predecessor's report was read: {}",
+            read.said
+        );
     }
 
     #[test]
