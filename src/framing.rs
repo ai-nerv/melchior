@@ -122,6 +122,30 @@ pub async fn read_wire<T: DeserializeOwned, R: AsyncRead + Unpin>(
     Ok((Wire::read_any(&body)?, Wire::of(&body)))
 }
 
+/// [`read_wire`] under two deadlines: `idle` for the first byte to come, then `frame` for the rest
+/// of the frame. Either passing is `TimedOut`.
+pub async fn read_wire_within<T: DeserializeOwned, R: AsyncRead + Unpin>(
+    from: &mut R,
+    idle: std::time::Duration,
+    frame: std::time::Duration,
+) -> std::io::Result<(T, Wire)> {
+    let late = |what: &str| std::io::Error::new(std::io::ErrorKind::TimedOut, what.to_owned());
+    let mut header = [0_u8; 4];
+    tokio::time::timeout(idle, from.read_exact(&mut header[..1]))
+        .await
+        .map_err(|_| late("nothing was said in time"))??;
+    let rest = async {
+        from.read_exact(&mut header[1..]).await?;
+        let mut body = vec![0_u8; expecting(header)?];
+        from.read_exact(&mut body).await?;
+        Ok::<_, std::io::Error>(body)
+    };
+    let body = tokio::time::timeout(frame, rest)
+        .await
+        .map_err(|_| late("a frame stopped half way"))??;
+    Ok((Wire::read_any(&body)?, Wire::of(&body)))
+}
+
 /// Write one message to an async stream.
 pub async fn write<T: Serialize, W: AsyncWrite + Unpin>(
     to: &mut W,
@@ -294,6 +318,27 @@ mod encoding_tests {
         let back_cbor: Call = Wire::read_any(&as_cbor).expect("cbor");
         assert_eq!(back_json.call, back_cbor.call, "one shape, two encodings");
         assert_eq!(back_json.args, back_cbor.args);
+    }
+
+    #[tokio::test]
+    async fn a_caller_that_goes_quiet_or_stops_half_way_is_given_up_on() {
+        use std::time::Duration;
+        let (mut far, mut near) = tokio::io::duplex(64);
+        let quiet: std::io::Result<(Call, Wire)> =
+            read_wire_within(&mut near, Duration::from_millis(50), Duration::from_secs(5)).await;
+        assert_eq!(
+            quiet.expect_err("idle").kind(),
+            std::io::ErrorKind::TimedOut
+        );
+
+        tokio::io::AsyncWriteExt::write_all(&mut far, &[0, 0])
+            .await
+            .expect("half a header");
+        let half: std::io::Result<(Call, Wire)> =
+            read_wire_within(&mut near, Duration::from_secs(5), Duration::from_millis(50)).await;
+        let why = half.expect_err("mid-frame");
+        assert_eq!(why.kind(), std::io::ErrorKind::TimedOut, "{why}");
+        assert!(why.to_string().contains("half way"), "{why}");
     }
 
     #[tokio::test]

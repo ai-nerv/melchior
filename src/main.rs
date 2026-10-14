@@ -405,23 +405,23 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
             });
         }
 
-        // The note beside the socket, so the tree can be read off the directory. Refused rather
-        // than served when it will not land: without it a session comes up as a main, with a
-        // main's reach.
-        if let Err(why) = melchior::directory::announce(&me, &role, ui.as_deref()) {
-            eprintln!("melchior serve: {why}");
-            std::process::exit(1);
-        }
+        // Bound first, under its lock, so a second session given the same name fails here and
+        // writes over none of the first's notes.
         let at = melchior::directory::listening_at(&me);
-
-        // Bound here, and only then announced: saying "listening" first announces a future.
-        let listener = match melchior::serving::listening_on(&at).await {
-            Ok(listener) => listener,
+        let (listener, lease) = match melchior::serving::listening_on(&at).await {
+            Ok(bound) => bound,
             Err(why) => {
                 eprintln!("melchior serve: {}: {why}", at.display());
                 std::process::exit(1);
             }
         };
+        // Then the notes, so the tree can be read off the directory. Refused rather than served
+        // when they will not land: without them a session reads as a main.
+        if let Err(why) = melchior::directory::announce(&me, &role, ui.as_deref()) {
+            eprintln!("melchior serve: {why}");
+            lease.release();
+            std::process::exit(1);
+        }
         say(&Heard::Listening {
             at: at.display().to_string(),
             named: me.full(),
@@ -594,7 +594,7 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         }
         melchior::noted!("serve: {} ends", me.full());
         melchior::directory::forget(&me);
-        let _ = std::fs::remove_file(&at);
+        lease.release();
         // And the directory itself, which refuses while anybody else is still in the project.
         melchior::directory::leave(&me.project);
         Ok(())

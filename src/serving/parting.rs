@@ -149,9 +149,70 @@ async fn a_frame_of_no_bytes_is_refused_as_malformed() {
 #[test]
 fn a_reply_over_the_cap_is_replaced_by_the_refusal_that_says_so() {
     let huge = crate::wire::Reply::of(serde_json::json!("z".repeat(crate::framing::MOST)));
-    let out = super::written(crate::framing::Wire::Json, &huge).expect("something to write");
+    let out =
+        super::talking::written(crate::framing::Wire::Json, &huge).expect("something to write");
     let replies = frames(&out);
     assert_eq!(replies.len(), 1);
     assert_eq!(replies[0]["fault"], "failed", "{}", replies[0]);
     assert!(out.len() < 1024, "the refusal is small: {}", out.len());
+}
+
+#[tokio::test]
+async fn a_caller_past_the_limit_is_told_it_is_busy() {
+    let it = alone("busy");
+    let them = named(&it, "rho-sigma");
+    let _bound = listening(&them).await;
+    let at = crate::directory::listening_at(&them);
+
+    let reply = tokio::task::spawn_blocking(move || {
+        // Once the dial that found it listening has been let go of.
+        std::thread::sleep(Duration::from_millis(200));
+        let held: Vec<std::os::unix::net::UnixStream> = (0..super::CALLERS)
+            .map(|_| std::os::unix::net::UnixStream::connect(&at).expect("connected"))
+            .collect();
+        std::thread::sleep(Duration::from_millis(200));
+        let back = one_shot(&at, &[]);
+        drop(held);
+        back
+    })
+    .await
+    .expect("the thread finished");
+
+    let replies = frames(&reply);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert_eq!(replies[0]["fault"], "failed", "{}", replies[0]);
+    assert!(
+        replies[0]["error"]
+            .as_str()
+            .is_some_and(|why| why.starts_with("busy")),
+        "{}",
+        replies[0]
+    );
+}
+
+#[tokio::test]
+async fn a_verb_that_calls_this_session_is_answered_in_place_and_does_not_stall() {
+    // `role` reaches this session's own socket. Answered on the loop, that dial waited on the
+    // loop itself and timed out after ten seconds.
+    let it = alone("itself");
+    let them = named(&it, "sigma-tau");
+    let _bound = super::tests::listening_as_own(&them).await;
+
+    let began = std::time::Instant::now();
+    let reply = tokio::task::spawn_blocking(move || {
+        let mut held = crate::directory::dial(&them, &them).expect("it is listening");
+        held.call(
+            "tool",
+            vec![serde_json::json!({"verb": "role", "role": "reviewer", "message": "reads"})],
+        )
+        .expect("answered")
+    })
+    .await
+    .expect("the thread finished");
+    assert!(reply.ok, "{reply:?}");
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        began.elapsed()
+    );
 }

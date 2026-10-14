@@ -21,12 +21,12 @@ pub struct Pinned {
     pub claimed: Option<(String, String)>,
 }
 
-/// Read the far end of `stream` once: its kinship from `/proc/<pid>/stat`, its name from
+/// Read the far end, process `pid`, once: its kinship from `/proc/<pid>/stat`, its name from
 /// `/proc/<pid>/environ`, and the start time checked again after, so a pid reused in between
 /// pins nothing.
 #[must_use]
-pub fn pinned(stream: &tokio::net::UnixStream, origin: Option<&crate::kin::Origin>) -> Pinned {
-    let Some(pid) = stream.peer_cred().ok().and_then(|cred| cred.pid()) else {
+pub fn pinned(pid: Option<i32>, origin: Option<&crate::kin::Origin>) -> Pinned {
+    let Some(pid) = pid else {
         return Pinned::default();
     };
     let Some(before) = crate::kin::stat(pid) else {

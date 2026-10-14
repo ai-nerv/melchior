@@ -466,17 +466,18 @@ pub fn listening(project: &str) -> Vec<String> {
     out
 }
 
-/// Whether anything is serving at `path`. A listener answers from the moment it is bound, so this
-/// is never a false negative against a session that is merely busy.
+/// Whether anything may be serving at `path`: gone only on `ECONNREFUSED` or `ENOENT`, asked
+/// without waiting, so a busy or stopped peer is never swept and never stalls the asker.
 #[must_use]
 pub fn answers(path: &Path) -> bool {
-    std::os::unix::net::UnixStream::connect(path).is_ok()
+    crate::asking::alive(path)
 }
 
 /// Take a dead session out of the directory: its socket, the notes beside it, and its claims.
 fn forget_id(project: &str, id: &str) {
     let _ = std::fs::remove_file(socket(project, id));
     let _ = std::fs::remove_file(home(project).join(format!("{}.parent", safe(id))));
+    let _ = std::fs::remove_file(home(project).join(format!("{}.lock", safe(id))));
     pending::forget_in(project, id);
     sessions::forget_in(project, id);
     roles::forget_in(project, id);

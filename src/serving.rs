@@ -1,49 +1,44 @@
 //! Listening, so another instance can reach this one.
 //!
-//! Nothing here decides anything: it frames bytes, works out where the caller sits in the tree,
-//! and hands both to [`crate::answering::answer`], which is where the permission check and the
-//! vocabulary live.
+//! Nothing here decides anything: it frames bytes, pins who the far end is, and hands both to
+//! [`crate::answering::answer`], which is where the permission check and the vocabulary live.
 
-use crate::answering::{About, Then, answer};
+use crate::answering::About;
 use crate::directory::inside;
 use crate::framing;
-use crate::wire::{Call, Message, Reply};
+use crate::wire::{Message, Reply};
 use std::path::Path;
 use tokio::sync::mpsc;
 
-/// How many callers may be connected at once, bounded because the socket is reachable by
-/// anything running as this user.
+pub mod binding;
+pub mod callers;
+mod talking;
+
+/// How many callers may be connected at once; the next is told it is busy.
 const CALLERS: usize = 8;
 
-/// How long a connection may sit idle before it is dropped.
-const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
-
 /// What the socket needs from the session, and what it sends back to it.
+#[derive(Clone)]
 pub struct Serving {
     /// Told what this instance is doing, whenever a call needs to know.
     pub about: tokio::sync::watch::Receiver<About>,
     /// Messages that arrived, on their way to the inbox.
     pub arrived: mpsc::Sender<Message>,
-    /// Requests that arrived, on their way to the person at the keyboard. Separate from
-    /// `arrived` because a request waits for an answer only a person can give.
+    /// Requests to be taken on, on their way to the person at the keyboard.
     pub asked: mpsc::Sender<crate::wire::Request>,
-    /// What a parent handed over when it took this session on (for the harness), and the stop
-    /// secret it minted (for the loop's own record, never the harness).
+    /// What a parent handed over when it took this session on, and the stop secret it minted.
     pub adopted: mpsc::Sender<(String, Option<String>, Option<String>)>,
     /// Somebody with the right to stop this instance did.
     pub stopped: mpsc::Sender<()>,
-    /// A child was named and its secret minted, on its way to this session's own record of it.
-    /// Carried up rather than written here: the loop that owns `About` is its only writer.
+    /// A child was named and its secret minted, for the loop's record of it.
     pub minted: mpsc::Sender<(String, String)>,
-    /// This session has been told what it is for, on its way to the note every peer reads. Up
-    /// rather than written here, so one file has one writer.
+    /// This session has been told what it is for, for the loop to write down.
     pub named: mpsc::Sender<crate::directory::roles::Role>,
 }
 
-/// Listen on `path` until the process ends. A stale socket is cleared first: `bind` fails with
-/// `EADDRINUSE` on a path whose maker is long gone.
+/// Listen on `path` until the process ends.
 pub async fn serve(path: &Path, serving: Serving) -> std::io::Result<()> {
-    accept(listening_on(path).await?, serving).await
+    serve_from(path, serving, crate::kin::Origin::here()).await
 }
 
 /// The same, vouching only for what `origin` started: `None` vouches for nobody.
@@ -52,16 +47,21 @@ pub async fn serve_from(
     serving: Serving,
     origin: Option<crate::kin::Origin>,
 ) -> std::io::Result<()> {
-    accept_from(listening_on(path).await?, serving, origin).await
+    let (listener, lease) = listening_on(path).await?;
+    let served = accept_from(listener, serving, origin).await;
+    lease.release();
+    served
 }
 
 /// Take the socket, and hand it back before anything is served on it, so a caller can say "I am
-/// reachable" at the moment it becomes true.
-pub async fn listening_on(path: &Path) -> std::io::Result<tokio::net::UnixListener> {
+/// reachable" at the moment it becomes true. The lease gives the path back.
+pub async fn listening_on(
+    path: &Path,
+) -> std::io::Result<(tokio::net::UnixListener, binding::Lease)> {
     if !inside(path) {
         return Err(std::io::Error::other("that is not an instance socket"));
     }
-    bind(path).await
+    binding::bind(path)
 }
 
 /// Accept callers on a socket already taken, and serve them until the process ends.
@@ -70,181 +70,85 @@ pub async fn accept(listener: tokio::net::UnixListener, serving: Serving) -> std
     accept_from(listener, serving, crate::kin::Origin::here()).await
 }
 
-/// [`accept`], vouching for what `origin` started.
+/// [`accept`], vouching for what `origin` started. A call this process makes to its own socket is
+/// answered in place, as this session, without the socket.
 pub async fn accept_from(
     listener: tokio::net::UnixListener,
     serving: Serving,
     origin: Option<crate::kin::Origin>,
 ) -> std::io::Result<()> {
     let held = std::sync::Arc::new(tokio::sync::Semaphore::new(CALLERS));
-
+    if origin.is_some()
+        && let Ok(at) = listener.local_addr()
+        && let Some(path) = at.as_pathname()
+    {
+        answer_here(path, &serving);
+    }
     loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            continue;
+        let stream = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            // Out of descriptors, buffers or a connection aborted: a moment, not an ending.
+            Err(why) => {
+                crate::noted!("serve: accept failed, trying again: {why}");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
         };
         // Another user's process gets nothing at all, whatever it says about itself.
         if !ours(&stream) {
             continue;
         }
-        // Refused rather than queued: a caller told "busy" can ask again, while one held in a
-        // queue waits on a session that may be blocked for a whole turn.
         let Ok(permit) = std::sync::Arc::clone(&held).try_acquire_owned() else {
+            tokio::spawn(busy(stream));
             continue;
         };
-        let serving = Serving {
-            about: serving.about.clone(),
-            arrived: serving.arrived.clone(),
-            asked: serving.asked.clone(),
-            adopted: serving.adopted.clone(),
-            stopped: serving.stopped.clone(),
-            minted: serving.minted.clone(),
-            named: serving.named.clone(),
-        };
-        let pinned = callers::pinned(&stream, origin.as_ref());
+        let serving = serving.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            let _ = talk(stream, pinned, serving).await;
+            let pid = stream.peer_cred().ok().and_then(|cred| cred.pid());
+            let pinned = tokio::task::spawn_blocking(move || callers::pinned(pid, origin.as_ref()))
+                .await
+                .unwrap_or_default();
+            let _ = talking::talk(stream, pinned, serving).await;
         });
     }
 }
 
-/// One connection, for as many calls as it cares to make. It keeps serving after replying: a
-/// client that holds its connection dies on its second call against a server that closes.
-async fn talk(
-    stream: tokio::net::UnixStream,
-    pinned: callers::Pinned,
-    serving: Serving,
-) -> std::io::Result<()> {
-    let (mut reader, mut writer) = stream.into_split();
-
-    loop {
-        // Read with the encoding it arrived in, so the reply goes back the same way.
-        let (call, wire): (Call, framing::Wire) =
-            match tokio::time::timeout(IDLE, framing::read_wire(&mut reader)).await {
-                Ok(Ok(pair)) => pair,
-                // Hanging up is not a mistake. A caller that has said everything closes its
-                // write half and reads on, so answering the `UnexpectedEof` with a refusal sends
-                // it a second frame saying something untrue.
-                Ok(Err(why)) if why.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
-                // A malformed or oversized frame still gets an answer, then the connection ends: a
-                // body that will not be read cannot be skipped and stay in step.
-                Ok(Err(why)) => {
-                    let _ = framing::write(&mut writer, &unread(&why)).await;
-                    return Ok(());
-                }
-                Err(_) => return Ok(()),
-            };
-        let mut about = serving.about.borrow().clone();
-        // This session's own parent changes from outside — another session accepts it as a child
-        // and writes the note — so it is re-read per call rather than trusted from startup.
-        about.parent = crate::directory::parent_of(&about.me);
-        // Who the connection is was pinned when it was accepted; where it sits is read per call.
-        let caller = callers::caller_of(&call, &pinned, &about);
-        let began = std::time::Instant::now();
-        let (reply, then) = answer(&call, &about, caller.as_ref());
-        // A `status` answered is the roster's two-second poll: a change in it is logged as `roster`.
-        if call.call != "status" || !reply.ok {
-            crate::noted!(
-                "serve: {} from {} → {} in {}ms",
-                call.call,
-                caller.as_ref().map_or_else(
-                    || "nobody".to_owned(),
-                    |them| format!("{}/{}", them.project, them.id)
-                ),
-                if reply.ok {
-                    "ok".to_owned()
-                } else {
-                    format!(
-                        "refused: {}",
-                        crate::noted::short(reply.error.as_deref().unwrap_or_default())
-                    )
-                },
-                began.elapsed().as_millis()
-            );
-        }
-        {
-            use tokio::io::AsyncWriteExt;
-            writer.write_all(&written(wire, &reply)?).await?;
-            writer.flush().await?;
-        }
-        match then {
-            Then::Nothing => {}
-            Then::Keep(message) => {
-                crate::noted!("serve: message from {} ({:?})", message.from, message.sort);
-                let _ = serving.arrived.send(message).await;
-            }
-            Then::Adopted {
-                by,
-                handover,
-                secret,
-            } => {
-                crate::noted!("serve: taken on by {by}");
-                let _ = serving.adopted.send((by, handover, secret)).await;
-            }
-            Then::Ask(request) => {
-                crate::noted!("serve: {} asks to be taken on", request.from);
-                let _ = serving.asked.send(request).await;
-            }
-            Then::Minted { id, token } => {
-                crate::noted!("serve: minted {id}");
-                let _ = serving.minted.send((id, token)).await;
-            }
-            Then::Named(role) => {
-                crate::noted!("serve: named {}", role.name);
-                let _ = serving.named.send(role).await;
-            }
-            Then::Stop => {
-                crate::noted!("serve: stopped");
-                let _ = serving.stopped.send(()).await;
-                return Ok(());
-            }
-        }
-    }
+/// Answer calls this process makes to `path` as this session, in place.
+fn answer_here(path: &Path, serving: &Serving) {
+    let serving = serving.clone();
+    let own = callers::Pinned {
+        kinship: Some(crate::kin::Kinship::Session),
+        claimed: None,
+    };
+    crate::asking::answer_here(
+        path,
+        std::sync::Arc::new(move |call| {
+            let about = serving.about.borrow().clone();
+            let (reply, then) = talking::answered(&call, about, &own);
+            talking::deliver_here(then, &serving);
+            reply
+        }),
+    );
 }
 
-/// What a frame that was not read, or a reply that could not be written, is answered with: over
-/// the cap is `failed`, anything else that will not decode is `refused`.
-fn unread(why: &std::io::Error) -> Reply {
-    if framing::too_large(why) {
-        Reply::no(why.to_string(), crate::wire::Fault::Failed)
-    } else {
-        Reply::refused(why.to_string())
-    }
-}
-
-/// A reply as it goes out: one over the cap is replaced by the refusal that says so, and the
-/// connection stays in step.
-pub(crate) fn written(wire: framing::Wire, reply: &Reply) -> std::io::Result<Vec<u8>> {
-    match framing::framed(wire, reply) {
-        Err(why) if framing::too_large(&why) => framing::framed(wire, &unread(&why)),
-        framed => framed,
-    }
+/// One caller too many: told so, then closed.
+async fn busy(stream: tokio::net::UnixStream) {
+    let (_, mut writer) = stream.into_split();
+    let said = Reply::no(
+        format!("busy: this session is answering {CALLERS} callers already; ask again"),
+        crate::wire::Fault::Failed,
+    );
+    let _ = tokio::time::timeout(talking::FRAME, framing::write(&mut writer, &said)).await;
 }
 
 /// Whether the far end is this user at all, from `SO_PEERCRED` rather than anything the caller
-/// sent. It is also all the kernel can settle: every session in a project runs as one user.
+/// sent.
 fn ours(stream: &tokio::net::UnixStream) -> bool {
     stream
         .peer_cred()
-        .is_ok_and(|cred| cred.uid() == rustix::process::getuid().as_raw())
+        .is_ok_and(|cred| cred.uid() == crate::places::uid())
 }
-
-/// Listen at `path`, clearing what a crash left behind: a socket file outlives the process that
-/// made it, so `bind` fails with `EADDRINUSE` on a path nothing has answered. Connected to before
-/// removed, because a path that answers belongs to a running session.
-async fn bind(path: &Path) -> std::io::Result<tokio::net::UnixListener> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    if tokio::fs::metadata(path).await.is_ok()
-        && tokio::net::UnixStream::connect(path).await.is_err()
-    {
-        tokio::fs::remove_file(path).await?;
-    }
-    tokio::net::UnixListener::bind(path)
-}
-
-pub mod callers;
 
 /// Two instances, one socket, and a message that actually arrives. The one thing that cannot be
 /// settled without a socket is that the client half and the server half agree about the wire.

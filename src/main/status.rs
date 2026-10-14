@@ -37,7 +37,9 @@ pub(super) fn status_of(
         role: String::new(),
         id: id.to_owned(),
     };
-    let reply = melchior::directory::dial(&them, me)
+    // Bounded well inside the poll, so a stopped peer costs the roster a moment, not the tick.
+    let at = melchior::directory::listening_at(&them);
+    let reply = melchior::asking::Held::within(&at, me, std::time::Duration::from_secs(2))
         .ok()?
         .call("status", Vec::new())
         .ok()?;
