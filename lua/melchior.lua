@@ -6,6 +6,12 @@
 --   local them = melchior.connect("beta-nu")
 --   print(them.status())
 --
+-- The transport does the framing, so nothing here writes a length prefix or reads a frame:
+--
+--   transport.connect(path, timeout_ms)               -> handle | nil, why
+--   handle:call(request, { deadline_ms = N })          -> reply  | nil, why
+--   handle:close()
+--
 -- What is on the other end is one *session* — one agent, one conversation, one name. There is no
 -- server for the layer as a whole: every session binds its own socket and answers for itself, so
 -- "connect to melchior" is always "connect to somebody".
@@ -31,219 +37,8 @@ local M = { _NAME = "melchior", _VERSION = 1 }
 -- only its own name would fail on exactly the hosts it is meant to run in.
 local FAMILY = { "melchior", "magi", "aeon", "oslo", "hexe" }
 
--- ---------------------------------------------------------------- JSON, in Lua
-
--- Carried rather than required. The library runs inside somebody else's VM, so it cannot reach
--- the host's own JSON module — and a client that depended on there being one would be a
--- client most hosts could not load.
-
-local ESCAPES = {
-  ['"'] = '\\"', ['\\'] = '\\\\', ['\b'] = '\\b',
-  ['\f'] = '\\f', ['\n'] = '\\n', ['\r'] = '\\r', ['\t'] = '\\t',
-}
-
-local function quote(s)
-  return '"' .. s:gsub('[%c"\\]', function(c)
-    return ESCAPES[c] or string.format('\\u%04x', c:byte())
-  end) .. '"'
-end
-
-local encode
-
--- A Lua table is a map or a list and JSON is not, so the shape has to be decided. An empty table
--- encodes as an array: every argument list is one, and an empty *record* is not something the
--- surface below ever sends.
-local function is_list(t)
-  local n = 0
-  for _ in pairs(t) do n = n + 1 end
-  return n == #t
-end
-
-function encode(v, depth)
-  depth = (depth or 0) + 1
-  if depth > 24 then error("agent: value nested too deeply to send", 0) end
-
-  local kind = type(v)
-  if v == nil then return "null" end
-  if kind == "boolean" then return tostring(v) end
-  if kind == "string" then return quote(v) end
-  if kind == "number" then
-    if v ~= v or v == math.huge or v == -math.huge then
-      error("agent: " .. tostring(v) .. " cannot be sent", 0)
-    end
-    return (math.type and math.type(v) == "integer") and string.format("%d", v) or tostring(v)
-  end
-  if kind ~= "table" then error("agent: cannot send a " .. kind, 0) end
-
-  local out = {}
-  if is_list(v) then
-    for i = 1, #v do out[#out + 1] = encode(v[i], depth) end
-    return "[" .. table.concat(out, ",") .. "]"
-  end
-  for key, value in pairs(v) do
-    out[#out + 1] = quote(tostring(key)) .. ":" .. encode(value, depth)
-  end
-  return "{" .. table.concat(out, ",") .. "}"
-end
-
-local function decode(s)
-  local at = 1
-
-  local function fail(why) error("agent: bad reply at " .. at .. ": " .. why, 0) end
-  local function skip() at = s:find("[^ \t\r\n]", at) or #s + 1 end
-
-  local function literal(word, value)
-    if s:sub(at, at + #word - 1) ~= word then return nil, false end
-    at = at + #word
-    return value, true
-  end
-
-  local value
-
-  local function str()
-    at = at + 1
-    local out = {}
-    while true do
-      local c = s:sub(at, at)
-      if c == "" then fail("unterminated string") end
-      if c == '"' then at = at + 1; return table.concat(out) end
-      if c == "\\" then
-        local e = s:sub(at + 1, at + 1)
-        at = at + 2
-        if e == "n" then out[#out + 1] = "\n"
-        elseif e == "t" then out[#out + 1] = "\t"
-        elseif e == "r" then out[#out + 1] = "\r"
-        elseif e == "b" then out[#out + 1] = "\b"
-        elseif e == "f" then out[#out + 1] = "\f"
-        elseif e == "u" then
-          local hex = s:sub(at, at + 3)
-          at = at + 4
-          local code = tonumber(hex, 16) or fail("bad \\u")
-          -- A lone surrogate or anything past the BMP is not something this surface sends; the
-          -- byte-for-byte cases go through \u00xx, which is what the family escapes control bytes as.
-          out[#out + 1] = (code < 256) and string.char(code)
-            or (utf8 and utf8.char(code) or "?")
-        else out[#out + 1] = e end
-      else
-        out[#out + 1] = c
-        at = at + 1
-      end
-    end
-  end
-
-  function value()
-    skip()
-    local c = s:sub(at, at)
-    if c == '"' then return str() end
-    if c == "{" then
-      at = at + 1
-      local out = {}
-      skip()
-      if s:sub(at, at) == "}" then at = at + 1; return out end
-      while true do
-        skip()
-        if s:sub(at, at) ~= '"' then fail("wanted a key") end
-        local key = str()
-        skip()
-        if s:sub(at, at) ~= ":" then fail("wanted ':'") end
-        at = at + 1
-        out[key] = value()
-        skip()
-        local sep = s:sub(at, at)
-        at = at + 1
-        if sep == "}" then return out end
-        if sep ~= "," then fail("wanted ',' or '}'") end
-      end
-    end
-    if c == "[" then
-      at = at + 1
-      local out = {}
-      skip()
-      if s:sub(at, at) == "]" then at = at + 1; return out end
-      while true do
-        out[#out + 1] = value()
-        skip()
-        local sep = s:sub(at, at)
-        at = at + 1
-        if sep == "]" then return out end
-        if sep ~= "," then fail("wanted ',' or ']'") end
-      end
-    end
-    local got, found = literal("true", true)
-    if found then return got end
-    got, found = literal("false", false)
-    if found then return got end
-    got, found = literal("null", nil)
-    if found then return got end
-
-    local number = s:match("^-?%d+%.?%d*[eE]?[-+]?%d*", at)
-    if number and #number > 0 then
-      at = at + #number
-      return tonumber(number) or fail("bad number")
-    end
-    fail("unexpected " .. (c == "" and "end of reply" or ("'" .. c .. "'")))
-  end
-
-  local out = value()
-  return out
-end
-
--- ---------------------------------------------------------------- the frame
-
--- Four bytes of big-endian length, then the body. Written by hand rather than with `string.pack`,
--- which Lua 5.1 and LuaJIT do not have and one of the siblings might be.
-local function frame(body)
-  local n = #body
-  return string.char(
-    math.floor(n / 16777216) % 256,
-    math.floor(n / 65536) % 256,
-    math.floor(n / 256) % 256,
-    n % 256
-  ) .. body
-end
-
-local function be32(s)
-  return s:byte(1) * 16777216 + s:byte(2) * 65536 + s:byte(3) * 256 + s:byte(4)
-end
-
--- The family's frame cap, on both sides: 16 MiB. See FAMILY.md, "Frames".
-local MOST = 16777216
-
 -- The revision of the reply shape this library reads. A newer one is refused by name.
 local FAMILY_REVISION = 1
-
--- Take the connection down, and say why it went.
---
--- Nothing in a reply says which call it answers: the two ends are held in step by position alone,
--- one reply per call in the order the calls were made. So a call whose reply was abandoned — a
--- read timeout, a frame read in half — has left an answer on the wire that would be read as the
--- *next* call's, and every answer after that would belong to the call before it. The connection
--- goes instead, and the handle with it, so the guard at the top of `Session:call` refuses the
--- next one rather than something further down indexing a nil. Dial again.
---
--- See FAMILY.md, "A caller that abandons a call abandons the connection".
-local function adrift(session, why)
-  if session.handle then
-    session.handle:close()
-    session.handle = nil
-  end
-  return (why or "the connection failed")
-    .. " — this connection is closed, because a reply left on the wire would answer the next call"
-end
-
--- Read exactly `n` bytes, however many reads that takes. Every read this library does is here, so
--- a failure taking the connection with it is settled once and a reader written later inherits it.
-local function exactly(session, n)
-  local parts, have = {}, 0
-  while have < n do
-    local chunk, why = session.handle:recv(n - have)
-    if not chunk then return nil, adrift(session, why) end
-    if #chunk == 0 then return nil, adrift(session, "the session closed the connection") end
-    parts[#parts + 1] = chunk
-    have = have + #chunk
-  end
-  return table.concat(parts)
-end
 
 -- ---------------------------------------------------------------- the session
 
@@ -252,35 +47,20 @@ Session.__index = Session
 
 --- Send one call and wait for its answer.
 ---
+--- The handle frames it: the request is refused over the family's cap before a byte is sent, and
+--- any failure after the first byte leaves the handle closed, so the next call meets "this
+--- connection is closed" rather than the abandoned call's reply. See FAMILY.md, "A caller that
+--- abandons a call abandons the connection".
+---
 --- Every call carries `from`, for a reader of the frame. The far end never believes it: who is
 --- calling is read once when the connection is accepted, from the kernel and the calling
 --- process's environment, and placed in the tree off the project directory.
 function Session:call(name, ...)
   if not self.handle then return nil, "this connection is closed" end
-  local request = encode({ call = name, args = { ... }, from = self.from, token = self.token })
-  -- Refused here, before a byte is sent: the far end would answer it and close.
-  if #request > MOST then
-    return nil, "that call is " .. #request .. " bytes, over the family's cap of " .. MOST
-  end
-  -- A send that failed may still have put part of the frame on the wire, and the far end reads
-  -- what follows as the rest of it.
-  local sent, why = self.handle:send(frame(request))
-  if not sent then return nil, adrift(self, why) end
-
-  local head, gone = exactly(self, 4)
-  if not head then return nil, gone end
-  -- Checked before anything is read for it: a body that is not read cannot be skipped.
-  local length = be32(head)
-  if length > MOST then
-    return nil, adrift(self, "a reply of " .. length .. " bytes is over the family's cap of " .. MOST)
-  end
-  if length == 0 then return nil, adrift(self, "a reply of no bytes is malformed") end
-  local body, cut = exactly(self, length)
-  if not body then return nil, cut end
-
-  local read, reply = pcall(decode, body)
-  if not read then return nil, adrift(self, tostring(reply)) end
-  if type(reply) ~= "table" then return nil, adrift(self, "a reply that is not an object") end
+  local request = { call = name, from = self.from, token = self.token }
+  if select("#", ...) > 0 then request.args = { ... } end
+  local reply, why = self.handle:call(request, { deadline_ms = self.timeout_ms })
+  if not reply then return nil, why end
   if type(reply.family) == "number" and reply.family > FAMILY_REVISION then
     return nil, "the reply is written in family " .. reply.family .. ", newer than this library's "
       .. FAMILY_REVISION
@@ -289,7 +69,8 @@ function Session:call(name, ...)
   -- it" says what to fix where "connection reset" does not.
   if not reply.ok then return nil, reply.error or "the session refused the call" end
   -- `result` is a list of return values, so one Lua call answers with what the remote one did.
-  return table.unpack(reply.result or {}, 1, reply.n or #(reply.result or {}))
+  local result = reply.result or {}
+  return table.unpack(result, 1, reply.n or #result)
 end
 
 function Session:close()
@@ -539,9 +320,14 @@ function M.connect(where)
   if not handle then
     return nil, "nothing is listening as " .. (named or path) .. (why and (" (" .. why .. ")") or "")
   end
+  if type(handle.call) ~= "function" then
+    handle:close()
+    return nil, "this host's stream has no `call`, and the framing is the stream's to do"
+  end
   return attach(setmetatable({
     handle = handle,
     path = path,
+    timeout_ms = timeout,
     -- Put on every call for a reader of the frame. The session takes who is calling from the
     -- connecting process, never from this.
     from = mine and mine.full or nil,

@@ -166,11 +166,17 @@ pub async fn write_as<T: Serialize, W: AsyncWrite + Unpin>(
 
 /// Read one message from a blocking stream.
 pub fn read_from<T: DeserializeOwned, R: Read>(from: &mut R) -> std::io::Result<T> {
+    Wire::read_any(&read_body(from)?)
+}
+
+/// Read one frame's body from a blocking stream, its length checked against [`MOST`] before
+/// anything is allocated for it.
+pub fn read_body<R: Read>(from: &mut R) -> std::io::Result<Vec<u8>> {
     let mut header = [0_u8; 4];
     from.read_exact(&mut header)?;
     let mut body = vec![0_u8; expecting(header)?];
     from.read_exact(&mut body)?;
-    Wire::read_any(&body)
+    Ok(body)
 }
 
 /// Write one message to a blocking stream.

@@ -153,8 +153,10 @@ that the child or its delegated work has finished; check current status separate
 
 ## Talking to it from Lua
 
-`melchior lua-api` prints a plain-Lua client — framing, encoding, discovery and the verbs — with no
-dependencies of its own. Siblings copy it rather than port it.
+`melchior lua-api` prints a plain-Lua client — discovery and the verbs — with no dependencies of
+its own. Siblings copy it rather than port it. The host's stream does the framing:
+`handle:call(request_table, { deadline_ms = N })` sends one frame, under the 16 MiB cap, and
+returns the decoded reply, or `nil` and the reason.
 
 ```lua
 local melchior = load(src)(host.stream)
