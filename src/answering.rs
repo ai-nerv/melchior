@@ -265,7 +265,10 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
                     Then::Nothing,
                 );
             }
-            let child = crate::directory::free_in(&about.me.project);
+            let child = crate::directory::free_beside(
+                &about.me.project,
+                std::slice::from_ref(&about.me.id),
+            );
             let secret = match crate::identity::secret() {
                 Ok(secret) => secret,
                 Err(why) => {

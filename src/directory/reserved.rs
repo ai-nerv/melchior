@@ -109,3 +109,21 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod beside {
+    use super::*;
+    use crate::scratch::Project;
+
+    #[test]
+    fn a_child_is_never_named_after_the_session_naming_it() {
+        let project = Project::new("melchior-reserved", "beside");
+        let me = crate::directory::free_in(&project).id;
+        release(&project, &me);
+        for _ in 0..64 {
+            let child = crate::directory::free_beside(&project, std::slice::from_ref(&me)).id;
+            assert_ne!(child, me);
+            release(&project, &child);
+        }
+    }
+}

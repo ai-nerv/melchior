@@ -440,8 +440,15 @@ pub fn answer_request(them: &Identity, me: &Identity, said: &str) {
 /// handed out: see [`reserved`].
 #[must_use]
 pub fn free_in(project: &str) -> Identity {
+    free_beside(project, &[])
+}
+
+/// The same, never one of `also` either: a session naming a child is not always listening yet.
+#[must_use]
+pub fn free_beside(project: &str, also: &[String]) -> Identity {
     let mut taken = listening(project);
     taken.extend(reserved::taken(project));
+    taken.extend(also.iter().cloned());
     for _ in 0..64 {
         let picked = crate::identity::free_of(project, &taken);
         if reserved::reserve(project, &picked.id) == Ok(true) {
