@@ -481,6 +481,20 @@ mod memory_tests {
     }
 
     #[test]
+    fn a_chunk_that_finishes_inside_one_slice_is_held_to_the_ceiling() {
+        let mut engine = Engine::new();
+        engine.lua.set_memory_limit(Some(8 << 20));
+        let why = engine
+            .run(
+                "melchior.big = string.rep('x', 16 * 1024 * 1024)",
+                "one.lua",
+            )
+            .expect_err("one allocation over the ceiling");
+        assert!(why.to_string().contains("one.lua"), "{why}");
+        assert!(why.to_string().contains(&(8 << 20).to_string()), "{why}");
+    }
+
+    #[test]
     fn garbage_is_collected_before_the_ceiling_is_judged() {
         let mut engine = Engine::new();
         engine.lua.set_memory_limit(Some(8 << 20));
