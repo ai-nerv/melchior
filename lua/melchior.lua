@@ -509,9 +509,8 @@ function M.connect(where)
   return attach(setmetatable({
     handle = handle,
     path = path,
-    -- Put on every call. Without it a session answers `verbs` and refuses everything else,
-    -- which presents as "that instance does not work" rather than as a client that never
-    -- introduced itself.
+    -- Put on every call for a reader of the frame. The session takes who is calling from the
+    -- connecting process, never from this.
     from = mine and mine.full or nil,
     -- No secret is read from the environment: one never travels there. A caller that holds one
     -- sets `session.token` itself.

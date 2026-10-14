@@ -27,7 +27,7 @@ pub struct About {
     /// What it has spent, a row per model, as the harness last said.
     pub spent: Vec<serde_json::Value>,
     pub inbox: Vec<Message>,
-    /// Each started session's secret, by id; never written to disk.
+    /// Each started session's secret, by id, held in this process's memory only.
     pub minted: std::collections::BTreeMap<String, String>,
     /// The secret a parent minted on adopting this session.
     pub adopted_token: Option<String>,

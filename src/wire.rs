@@ -30,10 +30,11 @@ pub struct Call {
     pub call: String,
     #[serde(default)]
     pub args: Vec<serde_json::Value>,
-    /// Who is calling, as `project/role/id`, taken at face value for everything but `stop`.
+    /// Who the caller says it is, for a reader of the frame; never read as who is calling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
-    /// The secret handed down at spawn, for the one verb that needs proof.
+    /// A secret this session holds, for the verbs that need proof: `stop`, and `role` from a
+    /// parent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
 }
@@ -404,8 +405,8 @@ mod tests {
 
     #[test]
     fn nothing_that_runs_a_command_is_in_the_first_cut() {
-        // `tool` is exempt: no shell command, only the session's own vocabulary, and the caller is
-        // taken from the kernel (`serving::is_authority`) — as safe on the socket as `melchior tool`.
+        // `tool` is exempt: no shell command, only the session's own vocabulary, answered only to a
+        // caller the kernel's process tree places as this session (`serving::callers`).
         for (name, _) in VERBS {
             assert!(
                 !["run", "shell", "exec", "eval"].contains(name),

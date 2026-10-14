@@ -1,6 +1,7 @@
 //! Reaching another instance: the other half of [`crate::serving`], and deliberately blocking.
 //! [`Held`] stays open across calls — a client that closes after each one dies on its second with
-//! a broken pipe. Every call names its caller, or the far end answers `verbs` and nothing else.
+//! a broken pipe. Every call carries this session's name for a reader of the frame; the far end
+//! takes who is calling from this process, not from the call.
 
 use crate::framing;
 use crate::identity::Identity;

@@ -104,7 +104,9 @@ pub fn free_of(project: &str, taken: &[String]) -> Identity {
 }
 
 /// A secret to hand a session being started, which a `stop` has to quote back: sixteen bytes of
-/// the kernel's randomness as hex, never written to disk or into a transcript.
+/// the kernel's randomness as hex. It leaves this process in a `mint` reply's `token` field and
+/// reaches the child's `serve` on its stdin; it is never put in an environment, an argument list
+/// or a log.
 ///
 /// # Errors
 /// When the kernel has no randomness to give.
