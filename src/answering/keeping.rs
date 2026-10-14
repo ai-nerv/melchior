@@ -78,7 +78,9 @@ pub fn paged(inbox: &[Message], skip: usize, page: usize) -> Vec<serde_json::Val
                 text: cut,
                 ..held.clone()
             });
-            row["truncated"] = serde_json::Value::Bool(true);
+            if let Some(fields) = row.as_object_mut() {
+                fields.insert("truncated".to_owned(), serde_json::Value::Bool(true));
+            }
             bytes = row.to_string().len();
         }
         if size + bytes > page && !out.is_empty() {
