@@ -57,6 +57,19 @@ fn everything_else_needs_a_caller() {
 }
 
 #[test]
+fn a_verb_nobody_answers_is_named_to_any_caller() {
+    let them = whom("magi", "beta-nu", None);
+    for caller in [None, Some(&them)] {
+        let (reply, then) = answer(&call("no-such-verb"), &about(), caller);
+        assert!(!reply.ok);
+        assert_eq!(reply.fault, Some(crate::wire::Fault::Refused));
+        let why = reply.error.unwrap_or_default();
+        assert!(why.contains("no such call: no-such-verb"), "{why}");
+        assert_eq!(then, Then::Nothing);
+    }
+}
+
+#[test]
 fn a_main_answers_another_main_in_the_same_project() {
     let them = whom("magi", "beta-nu", None);
     let (reply, _) = answer(&call("status"), &about(), Some(&them));

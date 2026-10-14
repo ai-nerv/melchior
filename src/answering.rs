@@ -98,6 +98,12 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
     if call.call == "adopted" {
         return taking::adopted(call, about);
     }
+    if !VERBS.iter().any(|(verb, _)| *verb == call.call) {
+        return (
+            Reply::refused(format!("no such call: {}", call.call)),
+            Then::Nothing,
+        );
+    }
     let Some(caller) = caller else {
         return (
             Reply::refused(
