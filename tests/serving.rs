@@ -366,3 +366,34 @@ fn a_forked_session_comes_up_as_a_child_and_its_parent_may_end_it() {
     let _ = child.child.kill();
     let _ = parent.child.kill();
 }
+
+#[test]
+fn an_empty_runtime_directory_is_unset_and_the_fallback_is_this_user_s_alone() {
+    use std::io::BufRead;
+    use std::os::unix::fs::MetadataExt;
+    let tmp = melchior::scratch::Scratch::new("melchior-t", "empty");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_melchior"))
+        .arg("serve")
+        .env("MAGI_MELCHIOR_PROJECT", "demo")
+        .env("MAGI_MELCHIOR_ID", "alpha-rho")
+        .env("XDG_RUNTIME_DIR", "")
+        .env("TMPDIR", &*tmp)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("melchior serve");
+    let mut first = String::new();
+    std::io::BufReader::new(child.stdout.take().expect("stdout"))
+        .read_line(&mut first)
+        .expect("it says where");
+    drop(child.stdin.take());
+    let _ = child.wait();
+
+    let said: serde_json::Value = serde_json::from_str(&first).expect("one JSON object");
+    let base = tmp.join(format!("melchior-{}", melchior::places::uid()));
+    let at = said["at"].as_str().expect("where");
+    assert!(at.starts_with(&*base.to_string_lossy()), "{at}");
+    let mode = std::fs::metadata(&base).expect("the fallback").mode();
+    assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+}

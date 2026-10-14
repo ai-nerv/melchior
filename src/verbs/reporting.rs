@@ -116,7 +116,8 @@ fn hand_in(said: &str, standing: &Standing) -> Answer {
         ..stored(body.clone())
     };
     let at = kept_at(&me.project, &me.id);
-    if let Err(why) = std::fs::create_dir_all(crate::directory::home(&me.project))
+    if let Err(why) = crate::places::ensure(&crate::directory::home(&me.project))
+        .map_err(std::io::Error::other)
         .and_then(|()| keep(&at, &stored))
     {
         return Answer::refused(format!("the report could not be kept: {why}"));

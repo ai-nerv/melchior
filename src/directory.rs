@@ -346,7 +346,7 @@ pub fn announce(me: &Identity, role: &roles::Role, ui: Option<&Path>) -> Result<
 /// Write one note beside a socket, naming the path in the error.
 pub(crate) fn wrote(path: &Path, said: &str) -> Result<(), String> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|why| format!("{}: {why}", dir.display()))?;
+        crate::places::ensure(dir)?;
     }
     std::fs::write(path, said).map_err(|why| format!("{}: {why}", path.display()))
 }

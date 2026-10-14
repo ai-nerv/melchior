@@ -124,6 +124,7 @@ mod tests {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
         assert_eq!(trusted(&dir, uid()).as_deref(), Some(&*dir.to_path_buf()));
         assert_eq!(trusted(Path::new("relative"), uid()), None);
+        assert_eq!(trusted(Path::new(""), uid()), None, "empty is unset");
         assert_eq!(
             trusted(&dir, uid() + 1),
             None,

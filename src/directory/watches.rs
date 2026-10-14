@@ -44,7 +44,7 @@ fn write(project: &str, by: &str, set: &BTreeSet<String>) {
         let _ = std::fs::remove_file(&path);
         return;
     }
-    let _ = std::fs::create_dir_all(home(project));
+    let _ = crate::places::ensure(&home(project));
     let _ = std::fs::write(&path, set.iter().cloned().collect::<Vec<_>>().join("\n"));
 }
 
