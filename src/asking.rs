@@ -26,9 +26,9 @@ pub struct Held {
 }
 
 impl Held {
-    /// Open a connection to whatever is listening at `path`.
+    /// Open a connection to whatever is listening at `path`, as long as it is this user.
     pub fn at(path: &Path, me: &Identity) -> std::io::Result<Self> {
-        let stream = UnixStream::connect(path)?;
+        let stream = dial(path, PATIENCE)?;
         // Both directions: a peer that accepted and never answered would hold this open, and the
         // tool call with it.
         stream.set_read_timeout(Some(PATIENCE))?;
@@ -78,9 +78,18 @@ impl Held {
         // Set before the write, not after: a request half written is one the far end will finish
         // reading out of whatever is sent next.
         self.adrift = true;
-        let answered = framing::write_to(&mut Writing(&self.stream), &call)
+        let answered: std::io::Result<Reply> = framing::write_to(&mut Writing(&self.stream), &call)
             .and_then(|()| framing::read_from(&mut Reading(&self.stream)));
         match answered {
+            // Read whole, so the connection is in step; refused by name all the same.
+            Ok(reply) if reply.family > crate::wire::FAMILY => {
+                self.adrift = false;
+                Err(std::io::Error::other(format!(
+                    "the reply is written in family {}, newer than this melchior's {}",
+                    reply.family,
+                    crate::wire::FAMILY
+                )))
+            }
             Ok(reply) => {
                 self.adrift = false;
                 Ok(reply)
@@ -92,6 +101,52 @@ impl Held {
             }
         }
     }
+}
+
+/// Connect to `path` within `patience`, to a server running as this user and nobody else. A
+/// listener whose backlog is full is retried until the deadline rather than waited on for good.
+pub fn dial(path: &Path, patience: Duration) -> std::io::Result<UnixStream> {
+    use rustix::io::Errno;
+    use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
+    let fd = rustix::net::socket_with(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::NONBLOCK | SocketFlags::CLOEXEC,
+        None,
+    )?;
+    let address = SocketAddrUnix::new(path)?;
+    let deadline = std::time::Instant::now() + patience;
+    loop {
+        match rustix::net::connect_unix(&fd, &address) {
+            Ok(()) | Err(Errno::ISCONN) => break,
+            Err(Errno::AGAIN | Errno::INPROGRESS | Errno::ALREADY | Errno::INTR)
+                if std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(Errno::AGAIN | Errno::INPROGRESS | Errno::ALREADY) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("{} did not take the connection in time", path.display()),
+                ));
+            }
+            Err(why) => return Err(why.into()),
+        }
+    }
+    let stream = UnixStream::from(fd);
+    stream.set_nonblocking(false)?;
+    let peer = rustix::net::sockopt::get_socket_peercred(&stream)?;
+    if peer.uid.as_raw() != crate::places::uid() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "{} answers as uid {}, not as this user",
+                path.display(),
+                peer.uid.as_raw()
+            ),
+        ));
+    }
+    Ok(stream)
 }
 
 /// A `&UnixStream` writes; the borrow is what lets one connection do both halves.
@@ -242,6 +297,42 @@ mod tests {
         );
         done.send(()).ok();
         answering.join().expect("the far end finished");
+    }
+
+    #[test]
+    fn a_reply_from_a_newer_family_is_refused_by_name_and_the_line_stays_in_step() {
+        let (mine, theirs) = UnixStream::pair().expect("a pair");
+        let mut held = Held {
+            stream: mine,
+            adrift: false,
+            me: me().full(),
+        };
+        let answering = std::thread::spawn(move || {
+            for family in [crate::wire::FAMILY + 1, crate::wire::FAMILY] {
+                let _: Call = framing::read_from(&mut Reading(&theirs)).expect("a call");
+                let mut reply = Reply::of(serde_json::json!("hello"));
+                reply.family = family;
+                framing::write_to(&mut Writing(&theirs), &reply).expect("writes");
+            }
+        });
+        let newer = held.call("status", Vec::new()).expect_err("a newer family");
+        assert!(newer.to_string().contains("newer"), "{newer}");
+        let same = held
+            .call("status", Vec::new())
+            .expect("the next call is answered");
+        assert_eq!(same.result[0], "hello");
+        answering.join().expect("the far end finished");
+    }
+
+    #[test]
+    fn a_server_of_this_user_is_dialled_and_its_answer_read() {
+        let room = crate::scratch::Scratch::new("melchior-asking", "dial");
+        let at = room.join("s");
+        let listening = std::os::unix::net::UnixListener::bind(&at).expect("bound");
+        let stream = dial(&at, Duration::from_secs(2)).expect("this user's own server");
+        drop(stream);
+        drop(listening);
+        assert!(dial(&room.join("absent"), Duration::from_millis(50)).is_err());
     }
 
     #[test]
