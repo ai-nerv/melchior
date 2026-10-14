@@ -333,7 +333,8 @@ make.recipe{
       print(said)
       error("cargo machete failed")
     end
-    local shelled = oslo.run{ "nix", "develop", "--command", "cargo", "machete" }
+    local shelled = oslo.run{ "nix", "--extra-experimental-features", "nix-command flakes",
+                              "develop", "--command", "cargo", "machete" }
     assert(shelled.ok, "cargo machete failed")
   end,
 }
@@ -352,7 +353,8 @@ local function cargo_or_shell(argv, failed)
     print(said)
     error(failed)
   end
-  local shelled = { "nix", "develop", "--command", "cargo" }
+  local shelled = { "nix", "--extra-experimental-features", "nix-command flakes",
+                    "develop", "--command", "cargo" }
   for _, word in ipairs(argv) do shelled[#shelled + 1] = word end
   assert(oslo.run(shelled).ok, failed)
 end
