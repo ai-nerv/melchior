@@ -68,6 +68,22 @@ pub(super) fn apply(mut model: Model, shown: &serde_json::Value) -> Model {
     if can("vision") && !model.input.contains(&Modality::Image) {
         model.input.push(Modality::Image);
     }
+    let thinking = super::capabilities::names(shown.pointer("/thinking/values"));
+    if !thinking.is_empty() {
+        model.reasoning = thinking.iter().any(|level| level != "off");
+    }
+    model.capabilities = Some(crate::mind::model::Capabilities {
+        input: model
+            .input
+            .iter()
+            .map(|modality| match modality {
+                Modality::Text => "text".into(),
+                Modality::Image => "image".into(),
+            })
+            .collect(),
+        output: vec!["text".into()],
+        thinking: (!thinking.is_empty()).then_some(thinking),
+    });
     model
 }
 

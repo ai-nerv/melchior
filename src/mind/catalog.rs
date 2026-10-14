@@ -196,6 +196,7 @@ fn card(provider: &Provider, model: &Model) -> Card {
         _ => false,
     };
     Card {
+        vision: model.accepts_images(),
         id: format!("{}/{}", provider.id, model.id),
         provider: provider.id.clone(),
         name: model.id.clone(),
@@ -205,6 +206,15 @@ fn card(provider: &Provider, model: &Model) -> Card {
             .unwrap_or_default(),
         context_window: Some(model.context_window).filter(|n| *n > 0),
         max_output: Some(model.max_tokens).filter(|n| *n > 0),
+        pricing: model.pricing.clone().or_else(|| {
+            let positive = |rate: f64| (rate.is_finite() && rate > 0.0).then(|| rate.to_string());
+            let input = positive(model.cost.input);
+            let output = positive(model.cost.output);
+            (input.is_some() || output.is_some())
+                .then_some(crate::mind::model::Pricing { input, output })
+        }),
+        popularity_rank: model.popularity_rank,
+        capabilities: model.capabilities.clone(),
         reasons: model.reasoning,
         ready,
         needs: if ready { None } else { needs },
@@ -258,6 +268,34 @@ mod tests {
         let (provider, model) = catalog.find(&first.id).expect("found");
         assert_eq!(format!("{}/{}", provider.id, model.id), first.id);
         assert!(catalog.find("nobody/nothing").is_none());
+    }
+
+    #[test]
+    fn a_declared_model_card_says_vision_and_prices_from_its_cost() {
+        let cards = Catalog::load(&shipped()).expect("load").cards();
+        let find = |id: &str| cards.iter().find(|card| card.id == id).expect(id);
+        let opus = find("anthropic/claude-opus-4-6");
+        assert!(opus.vision);
+        assert_eq!(
+            opus.pricing,
+            Some(crate::mind::model::Pricing {
+                input: Some("5".into()),
+                output: Some("25".into()),
+            })
+        );
+        assert_eq!(opus.popularity_rank, None);
+        let chat = find("deepseek/deepseek-chat");
+        assert!(!chat.vision);
+        assert_eq!(
+            chat.pricing.as_ref().and_then(|p| p.output.as_deref()),
+            Some("0.42")
+        );
+        let jev = find("decisions/typesafe/jev-1.13");
+        assert_eq!(
+            jev.pricing.as_ref().and_then(|p| p.input.as_deref()),
+            Some("0.042")
+        );
+        assert_eq!(jev.pricing.as_ref().and_then(|p| p.output.as_deref()), None);
     }
 }
 

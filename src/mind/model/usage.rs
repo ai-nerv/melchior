@@ -68,6 +68,15 @@ impl Usage {
 }
 
 /// Dollars per million tokens.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pricing {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+}
+
+/// Dollars per million tokens.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Cost {
     /// Ordinary prompt tokens.

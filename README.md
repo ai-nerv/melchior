@@ -174,6 +174,27 @@ Failed requests keep the last cached listing. The reply includes `refreshed: tru
 `failed` list of provider IDs; model cards remain in the ordinary `result` array. Without
 `--refresh`, normal cache freshness applies. This lists models; it does not run inference.
 
+A card carries what the provider publishes about its model, and leaves out what it does not:
+
+| field | what it says |
+|---|---|
+| `vision` | it takes images |
+| `pricing` | `input` and `output` in dollars per million tokens, as decimal strings; `"0"` is free, and an unreadable or negative price is left out rather than guessed. Without a listed price, a declared `cost` above zero stands in |
+| `capabilities` | `input` and `output` modalities as listed (`text`, `image`, `audio`, …), and `thinking`, the provider's own names for its reasoning levels |
+| `popularity_rank` | OpenRouter only: the position in its catalog sorted by weekly popularity, asked for with `sort=most-popular` |
+
+ollama's listing names a model and nothing else, so its vision and thinking levels come from
+`/api/show`.
+
+## Images
+
+An `ask` carries images as `image` content (`data` in base64, and `media_type`) and on a
+`tool_result` as `images`, each the same pair. Every shipped protocol but `decisions` sends both
+as its own image parts. OpenAI Completions takes no image in a tool message, so a tool's images
+follow its results as one user message, labelled with the tool that made them. A model without
+`vision` is sent a note where each image was; what was asked is not changed, so the images are
+there again for the next model that can see them.
+
 ## Spending cap
 
 A run — a root session and every session started under it — may spend `spend_cap_usd` US dollars

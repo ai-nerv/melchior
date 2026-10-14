@@ -214,6 +214,12 @@ make.recipe{ name = "test", desc = "the suite",
              run = function() sh.cargo("test", "--all-targets") end }
 make.alias("t", "test")
 
+make.recipe{ name = "build-fake-provider", desc = "build the deterministic HTTP provider fixture",
+             run = function() sh.cargo("build", "--example", "fake-provider") end }
+
+make.recipe{ name = "build-metered-proxy", desc = "build the capped live-provider proxy",
+             run = function() sh.cargo("build", "--example", "metered-proxy") end }
+
 make.recipe{ name = "test-model-refresh", desc = "forced discovery with disposable cache and provider",
              run = function() sh.cargo("test", "--test", "model_refresh") end }
 

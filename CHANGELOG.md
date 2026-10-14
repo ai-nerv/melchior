@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.7.0] - 2026-10-14
+
+### <!-- 0 -->⛰️  Features
+
+- Images for every vision protocol
+- Prices, ranks and capabilities
+
+### <!-- 3 -->📚 Documentation
+
+- Image as a tools extension
+- Model cards and images
+
+### Build
+
+- Fake provider and metered proxy
+
 ## [0.6.1] - 2026-10-14
 
 ### <!-- 0 -->⛰️  Features

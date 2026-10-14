@@ -17,6 +17,7 @@ struct Provider {
     url: String,
     response: Arc<Mutex<(u16, Value)>>,
     calls: Arc<AtomicUsize>,
+    requests: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -31,6 +32,8 @@ impl Provider {
         );
         let response = Arc::new(Mutex::new((200, json!({"data":[{"id":"old"}]}))));
         let calls = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let paths = requests.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let (reply, count, finished) = (response.clone(), calls.clone(), stop.clone());
         let thread = std::thread::spawn(move || {
@@ -44,7 +47,13 @@ impl Provider {
                     .expect("refresh fixture");
                 let mut bytes = [0; 4096];
                 let n = stream.read(&mut bytes).expect("refresh fixture");
-                assert!(String::from_utf8_lossy(&bytes[..n]).starts_with("GET /v1/models "));
+                let request = String::from_utf8_lossy(&bytes[..n]);
+                let first = request.lines().next().expect("request");
+                assert!(
+                    first.starts_with("GET /v1/models ")
+                        || first.starts_with("GET /v1/models?sort=most-popular ")
+                );
+                paths.lock().expect("requests").push(first.to_owned());
                 count.fetch_add(1, Ordering::SeqCst);
                 let (status, body) = reply.lock().expect("refresh fixture").clone();
                 let body = body.to_string();
@@ -55,6 +64,7 @@ impl Provider {
             url,
             response,
             calls,
+            requests,
             stop,
             thread: Some(thread),
         }
@@ -143,4 +153,95 @@ melchior.provider("ollama", {{ name = "Fixture", api = "openai-completions",
     )
     .expect("refresh fixture");
     assert_eq!(cached, json!([]));
+}
+
+#[test]
+fn openrouter_refresh_carries_prices_and_weekly_positions_through_cache_and_wire() {
+    let server = Provider::new();
+    let dir = Scratch::new("melchior", "model-metadata");
+    std::fs::write(
+        dir.join("providers.lua"),
+        format!(
+            r#"
+melchior.provider("ollama", {{ discover = false, models = {{}} }})
+melchior.provider("openrouter", {{ name = "Fixture", api = "openai-completions",
+  base_url = "{}", auth = {{ kind = "none" }}, discover = true, details = "openrouter" }})
+"#,
+            server.url
+        ),
+    )
+    .expect("provider");
+    *server.response.lock().expect("response") = (
+        200,
+        json!({"data":[
+            {"id":"popular","context_length":128000,"pricing":{"prompt":"0.0000003","completion":"0.0000012"},
+             "architecture":{"input_modalities":["text","image","video"],"output_modalities":["text"]},
+             "supported_parameters":["reasoning"],"reasoning":{"supported_efforts":["low","high","xhigh"]}},
+            {"id":"free","pricing":{"prompt":"0","completion":"0"}},
+            {"id":"unknown","pricing":{"prompt":"-1","completion":"-1"}}
+        ]}),
+    );
+    let initial = list(&dir, true);
+    let find = |reply: &Value, id: &str| {
+        reply["result"]
+            .as_array()
+            .expect("cards")
+            .iter()
+            .find(|card| card["id"] == id)
+            .expect("card")
+            .clone()
+    };
+    let popular = find(&initial, "openrouter/popular");
+    assert_eq!(popular["pricing"], json!({"input":"0.3","output":"1.2"}));
+    assert_eq!(popular["popularity_rank"], 1);
+    assert_eq!(
+        popular["capabilities"],
+        json!({
+            "input":["text","image","video"], "output":["text"], "thinking":["low","high","xhigh"]
+        })
+    );
+    assert_eq!(popular["vision"], true);
+    assert_eq!(
+        find(&initial, "openrouter/free")["pricing"],
+        json!({"input":"0","output":"0"})
+    );
+    assert!(
+        find(&initial, "openrouter/unknown")
+            .get("pricing")
+            .is_none()
+    );
+    assert!(
+        server
+            .requests
+            .lock()
+            .expect("requests")
+            .iter()
+            .all(|request| request.starts_with("GET /v1/models?sort=most-popular "))
+    );
+    let cached = list(&dir, false);
+    assert_eq!(find(&cached, "openrouter/popular"), popular);
+    assert_eq!(server.calls.load(Ordering::SeqCst), 1);
+    *server.response.lock().expect("response") = (
+        200,
+        json!({"data":[
+            {"id":"free","pricing":{"prompt":"0","completion":"0"}},
+            {"id":"popular","pricing":{"prompt":"0.000002","completion":"0.000004"},
+             "architecture":{"input_modalities":["text","audio"],"output_modalities":["audio"]},
+             "supported_parameters":["reasoning"],"reasoning":{"supported_efforts":["medium"]}}
+        ]}),
+    );
+    let updated = list(&dir, true);
+    assert_eq!(
+        find(&updated, "openrouter/popular")["capabilities"],
+        json!({
+            "input":["text","audio"], "output":["audio"], "thinking":["medium"]
+        })
+    );
+    let updated = find(&updated, "openrouter/popular");
+    assert_eq!(updated["pricing"], json!({"input":"2","output":"4"}));
+    assert_eq!(updated["popularity_rank"], 2);
+    *server.response.lock().expect("response") = (500, json!({"data":[]}));
+    let failed = list(&dir, true);
+    assert_eq!(failed["failed"], json!(["openrouter"]));
+    assert_eq!(find(&failed, "openrouter/popular"), updated);
 }

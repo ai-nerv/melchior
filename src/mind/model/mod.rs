@@ -7,9 +7,26 @@
 
 mod usage;
 
-pub use usage::{Cost, Usage};
+pub use usage::{Cost, Pricing, Usage};
 
 use serde::{Deserialize, Serialize};
+
+/// Provider-advertised modalities and native thinking levels.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Capabilities {
+    #[serde(default)]
+    pub input: Vec<String>,
+    #[serde(default)]
+    pub output: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Image {
+    pub data: String,
+    pub media_type: String,
+}
 
 /// Why a turn stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +93,8 @@ pub enum Content {
     },
     /// What a tool produced.
     ToolResult {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<Image>,
         /// The call this answers.
         id: String,
         /// Tool name. Some dialects require it on the result as well as the call.
