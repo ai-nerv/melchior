@@ -263,7 +263,18 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
                 );
             }
             let child = crate::directory::free_in(&about.me.project);
-            let secret = crate::identity::secret();
+            let secret = match crate::identity::secret() {
+                Ok(secret) => secret,
+                Err(why) => {
+                    return (
+                        Reply::no(
+                            format!("no secret could be minted: {why}"),
+                            crate::wire::Fault::Failed,
+                        ),
+                        Then::Nothing,
+                    );
+                }
+            };
             // This session's run, handed down unchanged however deep the tree gets.
             let run = about.whom().session.unwrap_or_else(|| about.me.id.clone());
             let role = match roles::asked(call) {

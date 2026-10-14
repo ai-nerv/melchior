@@ -52,7 +52,7 @@ fn took(
         ));
     }
     pending::adoptable(me, them, 0)?;
-    let secret = melchior::identity::secret();
+    let secret = melchior::identity::secret().map_err(|why| why.to_string())?;
     directory::hand_over(them, me, handover, &secret, &request.nonce)?;
     directory::adopted(them, &me.id)?;
     about.send_modify(|about| {

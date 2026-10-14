@@ -104,15 +104,14 @@ pub fn free_of(project: &str, taken: &[String]) -> Identity {
 }
 
 /// A secret to hand a session being started, which a `stop` has to quote back: sixteen bytes of
-/// `/dev/urandom` as hex, never written to disk or into a transcript.
-#[must_use]
-pub fn secret() -> String {
-    use std::io::Read;
+/// the kernel's randomness as hex, never written to disk or into a transcript.
+///
+/// # Errors
+/// When the kernel has no randomness to give.
+pub fn secret() -> std::io::Result<String> {
     let mut bytes = [0_u8; 16];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut source| source.read_exact(&mut bytes))
-        .expect("the kernel's randomness");
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    getrandom::fill(&mut bytes).map_err(|why| std::io::Error::other(why.to_string()))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// Whether two secrets are the same, compared in time that depends on their length only.
@@ -138,6 +137,16 @@ fn from_seed(seed: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_secret_is_sixteen_random_bytes_as_hex_and_never_repeats() {
+        let one = secret().expect("randomness");
+        let two = secret().expect("randomness");
+        assert_eq!(one.len(), 32);
+        assert!(one.chars().all(|c| c.is_ascii_hexdigit()), "{one}");
+        assert_ne!(one, two);
+        assert!(same(&one, &one.clone()) && !same(&one, &two) && !same(&one, "short"));
+    }
 
     #[test]
     fn a_name_is_three_parts() {

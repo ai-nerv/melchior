@@ -690,6 +690,7 @@ dependencies = [
  "base64",
  "ciborium",
  "futures-util",
+ "getrandom 0.3.4",
  "luna",
  "reqwest",
  "rustix",

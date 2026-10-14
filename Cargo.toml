@@ -22,6 +22,8 @@ path = "src/main.rs"
 [dependencies]
 rustix = { version = "0.38", features = ["process", "fs", "net"] }
 serde = { version = "1.0", features = ["derive"] }
+# Already in the lockfile, through luna: the kernel's randomness, as an error rather than a panic.
+getrandom = "0.3"
 serde_json = { version = "1.0", features = ["preserve_order"] }
 # `signal` because the way a `serve` actually ends is a `SIGTERM` from the kernel, and a signal
 # nothing waits for runs none of the lines that take this session's socket and notes back down —

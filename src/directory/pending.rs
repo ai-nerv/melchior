@@ -28,7 +28,7 @@ pub fn at(me: &Identity) -> PathBuf {
 /// # Errors
 /// When the nonce or the note cannot be made.
 pub fn asked(me: &Identity, to: &str) -> Result<String, String> {
-    let nonce = crate::identity::secret();
+    let nonce = crate::identity::secret().map_err(|why| why.to_string())?;
     let path = at(me);
     crate::places::ensure(&home(&me.project))?;
     let temporary = path.with_extension(format!("adopting.{nonce}"));
