@@ -7,7 +7,7 @@
 //! calls next. See FAMILY.md, "A caller that abandons a call abandons the connection".
 
 use melchior::mind::lua::engine::Engine;
-use melchior::scratch::Scratch;
+use melchior::scratch::Project;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -42,18 +42,20 @@ fn read_frame(sock: &mut UnixStream) -> Option<Vec<u8>> {
     Some(body)
 }
 
-/// A socket in a directory that goes when the test does.
+/// A socket in a directory that goes when the test does, where the family's sockets live: the
+/// client's VM dials nothing else.
 struct Fixture {
-    _dir: Scratch,
+    _dir: Project,
     at: std::path::PathBuf,
     listening: Option<UnixListener>,
 }
 
 impl Fixture {
     fn new(name: &str) -> Self {
-        let dir = Scratch::new("mlc-t", name);
+        let dir = Project::new("mlc-t", name);
+        let dir_path = dir.home();
         // Short: a unix socket path is capped at `SUN_LEN`, and this one is bound for real.
-        let at = dir.join("s");
+        let at = dir_path.join("s");
         let listening = UnixListener::bind(&at).expect("bind");
         Self {
             _dir: dir,

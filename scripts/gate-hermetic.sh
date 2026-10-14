@@ -51,6 +51,8 @@ trap 'rm -rf "$root" "$out"' EXIT HUP INT TERM
 tmp="$root/t"
 run="$root/x"
 mkdir -p "$tmp" "$run"
+# A runtime directory others can enter is not used at all (FAMILY.md, "Where sockets live").
+chmod 700 "$run"
 
 if ! TMPDIR="$tmp" XDG_RUNTIME_DIR="$run" cargo test --all-targets --quiet >"$out" 2>&1; then
   cat "$out" >&2
@@ -68,11 +70,14 @@ fi
 # What a *product* is entitled to leave: the `melchior` directory itself, in either tree, and
 # nothing inside it. A project directory, a socket, a note or a `given.lua` under there is a test
 # that did not clean up after itself.
+own="melchior-$(id -u)"
 strays() {
-  ls -A "$1" | grep -v '^melchior$' || true
-  if [ -d "$1/melchior" ]; then
-    ls -A "$1/melchior" | sed "s|^|melchior/|" || true
-  fi
+  ls -A "$1" | grep -v -e '^melchior$' -e "^$own\$" || true
+  for kept in melchior "$own"; do
+    if [ -d "$1/$kept" ]; then
+      ls -A "$1/$kept" | sed "s|^|$kept/|" || true
+    fi
+  done
 }
 
 left=$(strays "$tmp"; strays "$run")

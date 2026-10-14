@@ -283,7 +283,7 @@ impl Address {
 
 #[must_use]
 pub fn home(project: &str) -> PathBuf {
-    runtime().join(crate::NAME).join(safe(project))
+    root().join(safe(project))
 }
 
 /// Where a session's socket is. No role in the path: an id is already unique inside a project,
@@ -304,10 +304,10 @@ pub fn kin_at(me: &Identity) -> PathBuf {
     home(&me.project).join(format!("{}.parent", safe(&me.id)))
 }
 
-fn runtime() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
+/// Where every project directory sits: the trusted runtime directory, or `<tmp>/melchior-<uid>`.
+#[must_use]
+pub fn root() -> PathBuf {
+    crate::places::base(crate::NAME)
 }
 
 /// Flatten one name into one path segment, so a project called `../../etc` cannot name a
@@ -349,8 +349,7 @@ pub fn announce(me: &Identity, role: &roles::Role, ui: Option<&Path>) -> Result<
     wrote(&kin_at(me), &parent)
 }
 
-/// Write one note beside a socket, naming the path in the error so a full filesystem and an
-/// unwritable runtime directory are told apart.
+/// Write one note beside a socket, naming the path in the error.
 pub(crate) fn wrote(path: &Path, said: &str) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|why| format!("{}: {why}", dir.display()))?;
@@ -515,7 +514,7 @@ pub fn reachable(me: &Whom) -> Vec<(Whom, policy::Relation)> {
 /// more, so neither half of a name that came off a wire can climb.
 #[must_use]
 pub fn inside(path: &Path) -> bool {
-    let root = runtime().join(crate::NAME);
+    let root = root();
     path.parent()
         .and_then(Path::parent)
         .is_some_and(|grand| grand == root)

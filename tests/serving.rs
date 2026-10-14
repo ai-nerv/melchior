@@ -260,8 +260,9 @@ fn what_the_parent_says_it_is_doing_is_what_a_sibling_is_told() {
 fn a_listing_answers_with_its_rows_rather_than_one_row_that_is_the_listing() {
     // The failure FAMILY.md names by name: `"result":[[…]]` with `"n":1`, invisible from the
     // sending side, and read by a coordinator going row by row as an array where a declaration
-    // belonged. Over a real socket, because the command line is the only door the gate probes.
-    let serving = Serving::start("rows");
+    // belonged. Over a real socket, in a runtime the client's VM may dial.
+    let room = melchior::scratch::Project::new("melchior-t", "rows");
+    let serving = Serving::beside(&room.home(), "alpha-rho");
     let said = r#"{"call":"tell","from":"demo/main/socat","args":["build is green"]}"#;
     serving.asked(said);
     serving.asked(&said.replace("build is green", "and the deploy went out"));
@@ -293,8 +294,7 @@ fn a_listing_answers_with_its_rows_rather_than_one_row_that_is_the_listing() {
     let held = serving.asked(r#"{"call":"status","from":"demo/main/socat"}"#);
     assert_eq!(held["n"], 1, "a record is one row: {held}");
 
-    // The other half of the same commit: the client this session serves. N rows reach Lua as N
-    // return values, so a client that did not gather them would hand its caller one verb.
+    // The client this session serves: N rows reach Lua as N return values, gathered or not.
     let mut engine = melchior::mind::lua::engine::Engine::new();
     let chunk = format!(
         "local it, why = load([=====[\n{source}]=====])(melchior.stream)\

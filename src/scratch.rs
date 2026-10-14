@@ -23,7 +23,7 @@ impl Scratch {
         let path = std::env::temp_dir().join(format!("{prefix}-{}-{n}-{name}", std::process::id()));
         // A pid is reused, and a run that was killed rather than unwound left its directory.
         let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).expect("a scratch directory");
+        crate::places::ensure(&path).expect("a scratch directory");
         Self { path }
     }
 
@@ -107,7 +107,7 @@ impl Project {
             name: format!("{prefix}-{}-{n}-{name}", std::process::id()),
         };
         let _ = std::fs::remove_dir_all(it.home());
-        std::fs::create_dir_all(it.home()).expect("a project directory");
+        crate::places::ensure(&it.home()).expect("a project directory");
         it
     }
 

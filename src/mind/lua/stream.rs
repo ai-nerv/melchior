@@ -20,35 +20,10 @@ const MAX_RECV: usize = 16 * 1024 * 1024;
 /// A connected socket, shared between the handle's methods.
 type Handle = Rc<RefCell<Option<UnixStream>>>;
 
-/// Whether `path` is a socket a config may dial: this user's own socket directories and nothing
-/// else, so that a config cannot reach a sibling's or a container runtime's control socket. This
-/// VM has no permission seam to gate on instead.
-fn dialable(path: &std::path::Path) -> bool {
-    roots().iter().any(|root| under(path, root))
-}
-
-/// Where this user's sockets may live; the family uses either root.
-fn roots() -> Vec<std::path::PathBuf> {
-    let mut out = vec![std::env::temp_dir()];
-    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
-        out.push(std::path::PathBuf::from(runtime));
-    }
-    out
-}
-
-/// Whether `path`, once `..` is resolved, is inside `root`.
-fn under(path: &std::path::Path, root: &std::path::Path) -> bool {
-    let mut out = std::path::PathBuf::new();
-    for part in path.components() {
-        match part {
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            std::path::Component::CurDir => {}
-            other => out.push(other),
-        }
-    }
-    out.starts_with(root)
+/// The socket a config may dial at `path`, resolved: one of the family's own, in its runtime
+/// directory, and nothing else there — not the session bus, the agents or systemd beside them.
+fn dialable(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    crate::places::family_socket(path, &crate::places::family_roots(), crate::places::uid())
 }
 
 pub fn table<'gc>(ctx: Context<'gc>) -> Table<'gc> {
@@ -63,16 +38,16 @@ pub fn table<'gc>(ctx: Context<'gc>) -> Table<'gc> {
 
         // Refused as `nil` and a reason rather than a raise, so a config probing for an absent
         // sibling carries on without it.
-        if !dialable(std::path::Path::new(&path)) {
+        let Some(path) = dialable(std::path::Path::new(&path)) else {
             stack.replace(
                 ctx,
                 (
                     Value::Nil,
-                    "a socket outside this user's runtime directory is not this VM's to open",
+                    "only a family program's own socket is this VM's to open",
                 ),
             );
             return Ok(CallbackReturn::Return);
-        }
+        };
 
         // A default rather than a wait forever: a stale socket left by a killed peer accepts and
         // never answers.
@@ -165,4 +140,34 @@ fn handle_table<'gc>(ctx: Context<'gc>, socket: Handle) -> Table<'gc> {
     handle.set(ctx, "close", close).ok();
 
     handle
+}
+
+/// A config reaches the family's sockets and nothing else that listens beside them.
+#[cfg(test)]
+mod tests {
+    use crate::mind::lua::engine::Engine;
+    use crate::scratch::Scratch;
+
+    #[test]
+    fn a_socket_outside_the_family_is_refused_by_the_vm() {
+        let dir = Scratch::new("melchior-stream", "bus");
+        let bus = dir.join("bus");
+        let _held = std::os::unix::net::UnixListener::bind(&bus).expect("bound");
+        let mut engine = Engine::new();
+        engine
+            .run(
+                &format!(
+                    "local h, why = melchior.stream.connect({:?}, 500)\n\
+                     melchior.opened = h ~= nil\n\
+                     melchior.why = tostring(why)",
+                    bus.display().to_string()
+                ),
+                "dial.lua",
+            )
+            .expect("runs");
+        engine.harvest();
+        assert_eq!(engine.config().boolean("opened"), Some(false));
+        let why = engine.config().string("why").unwrap_or_default().to_owned();
+        assert!(why.contains("family"), "{why}");
+    }
 }

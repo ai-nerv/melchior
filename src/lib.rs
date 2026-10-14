@@ -10,6 +10,7 @@ pub mod identity;
 pub mod inherited;
 pub mod mind;
 pub mod noted;
+pub mod places;
 pub mod policy;
 pub mod scratch;
 pub mod serving;
