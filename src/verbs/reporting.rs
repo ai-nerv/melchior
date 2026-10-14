@@ -229,8 +229,9 @@ fn read(who: &str, from: Option<&str>, standing: &Standing) -> Answer {
         .map_or(0, |n| n.saturating_sub(1))
         .min(lines.len());
     let mut bytes = 0;
-    let taken = lines[first..]
+    let taken = lines
         .iter()
+        .skip(first)
         .take(PAGE_LINES)
         .take_while(|line| {
             bytes += line.len() + 1;
@@ -250,7 +251,13 @@ fn read(who: &str, from: Option<&str>, standing: &Standing) -> Answer {
         "`{id}`'s report, lines {}–{last} of {}.{more}\n\n{}",
         first + 1,
         lines.len(),
-        lines[first..last].join("\n")
+        lines
+            .iter()
+            .skip(first)
+            .take(taken)
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n")
     ))
 }
 
