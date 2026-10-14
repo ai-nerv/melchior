@@ -206,6 +206,12 @@ local function be32(s)
   return s:byte(1) * 16777216 + s:byte(2) * 65536 + s:byte(3) * 256 + s:byte(4)
 end
 
+-- The family's frame cap, on both sides: 16 MiB. See FAMILY.md, "Frames".
+local MOST = 16777216
+
+-- The revision of the reply shape this library reads. A newer one is refused by name.
+local FAMILY_REVISION = 1
+
 -- Take the connection down, and say why it went.
 --
 -- Nothing in a reply says which call it answers: the two ends are held in step by position alone,
@@ -254,6 +260,10 @@ Session.__index = Session
 function Session:call(name, ...)
   if not self.handle then return nil, "this connection is closed" end
   local request = encode({ call = name, args = { ... }, from = self.from, token = self.token })
+  -- Refused here, before a byte is sent: the far end would answer it and close.
+  if #request > MOST then
+    return nil, "that call is " .. #request .. " bytes, over the family's cap of " .. MOST
+  end
   -- A send that failed may still have put part of the frame on the wire, and the far end reads
   -- what follows as the rest of it.
   local sent, why = self.handle:send(frame(request))
@@ -261,10 +271,20 @@ function Session:call(name, ...)
 
   local head, gone = exactly(self, 4)
   if not head then return nil, gone end
-  local body, cut = exactly(self, be32(head))
+  -- Checked before anything is read for it: a body that is not read cannot be skipped.
+  local length = be32(head)
+  if length > MOST then
+    return nil, adrift(self, "a reply of " .. length .. " bytes is over the family's cap of " .. MOST)
+  end
+  if length == 0 then return nil, adrift(self, "a reply of no bytes is malformed") end
+  local body, cut = exactly(self, length)
   if not body then return nil, cut end
 
   local reply = decode(body)
+  if type(reply.family) == "number" and reply.family > FAMILY_REVISION then
+    return nil, "the reply is written in family " .. reply.family .. ", newer than this library's "
+      .. FAMILY_REVISION
+  end
   -- A refusal is a reply, not a dropped connection: "only the session that started one may stop
   -- it" says what to fix where "connection reset" does not.
   if not reply.ok then return nil, reply.error or "the session refused the call" end
