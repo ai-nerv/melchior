@@ -25,9 +25,10 @@ whatever a tool looks like on its side.
 ## Where sessions live
 
 ```
-$XDG_RUNTIME_DIR/melchior/
-  myproject/                 one directory per project
+$XDG_RUNTIME_DIR/melchior/   or <tmp>/melchior-<uid>/ when that is unset, empty or open to others
+  myproject/                 one directory per project, 0700
     alpha-rho                a socket, named by the id and nothing else
+    alpha-rho.lock           held for as long as alpha-rho listens
     iota-mu
     iota-mu.parent           "alpha-rho": who started it
 ```
@@ -55,10 +56,13 @@ EventSource reconnection implementation.
 Error bodies and OAuth control responses retain at most 64 KiB of decoded text and have a
 10-second absolute deadline. OAuth's deadline includes request headers and body. Error-body
 failure preserves the HTTP status's retry/refusal class; a complete bounded body can identify
-context overflow. Diagnostics omit response bodies and credential-bearing URLs.
+context overflow. A refusal says the `message` of a JSON error body, cut to one line with anything
+shaped like a key taken out; any other body, and credential-bearing URLs, are never repeated. A
+`Retry-After` or `Retry-After-Ms` is waited out, spread by up to a tenth. No redirect is followed.
 
-Successful generations have no total-duration or total-byte cap from this control policy;
-their existing 180-second inactivity timeout remains. Cancellation closes the active request.
+A stream is held to 4 MiB a line, 8 MiB an event and 256 MiB in all, and one past those is not
+asked again. Successful generations have no total-duration cap; their 180-second inactivity
+timeout remains. Cancellation closes the active request.
 `oslo make test-streaming` runs parser partitions and local-HTTP boundary fixtures without
 provider credentials.
 

@@ -5,9 +5,9 @@
 //! One entry in the tool list rather than eight, so a model does not spend its attention choosing
 //! between names that differ by a suffix: `verb` says which, and `help` lists them all.
 //!
-//! Everything here can be done to anything listening except `stop` and `disband`. A child is
-//! handed a secret in [`crate::inherited::TOKEN`] at spawn, and a stop that cannot quote it back
-//! is refused however convincing the name on it was. `list` shows what this session can actually
+//! Everything here can be done to anything listening except `stop` and `disband`. A child's
+//! `serve` is handed a secret on its stdin at spawn, and a stop that cannot quote it back is
+//! refused however convincing the name on it was. `list` shows what this session can actually
 //! reach rather than everything that exists; see [`crate::policy`] for where the walls are.
 
 mod branching;
