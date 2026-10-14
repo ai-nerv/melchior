@@ -121,8 +121,17 @@ impl Engine {
         self.run(&source, &path.display().to_string())
     }
 
-    /// Run one config chunk.
+    /// Run one config chunk, stopped and reported as failing past [`BUDGET`] instructions.
     pub fn run(&mut self, source: &str, chunk: &str) -> Result<(), LuaError> {
+        self.run_within(source, chunk, BUDGET)
+    }
+
+    /// The same, under a budget handed in.
+    pub fn run_within(&mut self, source: &str, chunk: &str, budget: u64) -> Result<(), LuaError> {
+        let failed = |message: String| LuaError::Runtime {
+            file: chunk.to_owned(),
+            message,
+        };
         let executor = self
             .lua
             .try_enter(|ctx| {
@@ -134,12 +143,30 @@ impl Engine {
                 message: e.to_string(),
             })?;
 
+        let mut spent: u64 = 0;
+        loop {
+            let mut fuel = luna::Fuel::with(SLICE);
+            let finished = self
+                .lua
+                .enter(|ctx| ctx.fetch(&executor).step(ctx, &mut fuel))
+                .map_err(|e| failed(e.to_string()))?;
+            if finished {
+                break;
+            }
+            spent = spent.saturating_add(SLICE.unsigned_abs().into());
+            let waiting = self.lua.enter(|ctx| ctx.fetch(&executor).is_waiting());
+            if waiting || spent >= budget {
+                self.lua.enter(|ctx| ctx.fetch(&executor).stop(&ctx));
+                return Err(failed(if waiting {
+                    "it waited on something this VM cannot wait for".to_owned()
+                } else {
+                    format!("stopped after {budget} instructions without finishing")
+                }));
+            }
+        }
         self.lua
-            .execute::<()>(&executor)
-            .map_err(|e| LuaError::Runtime {
-                file: chunk.to_owned(),
-                message: e.to_string(),
-            })
+            .try_enter(|ctx| ctx.fetch(&executor).take_result::<()>(ctx)?)
+            .map_err(|e| failed(e.to_string()))
     }
 
     /// Install the `magi` global and its registrars. Settings are plain fields on the table,
@@ -262,6 +289,12 @@ impl Engine {
     }
 }
 
+/// Roughly how many VM instructions one chunk or one protocol call may run.
+pub const BUDGET: u64 = 200_000_000;
+
+/// How many instructions one step of the executor is given.
+const SLICE: i32 = 4096;
+
 /// The registrars a config may call; adding one here is the only way a config gains a new kind
 /// of declaration.
 const REGISTRARS: &[&str] = &["provider"];
@@ -328,5 +361,48 @@ impl Engine {
             );
         });
         out.filter(|value| !value.is_null())
+    }
+}
+
+/// A chunk that never finishes is stopped and named, rather than holding whatever ran it.
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn a_loop_is_stopped_and_reported_as_failing() {
+        let mut engine = Engine::new();
+        let why = engine
+            .run_within("while true do end", "plugin/loop.lua", 1_000_000)
+            .expect_err("a loop finished");
+        let said = why.to_string();
+        assert!(said.contains("plugin/loop.lua"), "{said}");
+        assert!(said.contains("1000000 instructions"), "{said}");
+    }
+
+    #[test]
+    fn the_default_budget_ends_a_loop_too() {
+        let mut engine = Engine::new();
+        let began = std::time::Instant::now();
+        assert!(engine.run("while true do end", "loop.lua").is_err());
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(60),
+            "{:?}",
+            began.elapsed()
+        );
+    }
+
+    #[test]
+    fn work_inside_the_budget_still_finishes_and_the_vm_is_usable_after_a_stop() {
+        let mut engine = Engine::new();
+        let _ = engine.run_within("while true do end", "loop.lua", 100_000);
+        engine
+            .run(
+                "local n = 0 for i = 1, 100000 do n = n + i end melchior.n = n",
+                "sum.lua",
+            )
+            .expect("an ordinary chunk runs");
+        engine.harvest();
+        assert_eq!(engine.config().number("n"), Some(5_000_050_000.0));
     }
 }
