@@ -226,16 +226,19 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
             })),
             Then::Nothing,
         ),
-        "inbox" => (
-            Reply::rows(
-                about
-                    .inbox
-                    .iter()
-                    .map(|message| serde_json::json!(message))
-                    .collect(),
-            ),
-            Then::Nothing,
-        ),
+        // A page from the row the call names, never more than half a frame.
+        "inbox" => {
+            let skip = call
+                .args
+                .first()
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|skip| usize::try_from(skip).ok())
+                .unwrap_or(0);
+            (
+                Reply::rows(keeping::paged(&about.inbox, skip, crate::framing::MOST / 2)),
+                Then::Nothing,
+            )
+        }
         // One row: a map of id to secret.
         "minted" => (Reply::of(serde_json::json!(about.minted)), Then::Nothing),
         "role" => roles::set(call, about),
@@ -312,6 +315,12 @@ pub fn answer(call: &Call, about: &About, caller: Option<&Whom>) -> (Reply, Then
             let Some(text) = text_at(call, 0) else {
                 return (Reply::refused("tell takes what to say"), Then::Nothing);
             };
+            // Held here too: a sender's own cap is the sender's to skip.
+            if let Err(why) = crate::directory::sending::sized(&text)
+                .and_then(|()| keeping::heard_from(&caller.id, crate::wire::now_ms()))
+            {
+                return (Reply::refused(why), Then::Nothing);
+            }
             let sort = text_at(call, 1)
                 .and_then(|name| crate::wire::Sort::read(&name))
                 .unwrap_or_default();

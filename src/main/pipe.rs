@@ -53,7 +53,7 @@ fn an_agent_with_no_screen_says_so_rather_than_leaving_the_field_out() {
     assert!(line.contains(r#""ui":null"#), "{line}");
 }
 
-use super::signal_changes;
+use super::roster::signal_changes;
 
 /// A peer with just the fields the signalling looks at.
 fn peer(id: &str, parent: Option<&str>, phase: Option<&str>) -> Peer {
@@ -200,4 +200,28 @@ fn one_that_finished_before_leaving_is_not_signalled_again() {
     let was = vec![peer("kid", Some("lead"), Some("finished"))];
     let watched = std::collections::BTreeSet::new();
     assert!(signal_changes("lead", None, &watched, &was, &[]).is_empty());
+}
+
+#[test]
+fn a_message_goes_up_with_its_id_and_the_harness_may_name_what_it_read() {
+    let line = serde_json::to_string(&Heard::Message {
+        id: "demo-main-beta-nu-1".to_owned(),
+        who: "demo/main/beta-nu".to_owned(),
+        sort: "note".to_owned(),
+        text: "fyi".to_owned(),
+        about: None,
+    })
+    .expect("a line");
+    assert!(line.contains(r#""id":"demo-main-beta-nu-1""#), "{line}");
+
+    let told: super::Told =
+        serde_json::from_str(r#"{"event":"doing","busy":false,"read":["a","b"]}"#).expect("read");
+    let super::Told::Doing { read, waiting, .. } = told else {
+        panic!("not a doing");
+    };
+    assert_eq!(read, Some(vec!["a".to_owned(), "b".to_owned()]));
+    assert_eq!(waiting, None);
+    let token: super::Told =
+        serde_json::from_str(r#"{"event":"token","token":"00ff"}"#).expect("a token");
+    assert!(matches!(token, super::Told::Token { token } if token == "00ff"));
 }

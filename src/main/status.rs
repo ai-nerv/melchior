@@ -4,7 +4,7 @@
 //! Split from [`super`] under THE RULE, which caps a file at 800 lines.
 
 /// A peer's live status as its own socket reports it. Defaulted for one that did not answer in time.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(super) struct Status {
     pub busy: bool,
     pub working_for: u64,
@@ -15,21 +15,32 @@ pub(super) struct Status {
     pub spent: Vec<serde_json::Value>,
 }
 
+/// How long a refusal is believed before the peer is asked again.
+const REFUSAL_HELD: std::time::Duration = std::time::Duration::from_secs(30);
+
 std::thread_local! {
-    /// Peers that refused this session their status. The policy does not change mid-run, so they
-    /// are not asked again every two seconds only to refuse again.
-    static REFUSED: std::cell::RefCell<std::collections::BTreeSet<String>> =
-        const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+    /// Peers that refused this session their status, when, and where each stood in the tree then.
+    /// Asked again once the refusal is stale or either side has moved, as an adoption moves them.
+    static REFUSED: std::cell::RefCell<
+        std::collections::BTreeMap<String, (std::time::Instant, Placed)>,
+    > = const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
 }
 
+/// Who started the peer, and who started this session, as the notes said.
+type Placed = (Option<String>, Option<String>);
+
 /// A peer's status, asked of its own socket. `None` when it did not answer within the dial's
-/// patience, or refused — that peer simply reads as idle rather than stalling the roster.
+/// patience, or refused — the roster then keeps what that peer said last.
 pub(super) fn status_of(
     project: &str,
     id: &str,
     me: &melchior::identity::Identity,
 ) -> Option<Status> {
-    if REFUSED.with(|refused| refused.borrow().contains(id)) {
+    let placed = (
+        melchior::directory::parent_note(project, id),
+        melchior::directory::parent_note(project, &me.id),
+    );
+    if REFUSED.with(|refused| still_refused(refused.borrow().get(id), &placed)) {
         return None;
     }
     let them = melchior::identity::Identity {
@@ -44,10 +55,20 @@ pub(super) fn status_of(
         .call("status", Vec::new())
         .ok()?;
     if !reply.ok {
-        REFUSED.with(|refused| refused.borrow_mut().insert(id.to_owned()));
+        REFUSED.with(|refused| {
+            refused
+                .borrow_mut()
+                .insert(id.to_owned(), (std::time::Instant::now(), placed));
+        });
         return None;
     }
+    REFUSED.with(|refused| refused.borrow_mut().remove(id));
     reply.result.first().map(read)
+}
+
+/// Whether a refusal held is still to be believed: recent, and with neither side moved since.
+fn still_refused(held: Option<&(std::time::Instant, Placed)>, placed: &Placed) -> bool {
+    held.is_some_and(|(at, then)| at.elapsed() < REFUSAL_HELD && then == placed)
 }
 
 /// A `status` reply, field by field; anything missing reads as nothing.
@@ -84,7 +105,23 @@ fn read(said: &serde_json::Value) -> Status {
 
 #[cfg(test)]
 mod tests {
-    use super::read;
+    use super::{REFUSAL_HELD, read, still_refused};
+
+    #[test]
+    fn a_refusal_is_asked_again_once_stale_or_once_either_side_moved() {
+        let now = std::time::Instant::now();
+        let placed = (Some("alpha-rho".to_owned()), None);
+        assert!(still_refused(Some(&(now, placed.clone())), &placed));
+        assert!(!still_refused(None, &placed));
+        let adopted = (Some("beta-nu".to_owned()), None);
+        assert!(
+            !still_refused(Some(&(now, placed.clone())), &adopted),
+            "an adoption did not clear it"
+        );
+        if let Some(long_ago) = now.checked_sub(REFUSAL_HELD * 2) {
+            assert!(!still_refused(Some(&(long_ago, placed.clone())), &placed));
+        }
+    }
 
     #[test]
     fn what_a_peer_spent_is_carried_as_it_said_it() {

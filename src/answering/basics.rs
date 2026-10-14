@@ -348,3 +348,18 @@ fn a_verb_answered_only_for_one_caller_is_still_advertised() {
         assert!(listed.contains(&verb), "`{verb}` is answered and unlisted");
     }
 }
+
+#[test]
+fn a_message_longer_than_a_sender_may_send_is_refused_where_it_lands() {
+    let them = whom("magi", "beta-nu", None);
+    let long = Call {
+        call: "tell".to_owned(),
+        args: vec![serde_json::json!(
+            "z".repeat(crate::directory::sending::AT_MOST + 1)
+        )],
+        ..Call::default()
+    };
+    let (reply, then) = answer(&long, &about(), Some(&them));
+    assert!(!reply.ok, "a 1 MiB tell landed");
+    assert_eq!(then, Then::Nothing);
+}

@@ -173,19 +173,35 @@ pub fn children(me: &Identity) -> Vec<String> {
 /// memory. Empty when nothing answers.
 #[must_use]
 pub fn inbox_of(me: &Identity) -> Vec<crate::wire::Message> {
+    let mut out: Vec<crate::wire::Message> = Vec::new();
+    let mut seen = 0;
     let Ok(mut held) = dial(me, me) else {
-        return Vec::new();
+        return out;
     };
-    let Ok(reply) = held.call("inbox", Vec::new()) else {
-        return Vec::new();
-    };
-    // A row is a message. Reading the first row as the whole inbox is the other half of the
-    // mistake FAMILY.md names, and it is what a consumer holding a stale client would do.
-    reply
-        .result
-        .iter()
-        .filter_map(|value| serde_json::from_value(value.clone()).ok())
-        .collect()
+    // A page at a time, each a row per message, until a page comes back empty.
+    loop {
+        let reply = match held.call("inbox", vec![serde_json::json!(seen)]) {
+            Ok(reply) if reply.ok => reply,
+            Ok(reply) => {
+                crate::noted!("directory: the inbox was refused: {:?}", reply.error);
+                return out;
+            }
+            Err(why) => {
+                crate::noted!("directory: the inbox could not be read: {why}");
+                return out;
+            }
+        };
+        if reply.result.is_empty() {
+            return out;
+        }
+        seen += reply.result.len();
+        out.extend(
+            reply
+                .result
+                .iter()
+                .filter_map(|value| serde_json::from_value(value.clone()).ok()),
+        );
+    }
 }
 
 /// The secrets this session minted for the children it started, by id. Never written to the
