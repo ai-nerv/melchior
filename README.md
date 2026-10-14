@@ -174,8 +174,6 @@ Failed requests keep the last cached listing. The reply includes `refreshed: tru
 
 ## Commands
 
-## Commands
-
 The build is `.make.lua`, read by [oslo](https://github.com/termworks/oslo). At an oslo prompt in
 this directory `make` is enough; anywhere else it is `oslo make`.
 
