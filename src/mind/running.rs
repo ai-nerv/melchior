@@ -14,6 +14,7 @@ use crate::mind::lua::adapter::LuaAdapter;
 use crate::mind::model::Usage;
 use crate::mind::provider::api::{Delta, Options};
 use crate::mind::provider::client::{Call, Client};
+use crate::mind::spending::{self, Ledger, Meter};
 use crate::mind::wire::{Ask, Refusal, Said};
 
 /// Run one ask, handing over each [`Said`] as it happens, and log how it started and ended.
@@ -83,6 +84,7 @@ async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
         }
     };
 
+    let cap = spending::cap(catalog.engine.config().get(spending::SETTING));
     let Some((provider, model)) = catalog.find(&asked.model) else {
         say(Said::Failed {
             message: format!(
@@ -95,6 +97,23 @@ async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
     };
     // Cloned out of the catalog so the engine can be moved into the adapter, which takes it.
     let (provider, model) = (provider.clone(), model.clone());
+
+    // A run at its cap is refused before anything is sent; otherwise every `Spent` is charged.
+    let ledger = Ledger::mine();
+    if let Some(message) = spending::refused(ledger.as_ref().map_or(0, Ledger::spent), cap) {
+        say(Said::Failed {
+            message,
+            why: Refusal::Invalid,
+        });
+        return;
+    }
+    let mut meter = Meter::new(ledger, model.cost);
+    let mut say = move |said: Said| {
+        if let Said::Spent { usage } = &said {
+            meter.heard(*usage);
+        }
+        say(said);
+    };
 
     let api = match serde_json::to_value(model.api)
         .ok()
