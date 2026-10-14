@@ -163,11 +163,36 @@ impl Adapter for LuaAdapter {
     }
 
     fn request(&self, model: &Model, context: &Context, options: &Options) -> serde_json::Value {
+        let mut context = context.clone();
+        if !model.accepts_images() {
+            use crate::mind::model::Content;
+            const OMITTED: &str = "[Image omitted: the current model does not support images. Switch to a vision-capable model to view it.]";
+            for message in &mut context.messages {
+                for content in &mut message.content {
+                    match content {
+                        Content::Image { .. } => {
+                            *content = Content::Text {
+                                text: OMITTED.into(),
+                                signature: None,
+                            }
+                        }
+                        Content::ToolResult {
+                            images, content, ..
+                        } if !images.is_empty() => {
+                            images.clear();
+                            content.push('\n');
+                            content.push_str(OMITTED);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
         self.call(
             "request",
             &[
                 described(model),
-                serde_json::to_value(context).unwrap_or_default(),
+                serde_json::to_value(&context).unwrap_or_default(),
                 asked(model, options),
             ],
         )
@@ -273,6 +298,10 @@ pub fn shipped_apis() -> Result<Vec<(String, String)>, crate::mind::lua::LuaErro
 pub fn engine_with_builtins() -> Result<Engine, crate::mind::lua::LuaError> {
     engine_with(&shipped_apis()?)
 }
+
+#[cfg(test)]
+#[path = "images.rs"]
+mod images;
 
 #[cfg(test)]
 mod deciding;

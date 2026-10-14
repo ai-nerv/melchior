@@ -81,6 +81,7 @@ fn anthropic_merges_consecutive_same_role_messages() {
             Message {
                 role: Role::Tool,
                 content: vec![Content::ToolResult {
+                    images: Vec::new(),
                     id: "t1".into(),
                     name: "read".into(),
                     content: "ok".into(),
@@ -349,6 +350,7 @@ fn completions_puts_a_tool_result_in_its_own_role() {
         messages: vec![Message {
             role: Role::Tool,
             content: vec![Content::ToolResult {
+                images: Vec::new(),
                 id: "t1".into(),
                 name: "read".into(),
                 content: "ok".into(),

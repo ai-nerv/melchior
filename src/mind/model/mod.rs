@@ -22,6 +22,12 @@ pub struct Capabilities {
     pub thinking: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Image {
+    pub data: String,
+    pub media_type: String,
+}
+
 /// Why a turn stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,6 +93,8 @@ pub enum Content {
     },
     /// What a tool produced.
     ToolResult {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<Image>,
         /// The call this answers.
         id: String,
         /// Tool name. Some dialects require it on the result as well as the call.

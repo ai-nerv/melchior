@@ -34,16 +34,21 @@ do -- openai-completions
   end
 
   -- One neutral message as one or more Completions messages.
-  local function convert(m, out, compat)
-    local text, tool_calls, results, reasoning = {}, {}, {}, nil
+  local function convert(m, out, compat, attachments)
+    local text, parts, tool_calls, results, reasoning = {}, {}, {}, {}, nil
 
     for _, c in ipairs(m.content or {}) do
       if c.type == "text" then
-        if c.text ~= "" then text[#text + 1] = c.text end
+        if c.text ~= "" then
+          text[#text + 1] = c.text
+          parts[#parts + 1] = { type = "text", text = c.text }
+        end
       elseif c.type == "thinking" then
         reasoning = (reasoning or "") .. (c.thinking or "")
       elseif c.type == "image" then
-        text[#text + 1] = ""  -- images ride as parts below
+        parts[#parts + 1] = { type = "image_url", image_url = {
+          url = "data:" .. c.media_type .. ";base64," .. c.data,
+        } }
       elseif c.type == "tool_call" then
         tool_calls[#tool_calls + 1] = {
           id = c.id, type = "function",
@@ -54,6 +59,14 @@ do -- openai-completions
         -- Some dialects reject a result that does not repeat the tool's name.
         if compat.requires_tool_result_name then r.name = c.name end
         results[#results + 1] = r
+        if c.images and #c.images > 0 then
+          attachments[#attachments + 1] = { type = "text", text = "Images from tool " .. c.name .. " (" .. c.id .. "):" }
+          for _, image in ipairs(c.images) do
+            attachments[#attachments + 1] = { type = "image_url", image_url = {
+              url = "data:" .. image.media_type .. ";base64," .. image.data,
+            } }
+          end
+        end
       end
     end
 
@@ -74,7 +87,9 @@ do -- openai-completions
       end
       out[#out + 1] = msg
     else
-      out[#out + 1] = { role = "user", content = table.concat(text, "") }
+      local has_image = false
+      for _, p in ipairs(parts) do if p.type == "image_url" then has_image = true end end
+      out[#out + 1] = { role = "user", content = has_image and parts or table.concat(text, "") }
     end
   end
 
@@ -92,7 +107,18 @@ do -- openai-completions
         content = ctx.system,
       }
     end
-    for _, m in ipairs(ctx.messages or {}) do convert(m, messages, compat) end
+    local attachments = {}
+    local function flush()
+      if #attachments > 0 then
+        messages[#messages + 1] = { role = "user", content = attachments }
+        attachments = {}
+      end
+    end
+    for _, m in ipairs(ctx.messages or {}) do
+      if m.role ~= "tool" then flush() end
+      convert(m, messages, compat, attachments)
+    end
+    flush()
 
     local body = { model = model.id, stream = true, messages = messages }
 
@@ -258,31 +284,44 @@ do -- openai-responses
   local function inputs(messages)
     local out = {}
     for _, m in ipairs(messages or {}) do
-      local text, calls, results = {}, {}, {}
+      local text, images, calls, results = {}, {}, {}, {}
       for _, c in ipairs(m.content or {}) do
         if c.type == "text" then
           if c.text ~= "" then text[#text + 1] = c.text end
+        elseif c.type == "image" then
+          images[#images + 1] = { type = "input_image", detail = "auto",
+            image_url = "data:" .. c.media_type .. ";base64," .. c.data }
         elseif c.type == "tool_call" then
           calls[#calls + 1] = {
             type = "function_call", call_id = c.id, name = c.name,
             arguments = melchior.json.encode(c.arguments or {}),
           }
         elseif c.type == "tool_result" then
+          local output = c.content
+          if c.images and #c.images > 0 then
+            output = { { type = "input_text", text = c.content } }
+            for _, image in ipairs(c.images) do
+              output[#output + 1] = { type = "input_image", detail = "auto",
+                image_url = "data:" .. image.media_type .. ";base64," .. image.data }
+            end
+          end
           results[#results + 1] = {
-            type = "function_call_output", call_id = c.id, output = c.content,
+            type = "function_call_output", call_id = c.id, output = output,
           }
         end
       end
 
       for _, r in ipairs(results) do out[#out + 1] = r end
-      if #results == 0 and #text > 0 then
+      if #results == 0 and (#text > 0 or #images > 0) then
         local role = (m.role == "assistant") and "assistant" or "user"
         -- The content part is named for its direction: what the model produced is `output_text`
         -- and what it was given is `input_text`, and swapping them is rejected.
         local part = (role == "assistant") and "output_text" or "input_text"
+        local content = { { type = part, text = table.concat(text, "") } }
+        for _, image in ipairs(images) do content[#content + 1] = image end
         out[#out + 1] = {
           type = "message", role = role,
-          content = { { type = part, text = table.concat(text, "") } },
+          content = content,
         }
       end
       for _, c in ipairs(calls) do out[#out + 1] = c end
@@ -466,8 +505,17 @@ do -- anthropic-messages
     elseif c.type == "tool_call" then
       return { type = "tool_use", id = c.id, name = c.name, input = c.arguments }
     elseif c.type == "tool_result" then
+      local content = c.content
+      if c.images and #c.images > 0 then
+        content = { { type = "text", text = c.content } }
+        for _, image in ipairs(c.images) do
+          content[#content + 1] = { type = "image", source = {
+            type = "base64", media_type = image.media_type, data = image.data,
+          } }
+        end
+      end
       return { type = "tool_result", tool_use_id = c.id,
-               content = c.content, is_error = c.is_error }
+               content = content, is_error = c.is_error }
     end
   end
 
@@ -634,6 +682,11 @@ do -- google
       for _, c in ipairs(m.content or {}) do
         local p = part(c)
         if p then parts[#parts + 1] = p end
+        if c.type == "tool_result" then
+          for _, image in ipairs(c.images or {}) do
+            parts[#parts + 1] = { inlineData = { mimeType = image.media_type, data = image.data } }
+          end
+        end
       end
       if #parts > 0 then
         local last = out[#out]
@@ -806,7 +859,11 @@ do -- pi-messages
     elseif c.type == "tool_call" then
       return { type = "toolCall", id = c.id, name = c.name, arguments = c.arguments or {} }
     elseif c.type == "tool_result" then
-      return { type = "toolResult", toolCallId = c.id, content = c.content, isError = c.is_error }
+      local content = { { type = "text", text = c.content } }
+      for _, image in ipairs(c.images or {}) do
+        content[#content + 1] = { type = "image", data = image.data, mimeType = image.media_type }
+      end
+      return { type = "toolResult", toolCallId = c.id, content = content, isError = c.is_error }
     end
   end
 
