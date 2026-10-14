@@ -184,3 +184,20 @@ make build
 make test
 make verify
 ```
+
+## Nix
+
+Each release tag publishes a static build for x86_64 and aarch64 Linux to the `ai-nerv` cache,
+with `config/` and the Lua client under `share/melchior/`.
+
+```sh
+cachix use ai-nerv
+nix run github:ai-nerv/melchior -- verbs
+nix build github:ai-nerv/melchior
+```
+
+The flake names the cache itself, so `--accept-flake-config` does the same as `cachix use`. In
+another flake, take `inputs.melchior.packages.${system}.default`, and configure the cache on the
+consuming machine: an input's `nixConfig` is not inherited.
+
+Here, `make nix-build` builds it into `result/`, and `make nix-check` checks the flake.
