@@ -43,6 +43,27 @@ pub struct Call {
 /// and bumped only when a consumer that does not know about a change would misread a reply.
 pub const FAMILY: u16 = 1;
 
+/// A call as a server reads it, with the revision it says it is written in. None named is read
+/// as one from before the field existed.
+#[derive(Debug, Deserialize)]
+pub struct Arriving {
+    #[serde(flatten)]
+    pub call: Call,
+    #[serde(default)]
+    pub family: Option<u64>,
+}
+
+impl Arriving {
+    /// The refusal for a call written in a newer family than this one, by name.
+    #[must_use]
+    pub fn newer(&self) -> Option<Reply> {
+        let family = self.family.filter(|said| *said > u64::from(FAMILY))?;
+        Some(Reply::refused(format!(
+            "the call is written in family {family}, newer than this melchior's {FAMILY}"
+        )))
+    }
+}
+
 /// The revision of the registrar surface a plugin file is written against — the registrar names,
 /// the fields each declaration owes, what a callback is handed — reported on `verbs` beside
 /// `family`, and bumped only when something already published stops working. See EXTENDING.md.

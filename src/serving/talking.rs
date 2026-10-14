@@ -6,7 +6,7 @@
 use super::{Serving, callers};
 use crate::answering::{About, Then, answer};
 use crate::framing;
-use crate::wire::{Call, Reply};
+use crate::wire::{Arriving, Call, Reply};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
@@ -24,7 +24,7 @@ pub(super) async fn talk(
 ) -> std::io::Result<()> {
     let (mut reader, mut writer) = stream.into_split();
     loop {
-        let (call, wire): (Call, framing::Wire) =
+        let (arriving, wire): (Arriving, framing::Wire) =
             match framing::read_wire_within(&mut reader, IDLE, FRAME).await {
                 Ok(pair) => pair,
                 // Hanging up, or going quiet, is not a mistake that needs a reply.
@@ -44,11 +44,17 @@ pub(super) async fn talk(
                     return Ok(());
                 }
             };
-        let about = serving.about.borrow().clone();
-        let asked = pinned.clone();
-        let (reply, then) = tokio::task::spawn_blocking(move || answered(&call, about, &asked))
-            .await
-            .map_err(std::io::Error::other)?;
+        // A call from a newer family is refused by name and the line stays in step.
+        let (reply, then) = if let Some(refusal) = arriving.newer() {
+            (refusal, Then::Nothing)
+        } else {
+            let call = arriving.call;
+            let about = serving.about.borrow().clone();
+            let asked = pinned.clone();
+            tokio::task::spawn_blocking(move || answered(&call, about, &asked))
+                .await
+                .map_err(std::io::Error::other)?
+        };
         let bytes = written(wire, &reply)?;
         let wrote = async {
             writer.write_all(&bytes).await?;

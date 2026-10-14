@@ -146,6 +146,32 @@ async fn a_frame_of_no_bytes_is_refused_as_malformed() {
     );
 }
 
+#[tokio::test]
+async fn a_call_from_a_newer_family_is_refused_by_name_and_the_line_stays_in_step() {
+    let it = alone("newer");
+    let them = named(&it, "pi-sigma");
+    let _bound = listening(&them).await;
+    let at = crate::directory::listening_at(&them);
+
+    let mut bytes = framed(r#"{"call":"verbs","family":2}"#);
+    bytes.extend_from_slice(&framed(r#"{"call":"verbs","family":1}"#));
+    let back = tokio::task::spawn_blocking(move || one_shot(&at, &bytes))
+        .await
+        .expect("the thread finished");
+
+    let replies = frames(&back);
+    assert_eq!(replies.len(), 2, "{replies:?}");
+    assert_eq!(replies[0]["ok"], false, "{}", replies[0]);
+    assert_eq!(replies[0]["fault"], "refused", "{}", replies[0]);
+    let why = replies[0]["error"].as_str().unwrap_or_default();
+    assert!(why.contains("family 2") && why.contains("newer"), "{why}");
+    assert_eq!(
+        replies[1]["ok"], true,
+        "the next call is answered: {}",
+        replies[1]
+    );
+}
+
 #[test]
 fn a_reply_over_the_cap_is_replaced_by_the_refusal_that_says_so() {
     let huge = crate::wire::Reply::of(serde_json::json!("z".repeat(crate::framing::MOST)));
