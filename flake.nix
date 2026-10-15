@@ -197,7 +197,7 @@
           libxrandr
         ];
         # The same version the workspace siblings pin, so a lint that fails there fails here.
-        rust = pkgs.rust-bin.stable."1.94.0".default.override {
+        rust = pkgs.rust-bin.stable."1.95.0".default.override {
           extensions = [ "rust-src" ];
         };
       in
