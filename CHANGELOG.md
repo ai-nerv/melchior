@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.8.0] - 2026-10-29
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Carry uncommitted develop work
+
 ## [0.7.3] - 2026-10-16
 
 ### Build
