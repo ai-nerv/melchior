@@ -51,15 +51,17 @@ fn logged(said: &Said, spent: &mut Usage, began: std::time::Instant) {
             crate::noted::short(why)
         ),
         Said::Stop { reason } => crate::noted!(
-            "ask: done {reason:?} in {ms}ms — {} in, {} out, cache {} read {} written, ${}.{:06}",
+            "ask: done {reason:?} in {ms}ms — {} in, {} out, cache {} read {} written, ${}.{:06}; {} reported + {} estimated micros",
             spent.input,
             spent.output,
             spent.cache_read,
             spent.cache_write,
-            spent.cost_micros / 1_000_000,
-            spent.cost_micros % 1_000_000
+            spent.charged_micros() / 1_000_000,
+            spent.charged_micros() % 1_000_000,
+            spent.cost_micros,
+            spent.estimated_micros.unwrap_or(0)
         ),
-        Said::Failed { message, why } => crate::noted!(
+        Said::Failed { message, why, .. } => crate::noted!(
             "ask: failed {why:?} in {ms}ms — {}",
             crate::noted::short(message)
         ),
@@ -79,6 +81,7 @@ async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
             say(Said::Failed {
                 message: format!("the configuration will not load: {why}"),
                 why: Refusal::Invalid,
+                overflow: None,
             });
             return;
         }
@@ -92,6 +95,7 @@ async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
                 asked.model
             ),
             why: Refusal::Invalid,
+            overflow: None,
         });
         return;
     };
@@ -104,13 +108,15 @@ async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
         say(Said::Failed {
             message,
             why: Refusal::Invalid,
+            overflow: None,
         });
         return;
     }
     let mut meter = Meter::new(ledger, model.cost);
-    let mut say = move |said: Said| {
+    let trace = crate::mind::accounting::Trace::accounted(model.cost);
+    let mut say = |said: Said| {
         if let Said::Spent { usage } = &said {
-            meter.heard(*usage);
+            trace.settled(meter.heard_observed(*usage));
         }
         say(said);
     };
@@ -124,6 +130,7 @@ async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
             say(Said::Failed {
                 message: "that model names no interface".to_owned(),
                 why: Refusal::Invalid,
+                overflow: None,
             });
             return;
         }
@@ -139,6 +146,7 @@ async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
             say(Said::Failed {
                 message: why,
                 why: Refusal::Invalid,
+                overflow: None,
             });
             return;
         }
@@ -147,6 +155,8 @@ async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
     let options = Options {
         thinking: asked.wants.thinking,
         max_tokens: asked.wants.max_tokens,
+        max_tokens_automatic: asked.wants.max_tokens_automatic,
+        output_limit: None,
         schema: asked
             .wants
             .schema
@@ -174,13 +184,17 @@ async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
     // twice. A cell rather than a channel: this is one thread and the cost is a borrow check.
     let ended = std::cell::Cell::new(None);
     let say = std::cell::RefCell::new(say);
-    let tally = std::cell::Cell::new(Tally::default());
+    let tally = std::cell::Cell::new(Tally {
+        price: model.cost,
+        ..Tally::default()
+    });
     let outcome = Client::new()
-        .stream_reporting(
+        .stream_traced(
             &call,
-            |delta| match carried(delta) {
+            |delta, measured| match carried(delta) {
                 Said::Stop { reason } => ended.set(Some(reason)),
                 Said::Spent { usage } => {
+                    trace.measured(usage, measured);
                     let mut held = tally.get();
                     let usage = held.heard(usage);
                     tally.set(held);
@@ -206,6 +220,8 @@ async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
                     (say.borrow_mut())(Said::Spent { usage: paid });
                 }
             },
+            |frame| (say.borrow_mut())(Said::RequestFrame { frame }),
+            trace.clone(),
         )
         .await;
 
@@ -219,6 +235,7 @@ async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
             say(Said::Failed {
                 message: why.to_string(),
                 why: refused(why.class),
+                overflow: why.overflow,
             });
         }
         // A stream that ended without the protocol saying why still ended. `EndTurn` is the
@@ -237,12 +254,24 @@ async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
 struct Tally {
     paid: Usage,
     this: Usage,
+    price: crate::mind::model::Cost,
 }
 
 impl Tally {
     /// The attempt in progress said it has cost `usage` so far; the whole ask's cost.
     fn heard(&mut self, usage: Usage) -> Usage {
-        self.this = usage;
+        self.this.observe(usage);
+        self.this.estimated_micros = Some(if self.this.cost_micros > 0 {
+            0
+        } else {
+            spending::cost(
+                Usage {
+                    estimated_micros: None,
+                    ..self.this
+                },
+                self.price,
+            )
+        });
         self.total()
     }
 
@@ -462,6 +491,7 @@ mod tally_tests {
             input,
             output,
             cost_micros,
+            estimated_micros: Some(0),
             ..Usage::default()
         }
     }
@@ -485,5 +515,52 @@ mod tally_tests {
         tally.retried();
         assert_eq!(tally.retried(), usage(10, 1, 5));
         assert_eq!(tally.total(), usage(10, 1, 5));
+    }
+
+    #[test]
+    fn stale_counters_do_not_erase_paid_work_or_double_count_cache_reclassification() {
+        let mut tally = Tally::default();
+        tally.heard(usage(100, 40, 900));
+        let classified = Usage {
+            input: 10,
+            cache_read: 90,
+            ..usage(0, 40, 900)
+        };
+        assert_eq!(tally.heard(classified), classified);
+        let stale = usage(50, 10, 0);
+        assert_eq!(tally.heard(stale), classified);
+        assert_eq!(tally.retried(), classified);
+        assert_eq!(tally.total().prompt_tokens(), 100);
+    }
+
+    #[test]
+    fn reported_and_estimated_attempts_are_resolved_before_their_costs_are_combined() {
+        for reported_first in [false, true] {
+            let mut tally = Tally {
+                price: crate::mind::model::Cost {
+                    input: 3.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let first = tally.heard(usage(
+                1_000_000,
+                0,
+                if reported_first { 1_000_000 } else { 0 },
+            ));
+            assert_eq!(
+                first.charged_micros(),
+                if reported_first { 1_000_000 } else { 3_000_000 }
+            );
+            tally.retried();
+            let total = tally.heard(usage(
+                1_000_000,
+                0,
+                if reported_first { 0 } else { 1_000_000 },
+            ));
+            assert_eq!(total.cost_micros, 1_000_000);
+            assert_eq!(total.estimated_micros, Some(3_000_000));
+            assert_eq!(total.charged_micros(), 4_000_000);
+        }
     }
 }

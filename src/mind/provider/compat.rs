@@ -3,6 +3,14 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptCache {
+    #[default]
+    None,
+    AnthropicEphemeral,
+}
+
 /// Which request field caps the response length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,9 +50,12 @@ pub enum ThinkingFormat {
     Qwen,
 }
 
-/// Overrides for one model's protocol quirks; `None` means "take what the base URL implies".
+/// Overrides for protocol quirks; absent fields inherit the provider's value or conservative defaults.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Compat {
+    /// The declared prompt-cache encoding; an explicit `none` disables it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<PromptCache>,
     /// Whether `store` is accepted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_store: Option<bool>,
@@ -79,6 +90,7 @@ pub struct Compat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct Resolved {
+    pub prompt_cache: PromptCache,
     pub supports_store: bool,
     pub supports_developer_role: bool,
     pub supports_reasoning_effort: bool,
@@ -96,6 +108,7 @@ impl Default for Resolved {
     /// opts into them. A wrong default that omits a field degrades; one that sends it is a 400.
     fn default() -> Self {
         Self {
+            prompt_cache: PromptCache::None,
             supports_store: false,
             supports_developer_role: false,
             supports_reasoning_effort: false,
@@ -115,6 +128,7 @@ impl Compat {
     pub fn resolve(self) -> Resolved {
         let d = Resolved::default();
         Resolved {
+            prompt_cache: self.prompt_cache.unwrap_or(d.prompt_cache),
             supports_store: self.supports_store.unwrap_or(d.supports_store),
             supports_developer_role: self
                 .supports_developer_role
@@ -147,6 +161,7 @@ impl Compat {
     pub fn over(self, base: Option<Self>) -> Self {
         let Some(base) = base else { return self };
         Self {
+            prompt_cache: self.prompt_cache.or(base.prompt_cache),
             supports_store: self.supports_store.or(base.supports_store),
             supports_developer_role: self
                 .supports_developer_role
@@ -175,6 +190,9 @@ impl Compat {
 pub fn resolve(compat: Option<Compat>) -> Resolved {
     compat.unwrap_or_default().resolve()
 }
+
+#[cfg(test)]
+mod cache_tests;
 
 #[cfg(test)]
 mod tests {

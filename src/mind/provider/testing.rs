@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -18,6 +18,7 @@ pub(super) struct Server {
     pub url: String,
     pub requests: Arc<AtomicUsize>,
     pub closed: Arc<AtomicUsize>,
+    pub bodies: Arc<Mutex<Vec<Vec<u8>>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -35,12 +36,15 @@ impl Server {
         let url = format!("http://{}", listener.local_addr().expect("address"));
         let requests = Arc::new(AtomicUsize::new(0));
         let closed = Arc::new(AtomicUsize::new(0));
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&bodies);
         let (count, ended) = (Arc::clone(&requests), Arc::clone(&closed));
         let task = tokio::spawn(async move {
             let mut clients = tokio::task::JoinSet::new();
             for reply in replies {
                 let (mut socket, _) = listener.accept().await.expect("accept");
                 let (count, ended) = (Arc::clone(&count), Arc::clone(&ended));
+                let captured = Arc::clone(&captured);
                 clients.spawn(async move {
                     let mut header = Vec::new();
                     while !header.ends_with(b"\r\n\r\n") {
@@ -61,8 +65,13 @@ impl Server {
                                 .and_then(|n| n.trim().parse::<usize>().ok())
                         })
                         .unwrap_or(0);
+                    assert!(
+                        size <= crate::framing::MOST,
+                        "fixture request exceeds the frame cap"
+                    );
                     let mut body = vec![0; size];
                     socket.read_exact(&mut body).await.expect("request body");
+                    captured.lock().expect("captured bodies").push(body);
                     count.fetch_add(1, Ordering::SeqCst);
                     for step in reply {
                         match step {
@@ -97,6 +106,7 @@ impl Server {
             url,
             requests,
             closed,
+            bodies,
             task,
         }
     }

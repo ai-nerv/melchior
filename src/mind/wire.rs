@@ -10,6 +10,8 @@
 use crate::mind::model::{Context, StopReason, ThinkingLevel, Usage};
 use serde::{Deserialize, Serialize};
 
+pub use crate::mind::model::overflow;
+
 /// One model, as melchior describes it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Card {
@@ -49,6 +51,8 @@ pub struct Wants {
     pub thinking: Option<ThinkingLevel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub max_tokens_automatic: bool,
     /// A JSON Schema the answer must satisfy, and what to call it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<Schema>,
@@ -109,6 +113,9 @@ impl Refusal {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "event")]
 pub enum Said {
+    RequestFrame {
+        frame: crate::mind::model::RequestFrame,
+    },
     /// Answer text.
     Text {
         text: String,
@@ -158,6 +165,12 @@ pub enum Said {
     Failed {
         message: String,
         why: Refusal,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "overflow::optional"
+        )]
+        overflow: Option<overflow::Detail>,
     },
 }
 
@@ -195,6 +208,7 @@ mod tests {
             wants: Wants {
                 thinking: Some(ThinkingLevel::Medium),
                 max_tokens: Some(256),
+                max_tokens_automatic: false,
                 schema: None,
                 provider: None,
             },
@@ -212,8 +226,42 @@ mod tests {
     }
 
     #[test]
+    fn output_provenance_is_additive_and_legacy_limits_remain_explicit() {
+        let old: Wants =
+            serde_json::from_value(serde_json::json!({"max_tokens":77})).expect("old ask");
+        assert!(!old.max_tokens_automatic);
+        assert_eq!(
+            serde_json::to_value(&old).expect("legacy"),
+            serde_json::json!({"max_tokens":77})
+        );
+        let automatic = Wants {
+            max_tokens_automatic: true,
+            ..old
+        };
+        let value = serde_json::to_value(&automatic).expect("automatic");
+        assert_eq!(
+            serde_json::from_value::<Wants>(value).expect("JSON"),
+            automatic
+        );
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&automatic, &mut bytes).expect("encode CBOR");
+        assert_eq!(
+            ciborium::from_reader::<Wants, _>(bytes.as_slice()).expect("CBOR"),
+            automatic
+        );
+    }
+
+    #[test]
     fn every_said_survives_json_and_says_which_it_is() {
         let stream = [
+            Said::RequestFrame {
+                frame: crate::mind::model::RequestFrame {
+                    version: 1,
+                    dialect: [1; 32],
+                    policy: [2; 32],
+                    omitted_images: 3,
+                },
+            },
             Said::Text { text: "hi".into() },
             Said::Thinking {
                 text: "mulling".into(),
@@ -240,6 +288,7 @@ mod tests {
             Said::Failed {
                 message: "no credential".into(),
                 why: Refusal::Auth,
+                overflow: None,
             },
         ];
         for said in stream {
@@ -260,7 +309,8 @@ mod tests {
         assert!(
             Said::Failed {
                 message: String::new(),
-                why: Refusal::Transport
+                why: Refusal::Transport,
+                overflow: None,
             }
             .is_last()
         );
@@ -323,6 +373,27 @@ mod cbor_tests {
             name: "shell".into(),
         };
         assert_eq!(through_cbor(&said), said);
+    }
+
+    #[test]
+    fn provider_frame_metadata_survives_cbor_with_bounded_fingerprints() {
+        let said = Said::RequestFrame {
+            frame: crate::mind::model::RequestFrame {
+                version: 1,
+                dialect: [7; 32],
+                policy: [11; 32],
+                omitted_images: u64::MAX,
+            },
+        };
+        assert_eq!(through_cbor(&said), said);
+        let value = serde_json::to_value(&said).expect("json");
+        assert_eq!(value["event"], "request_frame");
+        assert_eq!(value["frame"]["omitted_images"], u64::MAX);
+        for length in [0, 31, 33] {
+            let mut invalid = value.clone();
+            invalid["frame"]["dialect"] = serde_json::json!(vec![0; length]);
+            assert!(serde_json::from_value::<Said>(invalid).is_err());
+        }
     }
 
     #[test]

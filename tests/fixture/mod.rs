@@ -84,7 +84,7 @@ impl Serving {
             .env("XDG_RUNTIME_DIR", runtime)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
             .expect("melchior serve");
         Self::listened(child, runtime)
@@ -101,7 +101,12 @@ impl Serving {
                 }
             }
         });
-        let first = lines.recv_timeout(PATIENCE).expect("it says something");
+        let first = lines.recv_timeout(PATIENCE).unwrap_or_else(|why| {
+            let status = child.try_wait();
+            let _ = child.kill();
+            let reaped = child.wait();
+            panic!("serve did not announce readiness: {why}; status {status:?}; reaped {reaped:?}");
+        });
         let said: serde_json::Value = serde_json::from_str(&first).expect("one JSON object");
         assert_eq!(said["event"], "listening", "{first}");
         let at = std::path::PathBuf::from(said["at"].as_str().expect("it says where"));

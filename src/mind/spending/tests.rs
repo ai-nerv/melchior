@@ -11,6 +11,43 @@ fn spent(cost_micros: u64, input: u64, output: u64) -> Usage {
     }
 }
 
+#[test]
+fn settlement_observations_follow_native_writes_not_usage_receipt() {
+    let dir = Scratch::new("melchior-spend", "observed");
+    let path = dir.join("ledger");
+    let ledger = Ledger::at(&path, "run");
+    let mut meter = Meter::new(Some(ledger.clone()), Cost::default());
+    assert_eq!(
+        meter.heard_observed(Usage::default()),
+        Settlement::Unchanged
+    );
+    assert!(!path.exists());
+    std::fs::write(&path, b"owned blocker").expect("block ledger directory");
+    assert_eq!(meter.heard_observed(spent(7, 0, 0)), Settlement::Failed);
+    assert_eq!(meter.charged, 0);
+    std::fs::remove_file(&path).expect("remove owned blocker");
+    assert_eq!(meter.heard_observed(spent(7, 0, 0)), Settlement::Replaced);
+    assert_eq!(ledger.spent(), 7);
+    assert_eq!(meter.heard_observed(spent(7, 1, 0)), Settlement::Unchanged);
+    assert_eq!(ledger.spent(), 7);
+    assert_eq!(meter.heard_observed(spent(3, 1, 0)), Settlement::Replaced);
+    assert_eq!(ledger.spent(), 3);
+    let mut untracked = Meter::new(None, Cost::default());
+    assert_eq!(
+        untracked.heard_observed(Usage::default()),
+        Settlement::Untracked
+    );
+    assert_eq!(
+        untracked.heard_observed(spent(9, 0, 0)),
+        Settlement::Untracked
+    );
+    assert_eq!(untracked.charged, 9);
+    assert_eq!(
+        untracked.heard_observed(spent(9, 0, 0)),
+        Settlement::Untracked
+    );
+}
+
 /// The cap a config chunk leaves, read the way an ask reads it.
 fn configured(source: &str) -> Option<u64> {
     let mut engine = crate::mind::lua::engine::Engine::new();
@@ -102,12 +139,138 @@ fn each_spent_adds_what_is_new_and_a_failed_attempt_stays_paid() {
 }
 
 #[test]
+fn cached_rate_presence_keeps_meter_and_cap_conservative() {
+    for (raw, expected) in [
+        (json!({"input":3}), 3_000_000),
+        (json!({"input":3,"cache_read":0}), 0),
+        (json!({"input":3,"cache_read":1}), 1_000_000),
+    ] {
+        let dir = Scratch::new("melchior-spend", "cached-rate");
+        let ledger = Ledger::at(&dir, "run");
+        let rates: Cost = serde_json::from_value(raw.clone()).expect("source prices");
+        let measured = Usage {
+            cache_read: 1_000_000,
+            ..Usage::default()
+        };
+        assert_eq!(cost(measured, rates), expected, "{raw}");
+        let mut meter = Meter::new(Some(ledger.clone()), rates);
+        for _ in 0..3 {
+            meter.heard(measured);
+        }
+        assert_eq!(ledger.spent(), expected);
+        assert_eq!(
+            refused(ledger.spent(), Some(1_000_000)).is_some(),
+            expected >= 1_000_000
+        );
+        assert_eq!(
+            cost(
+                Usage {
+                    cost_micros: 7,
+                    ..measured
+                },
+                rates
+            ),
+            7
+        );
+    }
+}
+
+#[test]
 fn a_model_with_no_price_costs_nothing_and_writes_nothing() {
     let dir = Scratch::new("melchior-spend", "free");
     let ledger = Ledger::at(&dir.join("spent"), "alpha-rho-1");
     Meter::new(Some(ledger.clone()), Cost::default()).heard(spent(0, 5_000, 900));
     assert_eq!(ledger.spent(), 0);
     assert!(!dir.join("spent").exists(), "a free ask made a ledger");
+}
+
+#[test]
+fn a_later_report_settles_only_its_own_estimate_and_repeats_are_idempotent() {
+    let dir = Scratch::new("melchior-spend", "settle");
+    let ledger = Ledger::at(&dir, "run");
+    let rates = Cost {
+        input: 1.0,
+        ..Cost::default()
+    };
+    let mut meter = Meter::new(Some(ledger.clone()), rates);
+    meter.heard(spent(0, 1_000_000, 0));
+    ledger.add(77).expect("another ask");
+    for _ in 0..3 {
+        meter.heard(spent(500_000, 1_000_000, 0));
+    }
+    assert_eq!(ledger.spent(), 500_077);
+}
+
+#[test]
+fn a_failed_ledger_write_does_not_advance_the_meter_watermark() {
+    let dir = Scratch::new("melchior-spend", "failed-settle");
+    let blocked = dir.join("blocked");
+    std::fs::write(&blocked, "not a directory").expect("blocked ledger");
+    let ledger = Ledger::at(&blocked, "run");
+    let mut meter = Meter::new(Some(ledger.clone()), Cost::default());
+    meter.heard(spent(7, 0, 0));
+    std::fs::remove_file(&blocked).expect("unblock ledger");
+    meter.heard(spent(7, 0, 0));
+    assert_eq!(ledger.spent(), 7);
+}
+
+#[test]
+fn concurrent_inflight_settlements_keep_other_asks_charges() {
+    let dir = Scratch::new("melchior-spend", "settle-racing");
+    let ledger = Ledger::at(&dir, "run");
+    let threads: Vec<_> = (0..8)
+        .map(|_| {
+            let ledger = ledger.clone();
+            std::thread::spawn(move || {
+                for _ in 0..8 {
+                    let mut meter = Meter::new(
+                        Some(ledger.clone()),
+                        Cost {
+                            input: 1.0,
+                            ..Default::default()
+                        },
+                    );
+                    meter.heard(spent(0, 1_000_000, 0));
+                    meter.heard(spent(500_000, 1_000_000, 0));
+                    meter.heard(spent(500_000, 1_000_000, 0));
+                }
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().expect("settled");
+    }
+    assert_eq!(ledger.spent(), 8 * 8 * 500_000);
+}
+
+#[test]
+fn corrupt_linked_and_saturated_ledgers_cannot_lower_the_spending_barrier() {
+    let dir = Scratch::new("melchior-spend", "invalid-ledger");
+    let ledger = Ledger::at(&dir, "run");
+    let path = dir.join("run");
+    for text in ["bad".to_owned(), format!("7{}9", " ".repeat(65))] {
+        std::fs::write(&path, &text).expect("invalid ledger");
+        assert_eq!(ledger.spent(), u64::MAX);
+        assert!(ledger.add(1).is_err());
+        assert_eq!(std::fs::read_to_string(&path).expect("unchanged"), text);
+    }
+    std::fs::remove_file(&path).expect("remove invalid fixture");
+    let target = dir.join("other");
+    std::fs::write(&target, "7\n").expect("other ledger");
+    std::os::unix::fs::symlink(&target, &path).expect("linked ledger");
+    assert_eq!(ledger.spent(), u64::MAX);
+    assert!(ledger.add(1).is_err());
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("unmodified other"),
+        "7\n"
+    );
+    std::fs::remove_file(&path).expect("remove link");
+    ledger.add(u64::MAX).expect("saturate");
+    let mut meter = Meter::new(Some(ledger.clone()), Cost::default());
+    meter.heard(spent(100, 0, 0));
+    meter.heard(spent(1, 0, 0));
+    assert_eq!(ledger.spent(), u64::MAX);
+    assert!(refused(ledger.spent(), Some(10_000_000)).is_some());
 }
 
 #[test]

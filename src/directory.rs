@@ -496,7 +496,7 @@ pub fn listening(project: &str) -> Vec<String> {
     // A `.parent` note whose socket is gone makes the next holder of that name read as a child.
     for id in names.iter().filter_map(|name| name.strip_suffix(".parent")) {
         if !names.iter().any(|name| name == id) && !reserved::fresh(project, id) {
-            let _ = std::fs::remove_file(home(project).join(format!("{id}.parent")));
+            forget_id(project, id);
         }
     }
     let mut out: Vec<String> = names
@@ -524,7 +524,28 @@ pub fn answers(path: &Path) -> bool {
 
 /// Take a dead session out of the directory: its socket, the notes beside it, and its claims.
 fn forget_id(project: &str, id: &str) {
-    let _ = std::fs::remove_file(socket(project, id));
+    use crate::places::locking::{Directory, socket_lock};
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let Ok(directory) = Directory::take(&home(project), false, std::time::Duration::ZERO) else {
+        return;
+    };
+    let at = socket(project, id);
+    let _lock = match directory.lock(&socket_lock(&at), false) {
+        Ok(lock) => Some(lock),
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return,
+    };
+    if answers(&at) || reserved::fresh(project, id) {
+        return;
+    }
+    match std::fs::symlink_metadata(&at) {
+        Ok(meta)
+            if (meta.file_type().is_socket() || meta.is_file())
+                && meta.uid() == crate::places::uid() => {}
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return,
+    }
+    let _ = std::fs::remove_file(at);
     let _ = std::fs::remove_file(home(project).join(format!("{}.parent", safe(id))));
     let _ = std::fs::remove_file(home(project).join(format!("{}.lock", safe(id))));
     reserved::release(project, id);
@@ -538,6 +559,11 @@ fn forget_id(project: &str, id: &str) {
 
 /// Drop the project's directory if nothing is left in it.
 pub fn leave(project: &str) {
+    let Ok(_directory) =
+        crate::places::locking::Directory::take(&home(project), false, std::time::Duration::ZERO)
+    else {
+        return;
+    };
     // The claims directory first: an empty one left inside would keep the project's alive.
     claims::leave(project);
     let _ = std::fs::remove_dir(home(project));

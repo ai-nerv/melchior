@@ -12,11 +12,19 @@
 //! `ask` is tied to the magi by [`tied`]. Up on stdin and down on stdout, one JSON object a line.
 
 use std::io::{BufRead, Write};
+mod event_start;
 
 fn main() -> std::io::Result<()> {
-    let mut args = std::env::args().skip(1);
+    let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv == ["event-capabilities"] {
+        return std::io::stdout()
+            .lock()
+            .write_all(event_start::CAPABILITIES);
+    }
+    let event_bootstrap = event_start::requested(&mut argv)?;
+    let mut args = argv.into_iter();
     match args.next().as_deref() {
-        Some("serve") => serve(&flags(args)),
+        Some("serve") => serve(&flags(args), event_bootstrap),
         Some("tool") => tool::run(),
         Some("brief") => {
             let asked = flags(args);
@@ -28,6 +36,7 @@ fn main() -> std::io::Result<()> {
         // Before stdin is read: from there on the turn holds a connection with no timeout over it.
         Some("ask") => {
             tied::to_magi()?;
+            let _events = event_start::activate(event_bootstrap)?;
             melchior::mind::speaking::ask(&flags(args))
         }
         Some("needs") => melchior::mind::speaking::needs(&flags(args)),
@@ -269,7 +278,10 @@ fn fork(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<(
 /// `--role-description` are one source taken whole, outranking `MAGI_MELCHIOR_ROLE` and the
 /// config. `--ui <path>` is where the harness draws this session, written to a note beside the
 /// socket — see [`directory::screens`](melchior::directory::screens).
-fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
+fn serve(
+    asked: &std::collections::BTreeMap<String, String>,
+    event_bootstrap: bool,
+) -> std::io::Result<()> {
     tied::to_magi()?;
 
     let me = match (melchior::directory::mine(), asked.get("project")) {
@@ -299,6 +311,8 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
             std::process::exit(2);
         }
     };
+
+    let _events = event_start::activate(event_bootstrap)?;
 
     // Flag, then environment, then config, then `main`, and whichever speaks first is taken
     // whole: a name from one and a sentence from another describes a role nobody declared.
@@ -379,16 +393,14 @@ fn serve(asked: &std::collections::BTreeMap<String, String>) -> std::io::Result<
         let (listener, lease) = match melchior::serving::listening_on(&at).await {
             Ok(bound) => bound,
             Err(why) => {
-                eprintln!("melchior serve: {}: {why}", at.display());
-                std::process::exit(1);
+                return Err(std::io::Error::other(format!("melchior serve: {}: {why}", at.display())));
             }
         };
         // Then the notes, so the tree can be read off the directory. Refused rather than served
         // when they will not land: without them a session reads as a main.
         if let Err(why) = melchior::directory::announce(&me, &role, ui.as_deref()) {
-            eprintln!("melchior serve: {why}");
             lease.release();
-            std::process::exit(1);
+            return Err(std::io::Error::other(format!("melchior serve: {why}")));
         }
         // Read back from the note `announce` just wrote, so the directory holds one answer.
         let run = melchior::directory::sessions::session_of(&me).unwrap_or_else(|| me.id.clone());

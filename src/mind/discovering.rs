@@ -12,6 +12,9 @@ use std::time::{Duration, SystemTime};
 mod capabilities;
 mod ollama;
 
+#[cfg(test)]
+mod cache_tests;
+
 /// How long a fetched catalog is used before it is asked for again.
 pub const FRESH: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -113,13 +116,36 @@ pub(crate) fn cache_path(id: &str) -> Option<PathBuf> {
 fn cached(id: &str) -> Option<Held> {
     let path = cache_path(id)?;
     let raw = std::fs::read_to_string(&path).ok()?;
-    let models: Vec<Model> = serde_json::from_str(&raw).ok()?;
+    let models = cached_models(&raw)?;
     let fresh = std::fs::metadata(&path)
         .and_then(|meta| meta.modified())
         .ok()
         .and_then(|when| SystemTime::now().duration_since(when).ok())
         .is_some_and(|age| age < FRESH);
     Some(Held { models, fresh })
+}
+
+fn cached_models(raw: &str) -> Option<Vec<Model>> {
+    let mut values: Vec<serde_json::Value> = serde_json::from_str(raw).ok()?;
+    for value in &mut values {
+        if let Some(cost) = value
+            .get_mut("cost")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            let presence = cost
+                .get("presence")
+                .and_then(|value| {
+                    serde_json::from_value::<crate::mind::model::PricePresence>(value.clone()).ok()
+                })
+                .filter(|presence| presence.version == 1)
+                .unwrap_or_default();
+            cost.insert("presence".into(), serde_json::to_value(presence).ok()?);
+        }
+    }
+    values
+        .into_iter()
+        .map(|value| serde_json::from_value(value).ok())
+        .collect()
 }
 
 /// Keep what was fetched, so the next start does not have to ask.
@@ -538,6 +564,83 @@ mod tests {
             resolve(model.compat).thinking_format,
             ThinkingFormat::OpenRouter
         );
+    }
+}
+
+#[cfg(test)]
+mod cached_price_tests {
+    use super::*;
+    use crate::mind::model::{Cost, Usage};
+    use serde_json::json;
+
+    fn reload(cost: serde_json::Value) -> Model {
+        let text = json!([{"id":"cached", "name":"Cached", "context_window":8192,
+            "max_tokens":128, "cost":cost}])
+        .to_string();
+        cached_models(&text).expect("offline models").remove(0)
+    }
+
+    fn usage() -> Usage {
+        Usage {
+            cache_read: 1_000_000,
+            cache_write: 1_000_000,
+            ..Usage::default()
+        }
+    }
+
+    #[test]
+    fn legacy_generated_zero_prices_are_not_deliberately_free() {
+        let model = reload(json!({"input":3,"output":15,"cache_read":0,"cache_write":0}));
+        assert_eq!(usage().price(model.cost), 6.0);
+        let model = reload(json!({"input":3,"cache_read":1,"cache_write":5}));
+        assert_eq!(usage().price(model.cost), 6.0);
+    }
+
+    #[test]
+    fn malformed_or_future_presence_only_invalidates_affected_price_metadata() {
+        for presence in [
+            json!(null),
+            json!({}),
+            json!({"version":"1"}),
+            json!({"version":1,"cache_read":"yes"}),
+            json!({"version":2,"cache_read":true,"cache_write":true}),
+        ] {
+            let model = reload(json!({"input":3,"cache_read":0,"cache_write":0,
+                "presence":presence}));
+            assert_eq!(model.id, "cached");
+            assert_eq!(usage().price(model.cost), 6.0);
+        }
+    }
+
+    #[test]
+    fn current_cache_roundtrips_preserve_unknown_explicit_zero_and_positive_rates() {
+        for (cost, expected) in [
+            (
+                Cost {
+                    input: 3.0,
+                    ..Cost::default()
+                },
+                6.0,
+            ),
+            (
+                serde_json::from_value(json!({"input":3,"cache_read":0,"cache_write":0}))
+                    .expect("free source prices"),
+                0.0,
+            ),
+            (
+                serde_json::from_value(json!({"input":3,"cache_read":1,"cache_write":5}))
+                    .expect("source prices"),
+                6.0,
+            ),
+        ] {
+            let model = reload(serde_json::to_value(cost).expect("cache writer"));
+            assert_eq!(usage().price(model.cost), expected);
+            assert_eq!(model.cost, cost);
+        }
+        let discovered = parse(&json!({"data":[{"id":"d","pricing":{"prompt":"0.000003"}}]}));
+        let reloaded = cached_models(&serde_json::to_string(&discovered).expect("discovery cache"))
+            .expect("offline reload");
+        assert_eq!(usage().price(reloaded[0].cost), 6.0);
     }
 }
 

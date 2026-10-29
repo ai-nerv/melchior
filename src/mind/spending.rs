@@ -33,7 +33,9 @@ pub fn cap(said: Option<&serde_json::Value>) -> Option<u64> {
 /// prices, and nothing for a model that has none.
 #[must_use]
 pub fn cost(usage: Usage, price: Cost) -> u64 {
-    if usage.cost_micros > 0 {
+    if usage.estimated_micros.is_some() {
+        usage.charged_micros()
+    } else if usage.cost_micros > 0 {
         usage.cost_micros
     } else {
         micros(usage.price(price))
@@ -110,7 +112,7 @@ impl Ledger {
     /// What the run has spent; a ledger never written is nothing spent.
     #[must_use]
     pub fn spent(&self) -> u64 {
-        read(&self.beside("")).unwrap_or(0)
+        read(&self.beside("")).unwrap_or(u64::MAX)
     }
 
     /// Add `micros` under the ledger's lock, written beside and renamed into place, and say the
@@ -120,8 +122,20 @@ impl Ledger {
     /// When the directory, the lock or the ledger cannot be had, or another ask holds the lock for
     /// five seconds.
     pub fn add(&self, micros: u64) -> Result<u64, String> {
+        self.replace(0, micros)
+    }
+
+    fn replace(&self, previous: u64, now: u64) -> Result<u64, String> {
         let _held = self.lock()?;
-        let total = self.spent().saturating_add(micros);
+        let current = read(&self.beside(""))?;
+        let total = if current == u64::MAX {
+            current
+        } else {
+            current
+                .checked_sub(previous)
+                .ok_or_else(|| "ledger no longer contains this ask's charge".to_owned())?
+                .saturating_add(now)
+        };
         let (next, ledger) = (self.beside(".next"), self.beside(""));
         private(&next, true)
             .and_then(|mut file| {
@@ -175,27 +189,51 @@ fn private(path: &Path, truncate: bool) -> std::io::Result<std::fs::File> {
 }
 
 /// The total a ledger holds, never read through a link.
-fn read(path: &Path) -> Option<u64> {
+fn read(path: &Path) -> Result<u64, String> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
     let mut said = String::new();
-    std::fs::OpenOptions::new()
+    let opened = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed())
-        .open(path)
-        .ok()?
-        .take(64)
+        .custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK)
+                .bits()
+                .cast_signed(),
+        )
+        .open(path);
+    let file = match opened {
+        Ok(file) => file,
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(why) => return Err(format!("{}: {why}", path.display())),
+    };
+    if !file.metadata().map_err(|why| why.to_string())?.is_file() {
+        return Err("ledger is not a regular file".into());
+    }
+    file.take(65)
         .read_to_string(&mut said)
-        .ok()?;
-    said.trim().parse().ok()
+        .map_err(|why| why.to_string())?;
+    if said.len() > 64 {
+        return Err("ledger exceeds its byte limit".into());
+    }
+    said.trim()
+        .parse()
+        .map_err(|why| format!("{}: {why}", path.display()))
 }
 
-/// What one ask has added to its run's ledger, so each `Spent` adds only what is new.
+/// One ask's replaceable contribution to its run's ledger.
 #[derive(Debug)]
 pub struct Meter {
     ledger: Option<Ledger>,
     price: Cost,
     charged: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Settlement {
+    Replaced,
+    Unchanged,
+    Untracked,
+    Failed,
 }
 
 impl Meter {
@@ -209,18 +247,31 @@ impl Meter {
         }
     }
 
-    /// The whole ask has now cost `usage`, failed attempts included; the ledger is told the rest.
+    /// Replace this ask's contribution with its current charge, failed attempts included.
     pub fn heard(&mut self, usage: Usage) {
+        self.heard_observed(usage);
+    }
+
+    pub(crate) fn heard_observed(&mut self, usage: Usage) -> Settlement {
         let now = cost(usage, self.price);
-        if now <= self.charged {
-            return;
+        if now == self.charged {
+            return if self.ledger.is_some() {
+                Settlement::Unchanged
+            } else {
+                Settlement::Untracked
+            };
         }
-        let more = now - self.charged;
-        self.charged = now;
         if let Some(ledger) = &self.ledger
-            && let Err(why) = ledger.add(more)
+            && let Err(why) = ledger.replace(self.charged, now)
         {
             crate::noted!("ask: what it cost was not kept: {why}");
+            return Settlement::Failed;
+        }
+        self.charged = now;
+        if self.ledger.is_some() {
+            Settlement::Replaced
+        } else {
+            Settlement::Untracked
         }
     }
 }

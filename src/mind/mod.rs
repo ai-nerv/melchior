@@ -1,6 +1,7 @@
 //! The mind: which models there are, and asking one a question. The protocols, the credentials
 //! and the HTTP live here; a harness only hands over an `Ask` and writes down what comes back.
 
+pub(crate) mod accounting;
 pub mod acknowledged;
 pub mod catalog;
 pub mod describing;

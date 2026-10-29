@@ -12,6 +12,54 @@ use fixture::{Serving, ask, id_of, left_in, stderr, stdout, tool};
 use std::process::Command;
 
 #[test]
+fn run_identity_changes_across_recycled_server_processes() {
+    let runtime = melchior::scratch::Scratch::new("melchior-t", "run-recycle");
+    let mut runs = std::collections::BTreeSet::new();
+    for _ in 0..32 {
+        let serving = Serving::spawned(
+            &runtime,
+            &[
+                ("MAGI_MELCHIOR_ID", "alpha-rho"),
+                ("MAGI_MELCHIOR_SESSION", ""),
+                ("MAGI_SESSION", ""),
+            ],
+            false,
+        );
+        let note = serving.at().with_extension("session");
+        let run = std::fs::read_to_string(&note).expect("run note");
+        let (agent, nonce) = run.rsplit_once('-').expect("run suffix");
+        assert_eq!(agent, "alpha-rho");
+        assert_eq!(nonce.len(), 39);
+        assert!(nonce.bytes().all(|c| c.is_ascii_digit()));
+        assert!(runs.insert(run), "new process reused a previous run");
+        assert!(serving.let_go());
+        assert!(!note.exists());
+    }
+}
+
+#[test]
+fn run_identity_preserves_inherited_legacy_and_nonce_ids() {
+    let runtime = melchior::scratch::Scratch::new("melchior-t", "run-inherit");
+    for run in [
+        "alpha-rho-1700000000",
+        "alpha-rho-340282366920938463463374607431768211455",
+    ] {
+        let serving = Serving::spawned(
+            &runtime,
+            &[
+                ("MAGI_MELCHIOR_ID", "psi-eta"),
+                ("MAGI_MELCHIOR_SESSION", run),
+            ],
+            false,
+        );
+        let note = serving.at().with_extension("session");
+        assert_eq!(std::fs::read_to_string(&note).expect("inherited run"), run);
+        assert!(serving.let_go());
+        assert!(!note.exists());
+    }
+}
+
+#[test]
 fn it_says_where_it_is_listening_before_anything_else() {
     // A parent that spawned this has no other way to know the socket exists, and one that
     // started sending before the bind would meet its own session as "nothing is listening".

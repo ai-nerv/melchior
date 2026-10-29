@@ -5,6 +5,7 @@ pub mod answering;
 pub mod asking;
 pub mod briefing;
 pub mod directory;
+pub mod events;
 pub mod framing;
 pub mod identity;
 pub mod inherited;

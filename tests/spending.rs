@@ -19,10 +19,19 @@ const USAGE: &str = r#"data: {"choices":[],"usage":{"prompt_tokens":1,"completio
 
 const ASK: &str = r#"{"model":"spendtest/dear","context":{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}}"#;
 
+#[path = "spending/cancellation.rs"]
+mod cancellation;
+
 /// How the provider ends an answer.
 #[derive(Clone, Copy)]
 enum Ending {
     Whole,
+    Cached,
+    Alternate,
+    Malformed,
+    MixedReportedFirst,
+    MixedEstimatedFirst,
+    Settled,
     /// The connection closed mid-body, after the usage: a failure melchior tries again.
     Dropped,
 }
@@ -31,13 +40,18 @@ enum Ending {
 struct World {
     dir: Scratch,
     asked: Arc<AtomicUsize>,
+    port: u16,
 }
 
 impl World {
     fn new(name: &str, ending: Ending) -> Self {
-        let dir = Scratch::new("mel-sp", name);
         let asked = Arc::new(AtomicUsize::new(0));
         let port = provider(ending, Arc::clone(&asked));
+        Self::at(name, port, asked)
+    }
+
+    fn at(name: &str, port: u16, asked: Arc<AtomicUsize>) -> Self {
+        let dir = Scratch::new("mel-sp", name);
         std::fs::create_dir_all(dir.join("cfg/plugin")).expect("config");
         std::fs::create_dir_all(dir.join("cache/melchior/models")).expect("cache");
         melchior::places::ensure(&dir.join("r")).expect("runtime");
@@ -62,7 +76,28 @@ impl World {
             ),
         )
         .expect("provider");
-        Self { dir, asked }
+        Self { dir, asked, port }
+    }
+
+    fn discovered(&self, rates: serde_json::Value) {
+        std::fs::write(
+            self.dir.join("cfg/providers.lua"),
+            format!(
+                r#"
+            melchior.provider("spendtest", {{name="Prices", api="openai-completions",
+                base_url="http://127.0.0.1:{}/v1", auth={{kind="none"}}, discover=true}})
+        "#,
+                self.port
+            ),
+        )
+        .expect("discovered provider");
+        let card = serde_json::json!([{"id":"dear", "name":"Dear", "context_window":8192,
+            "max_tokens":128, "cost":rates}]);
+        std::fs::write(
+            self.dir.join("cache/melchior/models/spendtest.json"),
+            card.to_string(),
+        )
+        .expect("offline cached prices");
     }
 
     /// Set the cap the way a person does, in a file of melchior's own.
@@ -171,14 +206,51 @@ fn answer(stream: &mut std::net::TcpStream, ending: Ending, asked: &AtomicUsize)
     if reading.read_exact(&mut body).is_err() {
         return;
     }
-    asked.fetch_add(1, Ordering::SeqCst);
+    let attempt = asked.fetch_add(1, Ordering::SeqCst) + 1;
     let chunk = |text: &str| format!("{:x}\r\n{text}\r\n", text.len());
     let mut out = String::from(
         "HTTP/1.1 200 Fixture\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\
          Connection: close\r\n\r\n",
     );
-    out.push_str(&chunk(&format!("{USAGE}\n\n")));
-    if matches!(ending, Ending::Whole) {
+    let usage = match ending {
+        Ending::MixedReportedFirst if attempt == 1 => {
+            r#"data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"cost":1}}"#
+        }
+        Ending::MixedEstimatedFirst if attempt > 1 => {
+            r#"data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"cost":1}}"#
+        }
+        Ending::Cached => {
+            r#"data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":1}}}"#
+        }
+        Ending::Alternate => {
+            r#"data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"prompt_cache_hit_tokens":1}}"#
+        }
+        Ending::Malformed => {
+            r#"data: {"choices":[{"delta":{"content":"paid content"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":false}}}"#
+        }
+        _ => USAGE,
+    };
+    out.push_str(&chunk(&format!("{usage}\n\n")));
+    if matches!(
+        ending,
+        Ending::MixedReportedFirst | Ending::MixedEstimatedFirst
+    ) {
+        out.push_str(&chunk(&format!("{usage}\n\n")));
+    }
+    if matches!(ending, Ending::Settled) {
+        let settled = r#"data: {"usage":{"prompt_tokens":1,"completion_tokens":1,"cost":1}}"#;
+        out.push_str(&chunk(&format!("{settled}\n\n{settled}\n\n")));
+        out.push_str(&chunk(
+            "data: {\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"cost\":0}}\n\n",
+        ));
+    }
+    let dropped = matches!(ending, Ending::Dropped)
+        || (attempt == 1
+            && matches!(
+                ending,
+                Ending::MixedReportedFirst | Ending::MixedEstimatedFirst
+            ));
+    if !dropped {
         let done =
             r#"data: {"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}"#;
         out.push_str(&chunk(&format!("{done}\n\ndata: [DONE]\n\n")));
@@ -186,6 +258,128 @@ fn answer(stream: &mut std::net::TcpStream, ending: Ending, asked: &AtomicUsize)
     }
     let _ = stream.write_all(out.as_bytes());
     let _ = stream.flush();
+}
+
+#[test]
+fn paid_retries_keep_reported_and_estimated_attempts_separate() {
+    for ending in [Ending::MixedReportedFirst, Ending::MixedEstimatedFirst] {
+        let world = World::new("mixed-retry-cost", ending);
+        world.discovered(serde_json::json!({"input":3_000_000,"output":0}));
+        let said = world.ask(&[("MAGI_MELCHIOR_SESSION", "mixed-cost-run")]);
+        assert_eq!(last(&said)["event"], "stop", "{said:?}");
+        assert_eq!(world.asked(), 2);
+        assert_eq!(world.ledger("mixed-cost-run").spent(), 4_000_000);
+        let final_usage = said
+            .iter()
+            .rev()
+            .find(|event| event["event"] == "spent")
+            .expect("usage");
+        assert_eq!(final_usage["usage"]["input"], 2);
+        assert_eq!(final_usage["usage"]["cost_micros"], 1_000_000);
+        assert_eq!(final_usage["usage"]["estimated_micros"], 3_000_000);
+    }
+}
+
+#[test]
+fn a_final_positive_report_settles_its_estimate_without_stale_or_duplicate_charges() {
+    let world = World::new("settled-cost", Ending::Settled);
+    world.discovered(serde_json::json!({"input":3_000_000,"output":0}));
+    world.capped("melchior.spend_cap_usd=2");
+    let envs = [("MAGI_MELCHIOR_SESSION", "settled-cost-run")];
+    let said = world.ask(&envs);
+    assert_eq!(last(&said)["event"], "stop");
+    assert_eq!(world.ledger("settled-cost-run").spent(), 1_000_000);
+    let final_usage = said
+        .iter()
+        .rev()
+        .find(|event| event["event"] == "spent")
+        .expect("usage");
+    assert_eq!(final_usage["usage"]["cost_micros"], 1_000_000);
+    assert_eq!(final_usage["usage"]["estimated_micros"], 0);
+    assert_eq!(last(&world.ask(&envs))["event"], "stop");
+    assert_eq!(last(&world.ask(&envs))["event"], "failed");
+    assert_eq!(world.asked(), 2);
+}
+
+#[test]
+fn offline_cached_price_presence_controls_actual_run_charging_and_admission() {
+    use serde_json::json;
+    for (rates, expected) in [
+        (
+            json!({"input":3_000_000,"output":0,"cache_read":0,"cache_write":0}),
+            3_000_000,
+        ),
+        (
+            json!({"input":3_000_000,"output":0,"cache_read":1_000_000}),
+            1_000_000,
+        ),
+        (
+            json!({"input":3_000_000,"output":0,"cache_read":0,
+            "presence":{"version":1,"cache_read":true,"cache_write":false}}),
+            0,
+        ),
+        (
+            json!({"input":3_000_000,"output":0,"cache_read":0,
+            "presence":{"version":1,"cache_read":false,"cache_write":false}}),
+            3_000_000,
+        ),
+    ] {
+        let world = World::new("cached-prices", Ending::Cached);
+        world.capped("melchior.spend_cap_usd = 1");
+        world.discovered(rates.clone());
+        let envs = [("MAGI_MELCHIOR_SESSION", "cached-price-run")];
+        let first = world.ask(&envs);
+        assert_eq!(last(&first)["event"], "stop", "{rates}: {first:?}");
+        assert_eq!(
+            world.asked(),
+            1,
+            "fresh offline cache made a discovery request"
+        );
+        assert!(first.iter().any(|event| event["event"] == "spent"
+            && event["usage"]["input"] == 0
+            && event["usage"]["cache_read"] == 1));
+        assert_eq!(
+            world.ledger("cached-price-run").spent(),
+            expected,
+            "{rates}"
+        );
+        let second = world.ask(&envs);
+        if expected == 0 {
+            assert_eq!(last(&second)["event"], "stop");
+            assert_eq!(world.asked(), 2);
+        } else {
+            assert_eq!(last(&second)["event"], "failed");
+            assert_eq!(
+                world.asked(),
+                1,
+                "unknown cache price admitted another request"
+            );
+        }
+    }
+}
+
+#[test]
+fn alternate_and_malformed_cached_metrics_keep_actual_content_and_run_charges() {
+    for (ending, ordinary, cached) in [(Ending::Alternate, 0, 1), (Ending::Malformed, 1, 0)] {
+        let world = World::new("cached-metrics", ending);
+        world.capped("melchior.spend_cap_usd = 1");
+        world.discovered(serde_json::json!({"input":3_000_000,"output":0,"cache_read":0}));
+        let envs = [("MAGI_MELCHIOR_SESSION", "cached-metric-run")];
+        let said = world.ask(&envs);
+        assert_eq!(last(&said)["event"], "stop");
+        assert!(said.iter().any(|event| event["event"] == "spent"
+            && event["usage"]["input"] == ordinary
+            && event["usage"]["cache_read"] == cached));
+        if matches!(ending, Ending::Malformed) {
+            assert!(
+                said.iter()
+                    .any(|event| event["event"] == "text" && event["text"] == "paid content")
+            );
+        }
+        assert_eq!(world.ledger("cached-metric-run").spent(), 3_000_000);
+        assert_eq!(last(&world.ask(&envs))["event"], "failed");
+        assert_eq!(world.asked(), 1);
+    }
 }
 
 #[test]

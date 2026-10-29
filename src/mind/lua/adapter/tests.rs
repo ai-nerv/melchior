@@ -5,6 +5,53 @@ use super::*;
 use crate::mind::model::{Content, Message, Role, StopReason, ThinkingLevel};
 
 #[test]
+fn prepared_output_budgets_follow_lua_fields_and_preserve_thinking() {
+    for (name, path) in [
+        ("openai-completions", "/max_tokens"),
+        ("openai-responses", "/max_output_tokens"),
+        ("anthropic-messages", "/max_tokens"),
+        ("google-generative-ai", "/generationConfig/maxOutputTokens"),
+        ("pi-messages", "/maxTokens"),
+    ] {
+        let api = adapter(name);
+        for thinking in [None, Some(ThinkingLevel::Off), Some(ThinkingLevel::High)] {
+            let options = Options {
+                thinking,
+                ..Default::default()
+            };
+            let model = plain_model();
+            let (first, _) = api.request_observed(&model, &plain_context(), &options);
+            assert_eq!(first["__budget"]["effective"], 8192, "{name}");
+            assert_eq!(first["__budget"]["automatic"], true, "{name}");
+            assert_eq!(first["__budget"]["path"], path, "{name}");
+            assert_eq!(first.pointer(path).expect("output field"), 8192, "{name}");
+            let (next, _) = api.request_observed(
+                &model,
+                &plain_context(),
+                &Options {
+                    output_limit: Some(2048),
+                    ..options
+                },
+            );
+            let expected = if thinking == Some(ThinkingLevel::High) {
+                8192
+            } else {
+                2048
+            };
+            assert_eq!(
+                next.pointer(path).expect("output field"),
+                expected,
+                "{name}"
+            );
+            let mut unchanged = next;
+            *unchanged.pointer_mut(path).expect("output field") = serde_json::json!(8192);
+            unchanged["__budget"] = first["__budget"].clone();
+            assert_eq!(first, unchanged, "{name}");
+        }
+    }
+}
+
+#[test]
 fn every_builtin_protocol_registers() {
     let mut engine = engine_with_builtins().expect("builtins load");
     let apis = engine.apis();

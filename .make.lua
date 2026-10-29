@@ -214,8 +214,43 @@ make.recipe{ name = "test", desc = "the suite",
              run = function() sh.cargo("test", "--all-targets") end }
 make.alias("t", "test")
 
+make.recipe{ name = "test-events", desc = "content-free owner events and bounded local queues",
+             run = function()
+               sh.cargo("test", "--locked", "--offline", "--release", "--bin", "melchior", "event_start::")
+               sh.cargo("test", "--locked", "--offline", "--release", "--lib", "events::")
+               sh.cargo("test", "--locked", "--offline", "--release", "--lib", "mind::accounting::")
+               sh.cargo("test", "--locked", "--offline", "--release", "--test", "event_attempts")
+               sh.cargo("test", "--locked", "--offline", "--release", "--test", "event_usage")
+             end }
+
+make.recipe{ name = "test-serving", desc = "real server startup and sibling status",
+             run = function() sh.cargo("test", "--test", "serving") end }
+
+make.recipe{ name = "test-run-identity", desc = "recycled root identities and inherited run compatibility",
+             run = function()
+               sh.cargo("test", "--lib", "directory::sessions::tests::")
+               sh.cargo("test", "--test", "serving", "run_identity")
+             end }
+
+make.recipe{ name = "test-binding", desc = "socket leases, directory sweeps and peer identity",
+             run = function()
+               sh.cargo("test", "--lib", "serving::binding::")
+               sh.cargo("test", "--lib", "places::locking::")
+               sh.cargo("test", "--lib", "directory::")
+               sh.cargo("test", "--test", "identity")
+             end }
+
+make.recipe{ name = "test-oauth-storage", desc = "private credential storage and cross-process claims",
+             run = function() sh.cargo("test", "--lib", "mind::provider::oauth::persistence") end }
+
 make.recipe{ name = "build-fake-provider", desc = "build the deterministic HTTP provider fixture",
              run = function() sh.cargo("build", "--example", "fake-provider") end }
+
+make.recipe{ name = "build-fake-provider-release", desc = "build the release-profile offline provider fixture",
+             run = function() sh.cargo("build", "--release", "--example", "fake-provider") end }
+
+make.recipe{ name = "test-fake-provider", desc = "scripted Chat/Anthropic lifecycle and decoder contract",
+             run = function() sh.cargo("test", "--example", "fake-provider") end }
 
 make.recipe{ name = "build-metered-proxy", desc = "build the capped live-provider proxy",
              run = function() sh.cargo("build", "--example", "metered-proxy") end }
@@ -225,6 +260,45 @@ make.recipe{ name = "test-model-refresh", desc = "forced discovery with disposab
 
 make.recipe{ name = "test-streaming", desc = "provider byte and response boundaries",
              run = function() sh.cargo("test", "--lib", "mind::provider::") end }
+
+make.recipe{ name = "test-overflow", desc = "bounded overflow refusals and failure compatibility",
+             run = function()
+               sh.cargo("test", "--lib", "mind::provider::client::overflow_tests::")
+               sh.cargo("test", "--lib", "mind::provider::client::overflow::")
+               sh.cargo("test", "--lib", "mind::model::overflow::")
+               sh.cargo("test", "--lib", "mind::provider::retry::tests::")
+               sh.cargo("test", "--lib", "mind::wire::")
+               sh.cargo("test", "--test", "overflow")
+             end }
+
+make.recipe{ name = "test-usage", desc = "usage dialects, pricing, discovery, retries and spending",
+             run = function()
+               for _, suite in ipairs({ "mind::lua::adapter::", "mind::model::", "mind::spending::",
+                                         "mind::running::", "mind::discovering::", "mind::catalog::" }) do
+                 sh.cargo("test", "--lib", suite)
+               end
+               sh.cargo("test", "--test", "spending", "--test", "model_refresh")
+             end }
+
+make.recipe{ name = "test-cache-contract", desc = "actual request serialization and cache compatibility contract",
+             run = function()
+               sh.cargo("test", "--lib", "mind::wire::")
+               sh.cargo("test", "--lib", "mind::provider::compat::cache_tests::")
+               sh.cargo("test", "--lib", "mind::lua::adapter::cache_conversation::")
+               sh.cargo("test", "--lib", "mind::lua::adapter::cache_tests::")
+               sh.cargo("test", "--lib", "mind::lua::adapter::cache_policy::")
+               sh.cargo("test", "--lib", "mind::lua::adapter::cache_markers::")
+               sh.cargo("test", "--lib", "mind::catalog::cache_tests::")
+               sh.cargo("test", "--lib", "mind::provider::client::cache_tests::")
+               sh.cargo("test", "--lib", "mind::discovering::cache_tests::")
+             end }
+
+make.recipe{ name = "test-json-contract", desc = "Lua JSON fidelity, typed containers and bounded conversion",
+             run = function()
+               sh.cargo("test", "--lib", "mind::lua::engine::json_tests::")
+               sh.cargo("test", "--lib", "mind::lua::convert::tests::")
+               sh.cargo("test", "--lib", "mind::lua::adapter::fidelity_tests::")
+             end }
 
 make.recipe{ name = "test-agent-status", desc = "task handles and spawned child status",
              run = function()
@@ -374,7 +448,7 @@ make.recipe{ name = "audit", desc = "known advisories against the lockfile, offl
 -- Advisories, licenses, bans and sources, as `deny.toml` says.
 make.recipe{ name = "deny", desc = "the dependency policy in deny.toml, offline",
              run = function()
-               cargo_or_shell({ "deny", "check", "--disable-fetch" }, "cargo deny failed")
+               cargo_or_shell({ "deny", "--offline", "check", "--disable-fetch" }, "cargo deny failed")
              end }
 
 make.recipe{

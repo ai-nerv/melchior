@@ -1,11 +1,46 @@
 //! The JSON parser lent to the VM, so no protocol description carries its own.
 
-use crate::mind::lua::convert::{json_from_lua, lua_from_json};
+use crate::mind::lua::convert::{json_from_lua, lua_from_json, shape};
 use luna::{Callback, CallbackReturn, Context, Table, Value};
 
 /// Build the `json` table.
-pub fn table<'gc>(ctx: Context<'gc>) -> Table<'gc> {
+pub fn table<'gc>(ctx: Context<'gc>, types: Table<'gc>) -> Table<'gc> {
     let json = Table::new(&ctx);
+    json.set(ctx, "null", types.get_value(ctx, "null")).ok();
+    for (name, array) in [("array", true), ("object", false)] {
+        let constructor = Callback::from_fn_with(
+            &ctx,
+            (types, array),
+            |(types, array), ctx, _exec, mut stack| {
+                let value: Value = stack.consume(ctx)?;
+                let table = match value {
+                    Value::Nil => Table::new(&ctx),
+                    Value::Table(table)
+                        if table.metatable().is_none() || shape::get(ctx, table).is_some() =>
+                    {
+                        table
+                    }
+                    _ => {
+                        return Err(luna::Error::from_value(Value::String(
+                            luna::String::from_slice(
+                                &ctx,
+                                b"JSON containers require a table without a custom metatable",
+                            ),
+                        )));
+                    }
+                };
+                let shape = if *array {
+                    shape::Shape::Array
+                } else {
+                    shape::Shape::Object
+                };
+                shape::set(ctx, *types, table, shape);
+                stack.replace(ctx, table);
+                Ok(CallbackReturn::Return)
+            },
+        );
+        json.set(ctx, name, constructor).ok();
+    }
 
     let decode = Callback::from_fn(&ctx, |ctx, _exec, mut stack| {
         let text: Value = stack.consume(ctx)?;
