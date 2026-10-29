@@ -115,7 +115,7 @@ pub struct Model {
     /// explicit `None` marks the level unsupported, which is different from unmapped.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub thinking: BTreeMap<ThinkingLevel, Option<String>>,
-    /// Per-model overrides for its protocol's quirks; absent means "whatever the base URL implies".
+    /// Per-model protocol overrides; absent fields inherit the provider's declaration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<Compat>,
 }

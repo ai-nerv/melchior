@@ -4,6 +4,24 @@ use crate::mind::provider::testing::{Server, Step, chunk, headers, reply};
 use serde_json::json;
 use std::time::Duration;
 
+impl Client {
+    async fn attempt_once(
+        &self,
+        call: &Call<'_>,
+        mut on_delta: impl FnMut(Delta),
+        on_frame: impl FnMut(crate::mind::model::RequestFrame),
+    ) -> Result<(), ProviderError> {
+        self.attempt(
+            call,
+            &budget::Prepared::new(call, call.options),
+            |delta, _| on_delta(delta),
+            on_frame,
+            &mut observing::Attempt::new(crate::mind::accounting::Trace::attempts()),
+        )
+        .await
+    }
+}
+
 fn model() -> Model {
     serde_json::from_value(
         json!({"id":"test","name":"Test","context_window":200000,"max_tokens":1000}),
@@ -39,6 +57,75 @@ fn source() -> String {
         format!("data: {}\n\n", json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call1","function":{"name":"weather","arguments":"{\"city\":\"Zürich\"}"}}]}}]})),
         format!("data: {}\r\r", json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":7,"completion_tokens":3}})),
         "data: [DONE]".into()].concat()
+}
+
+#[tokio::test]
+async fn measured_usage_survives_http_fragmentation_and_a_malformed_tail() {
+    let bytes = concat!(
+        "data: {\"usage\":{\"prompt_tokens\":10}}\n\n",
+        "data: {\"usage\":{\"completion_tokens\":0,\"prompt_cache_hit_tokens\":0,\"cost\":0}}\n\n",
+        "data: [DONE]\n\n",
+    )
+    .as_bytes();
+    let mut split = vec![headers(200)];
+    split.extend(bytes.iter().map(|byte| chunk(std::slice::from_ref(byte))));
+    split.push(Step::Bytes(b"0\r\n\r\n".to_vec()));
+    let corrupt = [bytes, b"data: \xff\n\n"].concat();
+    let mut replies = vec![split];
+    replies.extend((0..MAX_ATTEMPTS).map(|_| reply(200, &corrupt)));
+    let server = Server::start(replies).await;
+    let (adapter, provider, model, context, options) = (
+        adapter(),
+        provider(&server.url),
+        model(),
+        Context::default(),
+        Options::default(),
+    );
+    let call = Call {
+        adapter: &adapter,
+        provider: &provider,
+        model: &model,
+        context: &context,
+        options: &options,
+    };
+    for succeeds in [true, false] {
+        let mut snapshots = Vec::new();
+        let mut retries = 0;
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            Client::with_base_delay(Duration::ZERO).stream_traced(
+                &call,
+                |delta, evidence| {
+                    if let Delta::Usage(usage) = delta {
+                        snapshots.push((usage, evidence));
+                    }
+                },
+                |_| retries += 1,
+                |_| {},
+                crate::mind::accounting::Trace::attempts(),
+            ),
+        )
+        .await
+        .expect("bounded stream");
+        assert_eq!(result.is_ok(), succeeds);
+        let attempts = if succeeds { 1 } else { MAX_ATTEMPTS };
+        assert_eq!(retries, attempts - 1);
+        assert_eq!(snapshots.len(), 2 * attempts as usize);
+        for pair in snapshots.chunks_exact(2) {
+            assert_eq!(pair[0].0.input, 10);
+            assert_eq!(pair[0].1, crate::mind::model::MeasuredUsage::default());
+            assert_eq!(
+                pair[1].1,
+                crate::mind::model::MeasuredUsage {
+                    input: Some(10),
+                    output: Some(0),
+                    cache_read: Some(0),
+                    cost_micros: Some(0),
+                    ..Default::default()
+                }
+            );
+        }
+    }
 }
 
 async fn stream(client: &Client, url: &str) -> Result<Vec<Delta>, ProviderError> {
@@ -169,7 +256,7 @@ async fn malformed_tail_preserves_completed_events_and_usage_at_every_http_split
         let mut events = Vec::new();
         let error = tokio::time::timeout(
             Duration::from_secs(3),
-            client.attempt(
+            client.attempt_once(
                 &Call {
                     adapter: &adapter,
                     provider: &provider,
@@ -178,6 +265,7 @@ async fn malformed_tail_preserves_completed_events_and_usage_at_every_http_split
                     options: &options,
                 },
                 |event| events.push(event),
+                |_| {},
             ),
         )
         .await
@@ -281,7 +369,7 @@ async fn bounded_error_bodies_keep_status_retry_policy_and_hide_echoed_credentia
             Options::default(),
         );
         let why = client
-            .attempt(
+            .attempt_once(
                 &Call {
                     adapter: &adapter,
                     provider: &provider,
@@ -289,6 +377,7 @@ async fn bounded_error_bodies_keep_status_retry_policy_and_hide_echoed_credentia
                     context: &context,
                     options: &options,
                 },
+                |_| {},
                 |_| {},
             )
             .await
@@ -308,7 +397,7 @@ async fn provider_transport_errors_exclude_sensitive_endpoint_urls() {
         Options::default(),
     );
     let why = Client::new()
-        .attempt(
+        .attempt_once(
             &Call {
                 adapter: &adapter,
                 provider: &provider,
@@ -316,6 +405,7 @@ async fn provider_transport_errors_exclude_sensitive_endpoint_urls() {
                 context: &context,
                 options: &options,
             },
+            |_| {},
             |_| {},
         )
         .await

@@ -208,7 +208,109 @@ refused with nothing sent, as `failed` with `why: "invalid"`, and the message gi
 cap and how to raise it. The request that crosses the cap still finishes. The ledger goes when the
 root session that began the run ends.
 
+Cached reads and writes with no configured price use the ordinary input rate.
+An explicit cached rate of `0` remains free. Generated model caches keep versioned
+`cost.presence` metadata alongside the numeric rates; older cache arrays remain
+readable offline, but their generated zero rates are unknown rather than proof of
+free caching. Existing settled ledger entries are not recalculated. Positive
+provider-reported cost takes precedence; a reported zero retains the existing
+unspecified-cost sentinel and uses configured estimates.
+
+Each `spent.usage` replaces the previous cumulative measurement, including failed
+attempts. `cost_micros` contains provider-reported costs; optional
+`estimated_micros` contains configured estimates for other, unreported-cost
+attempts. Their sum is the resolved charge. A later positive report supersedes
+only the same attempt's estimate. Settlement replaces that ask's in-flight ledger
+contribution under the lock; duplicate events do not charge again, concurrent asks
+remain counted, and settled history is not recalculated. Invalid ledgers refuse
+new capped asks rather than appearing empty; saturated totals stay saturated.
+
+Chat Completions recognizes nested `cached_tokens` and `prompt_cache_hit_tokens`
+as duplicate counts, using the maximum valid value and bounding it by a supplied
+inclusive prompt total. Missing or invalid metrics preserve other valid counts and
+response text; invalid metrics are counted in stream state and noted in the log.
+`oslo make test-usage` runs adapter, model/cache, retry, spending and real-binary
+local-provider coverage; `test-streaming` separately covers transport boundaries.
+
+## JSON in protocol adapters
+
+Request tool arguments, tool parameters, and forced answer schemas preserve JSON
+nulls and array/object identity. Unsigned integers above Lua's signed range remain
+opaque values that `melchior.json.encode` writes exactly. Optional protocol
+metadata and `json.decode` keep their nil-based control semantics.
+
+`melchior.json.array()` and `melchior.json.object()` return explicitly shaped
+tables. Passing a table marks and returns that same table; custom metatables are
+refused. Use `melchior.json.null` for a stored null. Explicit arrays must contain
+consecutive integer keys starting at 1, with nulls rather than holes. Encoding
+malformed arrays, cycles, unrelated userdata, or oversized values returns nil.
+
+`oslo make test-json-contract` checks the bridge and actual protocol requests;
+`oslo make test-cache-contract` checks the request caching prerequisites.
+
+## Prompt-cache capabilities
+
+Provider or model `compat.prompt_cache` accepts `"none"` or
+`"anthropic_ephemeral"`. An omitted field inherits the provider declaration;
+otherwise it defaults to none. A model's explicit none disables its provider's
+mode. Only the shipped direct Anthropic provider enables the mode by default.
+Copilot and undeclared custom endpoints remain off, regardless of protocol or
+provider name. Replacing a provider declaration also replaces its capability
+declaration; a custom compatible endpoint requires explicit opt-in.
+
+The encoder marks a nonempty system text block and the final selected tool
+definition, including a forced answer-schema tool. After role merging, it also
+marks the last eligible content block in each of the two latest eligible
+messages, with no more than four markers total. Nonempty text, user images and
+tool call/result blocks are eligible; thinking blocks and empty systems never
+receive direct markers. Earlier content and signed state stay unchanged as the
+boundaries advance. No TTL override or extra beta header is sent. Provider
+rejection is reported without removing markers or retrying an invalid request.
+Offline tests establish encoding and supplied usage accounting, not real cache
+hits or savings. Root `oslo make test-cache-contract` captures consecutive actual
+family requests, including same-model cache disable, image adaptation and exact
+history restoration when capabilities are restored. Its resume case checks
+signed native-tool history and images against actual Balthasar replay, with
+legal marker boundaries and one declared resume invalidation.
+Additional actual-family captures cover deferred-tool activation and Balthasar
+rule/drop/summary transitions, preserving surviving tool IDs, arguments, outputs
+and signatures against durable entries and the memory owner's selected slots.
+
+Each HTTP attempt can emit an optional `request_frame` observation after request
+construction and before sending. Version 1 carries fixed-size identities for the
+registered adapter and resolved serialization policy, plus an omitted-image
+count. The identities exclude prompts, messages, tools, endpoints and credentials.
+They are transient transport metadata, not provider request fields, transcript
+entries or usage. They must not release helpers waiting for the first response.
+
+Magi reports reason-only `provider_frame` diagnostics for dialect, policy and
+image-adaptation changes. Missing or unsupported observations clear its baseline,
+including between retries. An empty reason list does not prove delivery, a cache
+hit or arbitrary custom Lua determinism; shipped serializers have separate exact
+request tests. Resume discards the in-memory observation baseline.
+
+`oslo make test-cache-contract` exercises actual Lua requests, capability
+layering, current catalog declarations, cache reloads, policy observations and
+captured local HTTP rejections, consecutive successful HTTP requests and supplied
+cache counters. Wire tests cover JSON and CBOR observation bounds.
+
 ## Commands
+
+`oslo make build-fake-provider` builds the offline HTTP fixture. Script turns
+default to Chat Completions. An Anthropic turn sets
+`"dialect":"anthropic-messages"` and uses turn-level `usage` fields `input`,
+`output`, `cache_read`, and `cache_write`; its events support text, thinking,
+signature, tool_call, finish, pause, drop, and split. Named block/message lifecycle
+events are generated by the fixture. Tool arguments remain raw fragments,
+including deliberately malformed fault fixtures; that does not imply those
+arguments are accepted by a real provider. Chat-only event metrics/usage and
+Anthropic-only signatures do not silently cross dialects.
+
+`oslo make test-fake-provider` checks the actual decoder, HTTP split streaming,
+malformed sequences, refusals and request bounds. Fixture scripts and request
+bodies are capped at the family frame limit, with sixteen concurrent readers and
+bounded request reads. Recorded JSONL writes are serialized and capture failures
+are reported.
 
 The build is `.make.lua`, read by [oslo](https://github.com/termworks/oslo). At an oslo prompt in
 this directory `make` is enough; anywhere else it is `oslo make`.

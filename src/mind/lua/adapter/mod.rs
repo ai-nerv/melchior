@@ -9,6 +9,14 @@ use crate::mind::provider::model::Model;
 use crate::mind::provider::sse;
 use std::cell::RefCell;
 
+mod frame;
+
+#[cfg(test)]
+mod measured_tests;
+
+#[cfg(test)]
+mod cache_policy;
+
 /// One registered protocol, driven through the VM.
 pub struct LuaAdapter {
     /// The VM holding the description, shared with the tools that run in it: one thread, one VM.
@@ -163,7 +171,21 @@ impl Adapter for LuaAdapter {
     }
 
     fn request(&self, model: &Model, context: &Context, options: &Options) -> serde_json::Value {
+        let mut body = self.request_observed(model, context, options).0;
+        if let Some(fields) = body.as_object_mut() {
+            fields.remove("__budget");
+        }
+        body
+    }
+
+    fn request_observed(
+        &self,
+        model: &Model,
+        context: &Context,
+        options: &Options,
+    ) -> (serde_json::Value, Option<crate::mind::model::RequestFrame>) {
         let mut context = context.clone();
+        let mut omitted_images = 0_u64;
         if !model.accepts_images() {
             use crate::mind::model::Content;
             const OMITTED: &str = "[Image omitted: the current model does not support images. Switch to a vision-capable model to view it.]";
@@ -171,6 +193,7 @@ impl Adapter for LuaAdapter {
                 for content in &mut message.content {
                     match content {
                         Content::Image { .. } => {
+                            omitted_images = omitted_images.saturating_add(1);
                             *content = Content::Text {
                                 text: OMITTED.into(),
                                 signature: None,
@@ -179,6 +202,8 @@ impl Adapter for LuaAdapter {
                         Content::ToolResult {
                             images, content, ..
                         } if !images.is_empty() => {
+                            omitted_images = omitted_images
+                                .saturating_add(u64::try_from(images.len()).unwrap_or(u64::MAX));
                             images.clear();
                             content.push('\n');
                             content.push_str(OMITTED);
@@ -188,22 +213,38 @@ impl Adapter for LuaAdapter {
                 }
             }
         }
-        self.call(
-            "request",
-            &[
-                described(model),
-                serde_json::to_value(&context).unwrap_or_default(),
-                asked(model, options),
-            ],
+        let body = self
+            .call(
+                "request",
+                &[
+                    described(model),
+                    serde_json::to_value(&context).unwrap_or_default(),
+                    asked(model, options),
+                ],
+            )
+            .unwrap_or(serde_json::Value::Null);
+        (
+            body,
+            frame::observed(&self.name, model, options, omitted_images),
         )
-        .unwrap_or(serde_json::Value::Null)
     }
 
     fn on_event(&self, state: &mut StreamState, event: &sse::Event) -> Vec<Delta> {
+        self.on_event_measured(state, event)
+            .into_iter()
+            .map(|(delta, _)| delta)
+            .collect()
+    }
+
+    fn on_event_measured(
+        &self,
+        state: &mut StreamState,
+        event: &sse::Event,
+    ) -> Vec<(Delta, crate::mind::model::MeasuredUsage)> {
         let answer = self.call(
             "on_event",
             &[
-                serde_json::json!({ "scratch": state.scratch, "usage": state.usage }),
+                serde_json::json!({ "scratch": state.scratch, "usage": state.usage, "measured_usage": state.measured_usage }),
                 serde_json::json!({ "name": event.name, "data": event.data }),
             ],
         );
@@ -215,17 +256,44 @@ impl Adapter for LuaAdapter {
         if let Some(scratch) = answer.get("scratch") {
             state.scratch = scratch.clone();
         }
-        if let Some(usage) = answer
-            .get("usage")
-            .and_then(|u| serde_json::from_value(u.clone()).ok())
-        {
+        let mut anomalies = answer
+            .get("usage_anomalies")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        if let Some(value) = answer.get("usage") {
+            let (usage, invalid) = crate::mind::model::Usage::measured(value, state.usage);
             state.usage = usage;
+            state.measured_usage.observe(None, usage);
+            anomalies = anomalies.saturating_add(invalid);
         }
-        answer
+        let deltas = answer
             .get("deltas")
             .and_then(|d| d.as_array())
-            .map(|deltas| deltas.iter().filter_map(delta_from_json).collect())
-            .unwrap_or_default()
+            .map(|deltas| {
+                deltas
+                    .iter()
+                    .filter_map(|value| {
+                        if value.get("kind").and_then(serde_json::Value::as_str) == Some("usage") {
+                            let (usage, invalid) = crate::mind::model::Usage::measured(
+                                value.get("usage")?,
+                                state.usage,
+                            );
+                            state.usage = usage;
+                            state.measured_usage.observe(value.get("measured"), usage);
+                            anomalies = anomalies.saturating_add(invalid);
+                            Some((Delta::Usage(usage), state.measured_usage))
+                        } else {
+                            delta_from_json(value).map(|delta| (delta, state.measured_usage))
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if anomalies > 0 {
+            state.usage_anomalies = state.usage_anomalies.saturating_add(anomalies);
+            crate::noted!("usage: {} ignored {anomalies} invalid metric(s)", self.name);
+        }
+        deltas
     }
 }
 
@@ -248,7 +316,6 @@ fn delta_from_json(value: &serde_json::Value) -> Option<Delta> {
             name: text("name"),
         },
         "tool_call_args" => Delta::ToolCallArgs(text("arguments")),
-        "usage" => Delta::Usage(serde_json::from_value(value.get("usage")?.clone()).ok()?),
         "stop" => Delta::Stop(serde_json::from_value(value.get("reason")?.clone()).ok()?),
         _ => return None,
     })
@@ -304,13 +371,23 @@ pub fn engine_with_builtins() -> Result<Engine, crate::mind::lua::LuaError> {
 mod images;
 
 #[cfg(test)]
+mod cache_conversation;
+#[cfg(test)]
+mod cache_markers;
+#[cfg(test)]
+mod cache_tests;
+#[cfg(test)]
 mod deciding;
+#[cfg(test)]
+mod fidelity_tests;
 #[cfg(test)]
 mod protocols;
 #[cfg(test)]
 mod support;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod usage_tests;
 
 #[cfg(test)]
 mod thinking_tests {
@@ -344,6 +421,7 @@ mod thinking_tests {
             max_tokens: None,
             provider: None,
             avoid: Vec::new(),
+            ..Default::default()
         }
     }
 

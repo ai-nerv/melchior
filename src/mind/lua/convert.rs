@@ -5,6 +5,11 @@ use luna::{Table, Value};
 use serde_json::{Map, Number};
 use std::collections::HashSet;
 
+mod input;
+pub(super) mod shape;
+
+pub(super) use input::api_args;
+
 /// How deep one conversion may nest.
 const DEPTH: usize = 32;
 
@@ -21,6 +26,8 @@ pub enum Undescribable {
     Kind(&'static str),
     #[error("a table key is neither a string nor an integer")]
     Key,
+    #[error("a JSON array must have contiguous integer keys starting at 1")]
+    Array,
     #[error("tables nest deeper than {DEPTH}")]
     Deep,
     #[error("a table contains itself")]
@@ -31,9 +38,8 @@ pub enum Undescribable {
     Long,
 }
 
-/// A Lua value as JSON. Lua does not distinguish a list from a map, so a table whose keys are
-/// exactly `1..n` becomes an array and anything else an object — the same rule the family's
-/// client library uses.
+/// A Lua value as JSON. Typed containers retain their shape; untyped nonempty tables with
+/// consecutive integer keys become arrays and other untyped tables become objects.
 pub fn json_from_lua<'gc>(
     ctx: luna::Context<'gc>,
     value: Value<'gc>,
@@ -89,6 +95,9 @@ impl<'gc> Walk<'gc> {
             Value::Number(f) => Number::from_f64(f).map_or(serde_json::Value::Null, Into::into),
             Value::String(s) => serde_json::Value::String(self.string(s)?),
             Value::Table(t) => self.table(t, depth)?,
+            Value::UserData(value) => {
+                shape::scalar(value).ok_or(Undescribable::Kind("userdata"))?
+            }
             // A function belongs to the VM that made it; registrars keep those separately.
             other => return Err(Undescribable::Kind(other.type_name())),
         })
@@ -108,10 +117,23 @@ impl<'gc> Walk<'gc> {
             entries.push(entry);
         }
 
-        let is_list = !entries.is_empty()
-            && entries.iter().enumerate().all(
-                |(index, (key, _))| matches!(key, Value::Integer(i) if *i == index as i64 + 1),
-            );
+        let shape = shape::get(self.ctx, table);
+        if shape == Some(shape::Shape::Array) {
+            entries.sort_unstable_by_key(|(key, _)| match key {
+                Value::Integer(index) => *index,
+                _ => i64::MIN,
+            });
+        }
+        let consecutive = entries
+            .iter()
+            .enumerate()
+            .all(|(index, (key, _))| matches!(key, Value::Integer(i) if *i == index as i64 + 1));
+        let is_list = match shape {
+            Some(shape::Shape::Array) if !consecutive => return Err(Undescribable::Array),
+            Some(shape::Shape::Array) => true,
+            Some(shape::Shape::Object) => false,
+            None => !entries.is_empty() && consecutive,
+        };
 
         let out = if is_list {
             let mut out = Vec::with_capacity(entries.len());
@@ -148,9 +170,7 @@ impl<T: serde::de::DeserializeOwned> FromLua for T {
     }
 }
 
-/// A JSON value as Lua, the inverse of [`json_from_lua`]. Lua has one table type, so an empty
-/// array and an empty object both arrive as an empty table and an adapter cannot tell them
-/// apart.
+/// A JSON control value as Lua. Nulls become nil; arrays and objects become untyped tables.
 pub fn lua_from_json<'gc>(ctx: luna::Context<'gc>, value: &serde_json::Value) -> Value<'gc> {
     match value {
         serde_json::Value::Null => Value::Nil,

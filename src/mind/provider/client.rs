@@ -8,6 +8,14 @@ use crate::mind::provider::endpoint::{Auth, Provider};
 use crate::mind::provider::model::Model;
 use crate::mind::provider::retry::RetryClass;
 
+mod budget;
+mod observing;
+mod overflow;
+
+#[cfg(test)]
+mod cache_tests;
+#[cfg(test)]
+mod overflow_tests;
 #[cfg(test)]
 mod refusing;
 #[cfg(test)]
@@ -43,6 +51,7 @@ use futures_util::StreamExt;
 pub struct ProviderError {
     pub class: RetryClass,
     pub message: String,
+    pub overflow: Option<crate::mind::model::overflow::Detail>,
     /// Whether asking again could help. The class's own answer, unless this failure is one the
     /// class usually recovers from and this one will not.
     pub again: bool,
@@ -63,6 +72,7 @@ impl ProviderError {
             message: message.into(),
             again: class.is_retryable(),
             after: None,
+            overflow: None,
         }
     }
 
@@ -126,17 +136,56 @@ impl Client {
     pub async fn stream_reporting(
         &self,
         call: &Call<'_>,
+        on_delta: impl FnMut(Delta),
+        on_retry: impl FnMut(Retrying),
+    ) -> Result<(), ProviderError> {
+        self.stream_observing(call, on_delta, on_retry, |_| {})
+            .await
+    }
+
+    /// Stream with serialization observations before each HTTP attempt.
+    pub async fn stream_observing(
+        &self,
+        call: &Call<'_>,
         mut on_delta: impl FnMut(Delta),
+        on_retry: impl FnMut(Retrying),
+        on_frame: impl FnMut(crate::mind::model::RequestFrame),
+    ) -> Result<(), ProviderError> {
+        self.stream_traced(
+            call,
+            |delta, _| on_delta(delta),
+            on_retry,
+            on_frame,
+            crate::mind::accounting::Trace::attempts(),
+        )
+        .await
+    }
+
+    pub(crate) async fn stream_traced(
+        &self,
+        call: &Call<'_>,
+        mut on_delta: impl FnMut(Delta, crate::mind::model::MeasuredUsage),
         mut on_retry: impl FnMut(Retrying),
+        mut on_frame: impl FnMut(crate::mind::model::RequestFrame),
+        trace: crate::mind::accounting::Trace,
     ) -> Result<(), ProviderError> {
         let mut attempt = 1;
+        let mut observed = observing::Attempt::new(trace.clone());
+        let mut prepared = budget::Prepared::new(call, call.options);
         loop {
             // Deltas reach the caller as they arrive, so `on_retry` is the caller's signal to
             // retract whatever it has already published before the next attempt starts.
-            let outcome = self.attempt(call, &mut on_delta).await;
+            let outcome = self
+                .attempt(call, &prepared, &mut on_delta, &mut on_frame, &mut observed)
+                .await;
+            observed.finish(outcome.is_ok());
             match outcome {
                 Ok(()) => return Ok(()),
-                Err(why) if why.again && attempt < MAX_ATTEMPTS => {
+                Err(why) if attempt < MAX_ATTEMPTS => {
+                    let lowered = prepared.lowered(call, &why);
+                    if lowered.is_none() && !why.again {
+                        return Err(why);
+                    }
                     // Seeded by this process too, so sessions sharing a model do not ask in step.
                     let seed = crate::mind::provider::retry::seed(
                         &format!(
@@ -149,7 +198,13 @@ impl Client {
                     );
                     let wait =
                         crate::mind::provider::retry::backoff_from(self.base_delay, attempt, seed);
-                    let wait = crate::mind::provider::retry::at_least(wait, why.after, seed);
+                    let wait = if let Some(next) = lowered {
+                        prepared = next;
+                        std::time::Duration::ZERO
+                    } else {
+                        crate::mind::provider::retry::at_least(wait, why.after, seed)
+                    };
+                    let waiting = observing::Waiting::new(trace.clone());
                     on_retry(Retrying {
                         attempt,
                         max_attempts: MAX_ATTEMPTS,
@@ -157,6 +212,7 @@ impl Client {
                         why: why.message.clone(),
                     });
                     tokio::time::sleep(wait).await;
+                    observed = waiting.dispatch();
                     attempt += 1;
                 }
                 Err(why) => return Err(why),
@@ -168,14 +224,16 @@ impl Client {
     async fn attempt(
         &self,
         call: &Call<'_>,
-        mut on_delta: impl FnMut(Delta),
+        prepared: &budget::Prepared,
+        mut on_delta: impl FnMut(Delta, crate::mind::model::MeasuredUsage),
+        mut on_frame: impl FnMut(crate::mind::model::RequestFrame),
+        observed: &mut observing::Attempt,
     ) -> Result<(), ProviderError> {
         let Call {
             adapter,
             provider,
             model,
-            context,
-            options,
+            ..
         } = call;
         let Some(base_url) = provider.base_url.as_deref() else {
             return Err(ProviderError::new(
@@ -213,11 +271,19 @@ impl Client {
             };
             request = request.header(named, valued);
         }
-        let (body, kept_by_dialect) = parted(adapter.request(model, context, options));
+        if let Some(frame) = prepared.frame {
+            on_frame(frame);
+        }
 
         // Bounded like the body below: a provider that takes the request and never answers at all
         // holds the turn open for as long as it stays quiet.
-        let sent = tokio::time::timeout(QUIET, request.json(&body).send()).await;
+        let sent = tokio::time::timeout(
+            QUIET,
+            request
+                .json(&prepared.body)
+                .send_observing(|| observed.dispatched()),
+        )
+        .await;
         let response = match sent {
             Ok(Err(refused @ Unanswered::Refused { .. })) => {
                 return Err(ProviderError::new(
@@ -264,13 +330,14 @@ impl Client {
                 ),
             );
             refused.after = after;
+            refused.overflow = overflow::classified(model.api, status.as_u16(), class, &detail);
             return Err(refused);
         }
 
         let mut parser = sse::Parser::new();
         let mut state = crate::mind::provider::api::StreamState::default();
-        if let Some(kept) = kept_by_dialect {
-            state.scratch = kept;
+        if let Some(kept) = &prepared.scratch {
+            state.scratch = kept.clone();
         }
         // A reply that is one JSON document and no stream yields no events; it is kept, within a
         // bound, to be handed over whole once it is known that none came.
@@ -300,12 +367,12 @@ impl Client {
                 .feed(&chunk, |event| {
                     events += 1;
                     kept(&mut tail, &event.data);
-                    for delta in adapter.on_event(&mut state, &event) {
+                    for (delta, measured) in adapter.on_event_measured(&mut state, &event) {
                         stopped |= matches!(delta, Delta::Stop(_));
                         if let Delta::Text(text) = &delta {
                             said.push_str(text);
                         }
-                        on_delta(delta);
+                        on_delta(delta, measured);
                     }
                 })
                 .map_err(|why| unparsed(why, &provider.id))?;
@@ -313,12 +380,12 @@ impl Client {
         if let Some(event) = parser.finish().map_err(|why| unparsed(why, &provider.id))? {
             events += 1;
             kept(&mut tail, &event.data);
-            for delta in adapter.on_event(&mut state, &event) {
+            for (delta, measured) in adapter.on_event_measured(&mut state, &event) {
                 stopped |= matches!(delta, Delta::Stop(_));
                 if let Delta::Text(text) = &delta {
                     said.push_str(text);
                 }
-                on_delta(delta);
+                on_delta(delta, measured);
             }
         }
         // No event at all, and what came is one JSON document: a dialect that answers whole
@@ -329,12 +396,12 @@ impl Client {
                 data: String::from_utf8_lossy(&whole).into_owned(),
             };
             kept(&mut tail, &event.data);
-            for delta in adapter.on_event(&mut state, &event) {
+            for (delta, measured) in adapter.on_event_measured(&mut state, &event) {
                 stopped |= matches!(delta, Delta::Stop(_));
                 if let Delta::Text(text) = &delta {
                     said.push_str(text);
                 }
-                on_delta(delta);
+                on_delta(delta, measured);
             }
         }
         let finish = tail.iter().rev().find_map(|data| reason_in(data));
@@ -350,7 +417,7 @@ impl Client {
             .and_then(|()| completed(finish.as_deref(), &provider.id));
         // Only an answer that came through whole makes its upstream the one asked first.
         if let (Ok(()), Some(upstream)) = (&outcome, upstream) {
-            on_delta(Delta::Served(upstream));
+            on_delta(Delta::Served(upstream), state.measured_usage);
         }
         outcome
     }
@@ -374,6 +441,9 @@ fn value_in(data: &str, key: &str) -> Option<String> {
 /// A request as a dialect built it, apart from what the dialect kept for itself under
 /// `__scratch`: what it needs in order to read the reply, which is no part of what is sent.
 fn parted(mut body: serde_json::Value) -> (serde_json::Value, Option<serde_json::Value>) {
+    if let Some(fields) = body.as_object_mut() {
+        fields.remove("__budget");
+    }
     let kept = body
         .as_object_mut()
         .and_then(|fields| fields.remove("__scratch"));
@@ -646,87 +716,7 @@ async fn off_thread<T: Send + 'static>(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_stream_that_finishes_with_an_error_is_asked_again() {
-        let why = completed(Some("error"), "openrouter").expect_err("an error is no answer");
-        assert!(matches!(why.class, RetryClass::Transport), "{why:?}");
-        for real in [Some("stop"), Some("length"), Some("tool_calls"), None] {
-            assert!(completed(real, "openrouter").is_ok(), "{real:?}");
-        }
-    }
-
-    #[test]
-    fn a_stream_that_says_nothing_at_all_is_asked_again() {
-        let why = hung("openrouter");
-        assert!(matches!(why.class, RetryClass::Transport), "{why:?}");
-        assert!(why.to_string().contains("180"), "{why}");
-    }
-
-    #[test]
-    fn a_tool_call_written_as_text_is_asked_again() {
-        let leaked = "Let me look.\n\n<｜DSML｜tool_cinvoke name=\"shell\">";
-        let why = unleaked(leaked, "openrouter").expect_err("a leaked call is not an answer");
-        assert!(matches!(why.class, RetryClass::Transport), "{why:?}");
-        assert!(unleaked("I wrote the doc.", "openrouter").is_ok());
-    }
-
-    #[test]
-    fn the_finish_a_provider_named_is_found_in_any_spelling() {
-        let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"cost":0.1}}"#;
-        assert_eq!(reason_in(chunk).as_deref(), Some("stop"));
-        assert_eq!(
-            reason_in(r#"{"delta":{"stop_reason":"end_turn"}}"#).as_deref(),
-            Some("end_turn")
-        );
-        assert_eq!(
-            reason_in(r#"{"finishReason":"STOP"}"#).as_deref(),
-            Some("STOP")
-        );
-        assert_eq!(reason_in("[DONE]"), None);
-        let routed =
-            r#"{"id":"gen-1","provider":"StreamLake","model":"deepseek/deepseek-v4-flash"}"#;
-        assert_eq!(value_in(routed, "provider").as_deref(), Some("StreamLake"));
-        let mut tail = Vec::new();
-        for data in ["first", "second", "third"] {
-            kept(&mut tail, data);
-        }
-        assert_eq!(tail, ["second", "third"]);
-    }
-
-    #[test]
-    fn a_stream_that_never_stopped_is_retried_not_kept() {
-        assert!(finished(true, "p").is_ok());
-        let cut = finished(false, "p").expect_err("a cut-off stream");
-        assert!(cut.class.is_retryable(), "{}", cut.message);
-    }
-
-    #[test]
-    fn an_upstream_failing_inside_the_stream_is_said_as_it_was_said() {
-        let failed = r#"{"id":"gen-1","model":"unknown","provider":"Novita","choices":[],"error":{"code":504,"message":"The operation was aborted","metadata":{"error_type":"timeout"}}}"#;
-        let why = unfailed(&[failed.to_owned()], "openrouter").expect_err("a failed stream");
-        assert_eq!(why.class, RetryClass::Overload);
-        for part in ["Novita", "The operation was aborted", "504"] {
-            assert!(why.message.contains(part), "{part}: {}", why.message);
-        }
-        let fine = r#"{"choices":[{"delta":{"content":"an error occurred to me"}}]}"#;
-        assert!(unfailed(&[fine.to_owned()], "openrouter").is_ok());
-    }
-
-    #[test]
-    fn an_overflow_said_inside_the_stream_is_an_overflow() {
-        let long = r#"{"provider":"DeepInfra","choices":[],"error":{"code":400,"message":"Upstream error from DeepInfra: Requested input length 35327 exceeds maximum input length 32767"}}"#;
-        let why = unfailed(&[long.to_owned()], "openrouter").expect_err("too long");
-        assert_eq!(why.class, RetryClass::Overflow, "{}", why.message);
-        // Anything else said mid-stream is still asked again: the request was taken, so it was
-        // not malformed, whatever status the upstream's own failure carried.
-        let odd = r#"{"choices":[],"error":{"code":400,"message":"upstream hiccup"}}"#;
-        let why = unfailed(&[odd.to_owned()], "openrouter").expect_err("failed");
-        assert_eq!(why.class, RetryClass::Transport);
-    }
-}
+mod tests;
 
 impl Client {
     /// Ask for one value of a known shape, and parse it. Most protocols put the answer in the

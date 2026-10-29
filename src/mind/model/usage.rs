@@ -1,5 +1,6 @@
 //! Token counts and what they cost.
 
+use super::Cost;
 use serde::{Deserialize, Serialize};
 
 /// Tokens consumed by one request, with cache reads and writes counted apart from ordinary input
@@ -7,36 +8,106 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     /// Prompt tokens billed at the input rate.
+    #[serde(deserialize_with = "whole")]
     pub input: u64,
     /// Completion tokens.
+    #[serde(deserialize_with = "whole")]
     pub output: u64,
     /// Prompt tokens served from cache.
+    #[serde(deserialize_with = "whole")]
     pub cache_read: u64,
     /// Prompt tokens written to cache.
+    #[serde(deserialize_with = "whole")]
     pub cache_write: u64,
     /// What the provider said the request cost, in millionths of a US dollar; zero where it did
     /// not say. Read as a number of either kind, because it arrives from Lua.
     #[serde(default, deserialize_with = "whole")]
     pub cost_micros: u64,
+    /// Configured estimates for attempts with no positive provider cost; absent on legacy totals.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_whole"
+    )]
+    pub estimated_micros: Option<u64>,
+}
+
+fn optional_whole<'de, D: serde::Deserializer<'de>>(said: D) -> Result<Option<u64>, D::Error> {
+    let value = Option::<serde_json::Number>::deserialize(said)?;
+    value
+        .map(|value| {
+            count(&value)
+                .ok_or_else(|| serde::de::Error::custom("expected a nonnegative integral u64"))
+        })
+        .transpose()
 }
 
 /// A count that may arrive as `1234` or as `1234.0`: Lua does not always tell the two apart.
 fn whole<'de, D: serde::Deserializer<'de>>(said: D) -> Result<u64, D::Error> {
-    let value = f64::deserialize(said)?;
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "clamped to zero and rounded first"
-    )]
-    let count = value.max(0.0).round() as u64;
-    Ok(count)
+    let value = serde_json::Number::deserialize(said)?;
+    count(&value).ok_or_else(|| serde::de::Error::custom("expected a nonnegative integral u64"))
+}
+
+pub(super) fn count(value: &serde_json::Number) -> Option<u64> {
+    value.as_u64().or_else(|| {
+        let n = value.as_f64()?;
+        (n.is_finite() && n >= 0.0 && n.fract() == 0.0 && n < 18_446_744_073_709_551_616.0)
+            .then_some(n as u64)
+    })
 }
 
 impl Usage {
+    #[must_use]
+    pub const fn charged_micros(self) -> u64 {
+        self.cost_micros
+            .saturating_add(match self.estimated_micros {
+                Some(n) => n,
+                None => 0,
+            })
+    }
+
+    pub(crate) fn observe(&mut self, other: Self) {
+        if other.prompt_tokens() >= self.prompt_tokens() {
+            self.input = other.input;
+            self.cache_read = other.cache_read;
+            self.cache_write = other.cache_write;
+        }
+        self.output = self.output.max(other.output);
+        self.cost_micros = self.cost_micros.max(other.cost_micros);
+    }
+
     /// Every token that counted towards the context window.
     #[must_use]
     pub const fn prompt_tokens(self) -> u64 {
-        self.input + self.cache_read + self.cache_write
+        self.input
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_write)
+    }
+
+    pub(crate) fn measured(value: &serde_json::Value, previous: Self) -> (Self, u64) {
+        let Some(object) = value.as_object() else {
+            return (previous, 1);
+        };
+        let mut anomalies = 0;
+        let mut measured = previous;
+        for (name, slot) in [
+            ("input", &mut measured.input),
+            ("output", &mut measured.output),
+            ("cache_read", &mut measured.cache_read),
+            ("cache_write", &mut measured.cache_write),
+            ("cost_micros", &mut measured.cost_micros),
+        ] {
+            if let Some(value) = object.get(name) {
+                if let Some(n) = value.as_number().and_then(count) {
+                    *slot = n;
+                } else {
+                    anomalies += 1;
+                }
+            }
+        }
+        let mut held = previous;
+        held.observe(measured);
+        (held, anomalies)
     }
 
     /// What fraction of the prompt came from cache, or `None` when nothing was sent.
@@ -54,6 +125,19 @@ impl Usage {
         self.cache_read = self.cache_read.saturating_add(other.cache_read);
         self.cache_write = self.cache_write.saturating_add(other.cache_write);
         self.cost_micros = self.cost_micros.saturating_add(other.cost_micros);
+        self.estimated_micros = match (self.estimated_micros, other.estimated_micros) {
+            (None, None) => None,
+            (a, b) => Some(
+                match a {
+                    Some(n) => n,
+                    None => 0,
+                }
+                .saturating_add(match b {
+                    Some(n) => n,
+                    None => 0,
+                }),
+            ),
+        };
     }
 
     /// What these tokens cost at `cost`.
@@ -62,37 +146,15 @@ impl Usage {
         let per_million = |tokens: u64, rate: f64| tokens as f64 / 1_000_000.0 * rate;
         per_million(self.input, cost.input)
             + per_million(self.output, cost.output)
-            + per_million(self.cache_read, cost.cache_read)
-            + per_million(self.cache_write, cost.cache_write)
+            + per_million(self.cache_read, cost.cache_read_rate())
+            + per_million(self.cache_write, cost.cache_write_rate())
     }
 }
 
-/// Dollars per million tokens.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Pricing {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output: Option<String>,
-}
-
-/// Dollars per million tokens.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
-pub struct Cost {
-    /// Ordinary prompt tokens.
-    #[serde(default)]
-    pub input: f64,
-    /// Completion tokens.
-    #[serde(default)]
-    pub output: f64,
-    /// Prompt tokens served from cache, usually far cheaper than `input`; defaults to zero rather
-    /// than to `input`, so a provider that does not price caching separately must say so.
-    #[serde(default)]
-    pub cache_read: f64,
-    /// Prompt tokens written to cache, usually dearer than `input`.
-    #[serde(default)]
-    pub cache_write: f64,
-}
+#[cfg(test)]
+mod accounting_tests;
+#[cfg(test)]
+mod pricing_tests;
 
 #[cfg(test)]
 mod tests {
@@ -106,6 +168,7 @@ mod tests {
             cache_read: 900,
             cache_write: 10,
             cost_micros: 0,
+            estimated_micros: None,
         };
         assert_eq!(usage.prompt_tokens(), 1010);
     }

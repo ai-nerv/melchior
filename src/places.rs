@@ -5,6 +5,8 @@
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+pub(crate) mod locking;
+
 /// The programs whose sockets a family member may dial, by the name each keeps its own under.
 pub const FAMILY: &[&str] = &["magi", "casper", "melchior", "memory", "balthasar"];
 

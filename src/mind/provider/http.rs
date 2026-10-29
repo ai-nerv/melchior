@@ -89,9 +89,17 @@ impl Request {
     ///
     /// [`Unanswered::Refused`] before anything is sent, or whatever reqwest failed it with.
     pub async fn send(self) -> Result<reqwest::Response, Unanswered> {
+        self.send_observing(|| {}).await
+    }
+
+    pub(crate) async fn send_observing(
+        self,
+        dispatched: impl FnOnce(),
+    ) -> Result<reqwest::Response, Unanswered> {
         let (client, request) = self.0.build_split();
         let request = request?;
         admitted(request.url())?;
+        dispatched();
         Ok(client.execute(request).await?)
     }
 }

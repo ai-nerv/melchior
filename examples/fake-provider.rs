@@ -1,15 +1,47 @@
-//! A provider that says what it was told to.
-//!
-//! The chat-completions wire, served over real HTTP, so a whole family can be run against answers
-//! chosen in advance. The transport, the streaming and the dialect are production code; only the
-//! source of the events is fake. Each request's body is recorded, so a test can assert what was
-//! actually sent rather than what was meant to be.
+//! Scripted Chat Completions and Anthropic Messages over HTTP, with JSONL request capture.
 
-use std::collections::BTreeMap;
+use std::io::Read as _;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+#[path = "fake-provider/anthropic.rs"]
+mod anthropic;
+
+#[path = "fake-provider/bounded.rs"]
+mod bounded;
+
+#[path = "fake-provider/rendezvous.rs"]
+mod rendezvous;
+
+#[path = "fake-provider/refusal.rs"]
+mod refusal;
+use refusal::Refusal;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+enum Dialect {
+    #[default]
+    #[serde(rename = "openai-completions")]
+    Chat,
+    #[serde(rename = "anthropic-messages")]
+    Anthropic,
+}
+
+#[derive(Debug, Default, Clone, Copy, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Counts {
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+}
 
 #[derive(serde::Deserialize)]
 struct Turn {
+    #[serde(default)]
+    rendezvous: Option<String>,
+    #[serde(default)]
+    dialect: Dialect,
+    #[serde(default)]
+    usage: Option<Counts>,
     /// Which requests this answers. Absent, the turn is taken in order.
     #[serde(default)]
     when: Option<When>,
@@ -20,10 +52,25 @@ struct Turn {
     refuse: Option<Refusal>,
 }
 
-#[derive(serde::Deserialize)]
-struct Refusal {
-    status: u16,
-    message: String,
+impl Turn {
+    fn validate(&self) -> std::io::Result<()> {
+        if self.events.len() > 4096 {
+            return Err(std::io::Error::other("too many fixture events"));
+        }
+        match self.dialect {
+            Dialect::Anthropic if self.refuse.is_some() => Ok(()),
+            Dialect::Anthropic => anthropic::validate(self),
+            Dialect::Chat
+                if self.usage.is_some()
+                    || self.events.iter().any(|e| matches!(e, Event::Signature(_))) =>
+            {
+                Err(std::io::Error::other(
+                    "turn-level usage and signatures require Anthropic",
+                ))
+            }
+            Dialect::Chat => Ok(()),
+        }
+    }
 }
 
 /// What a turn answers. Named on shape rather than on wording: a system prompt is written for a
@@ -63,6 +110,7 @@ impl When {
 enum Event {
     Text(String),
     Thinking(String),
+    Signature(String),
     ToolCall {
         id: String,
         name: String,
@@ -80,13 +128,14 @@ enum Event {
         input: u64,
         output: u64,
     },
+    Metrics(serde_json::Value),
 }
 
 impl Event {
     /// One `data:` payload in the dialect melchior's `openai-completions` block decodes.
-    fn payload(&self) -> serde_json::Value {
+    fn payload(&self) -> std::io::Result<serde_json::Value> {
         let choice = |delta: serde_json::Value, finish: serde_json::Value| serde_json::json!({"choices":[{"index":0,"delta":delta,"finish_reason":finish}]});
-        match self {
+        Ok(match self {
             Self::Text(text) => choice(
                 serde_json::json!({"content": text}),
                 serde_json::Value::Null,
@@ -117,28 +166,35 @@ impl Event {
                 "choices": [],
                 "usage": {"prompt_tokens": input, "completion_tokens": output}
             }),
-        }
+            Self::Metrics(metrics) => serde_json::json!({"choices":[],"usage":metrics}),
+            Self::Signature(_) => {
+                return Err(std::io::Error::other(
+                    "signatures require the Anthropic dialect",
+                ));
+            }
+        })
     }
-}
-
-fn flags() -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        let Some(name) = arg.strip_prefix("--") else {
-            continue;
-        };
-        match name.split_once('=') {
-            Some((key, value)) => out.insert(key.to_owned(), value.to_owned()),
-            None => out.insert(name.to_owned(), args.next().unwrap_or_default()),
-        };
-    }
-    out
 }
 
 /// Read one request, and give back its body.
 async fn request(socket: &mut tokio::net::TcpStream) -> std::io::Result<Option<String>> {
-    let mut head = Vec::new();
+    request_start(socket, Vec::new()).await
+}
+
+async fn request_start(
+    socket: &mut tokio::net::TcpStream,
+    head: Vec<u8>,
+) -> std::io::Result<Option<String>> {
+    let Some(size) = request_header(socket, head).await? else {
+        return Ok(None);
+    };
+    request_body(socket, size).await.map(Some)
+}
+
+async fn request_header(
+    socket: &mut tokio::net::TcpStream,
+    mut head: Vec<u8>,
+) -> std::io::Result<Option<usize>> {
     while !head.ends_with(b"\r\n\r\n") {
         if head.len() > 65536 {
             return Ok(None);
@@ -157,18 +213,34 @@ async fn request(socket: &mut tokio::net::TcpStream) -> std::io::Result<Option<S
                 .and_then(|n| n.trim().parse::<usize>().ok())
         })
         .unwrap_or(0);
-    let mut body = vec![0; size];
-    socket.read_exact(&mut body).await?;
-    Ok(Some(String::from_utf8_lossy(&body).into_owned()))
+    if size > melchior::framing::MOST {
+        return Err(std::io::Error::other(
+            "fixture request exceeds the frame cap",
+        ));
+    }
+    Ok(Some(size))
 }
 
-/// The framing melchior's own fixtures use: chunked, and closed when the turn is done.
-async fn stream(socket: &mut tokio::net::TcpStream, turn: &Turn) -> std::io::Result<()> {
+async fn request_body(socket: &mut tokio::net::TcpStream, size: usize) -> std::io::Result<String> {
+    let mut body = vec![0; size];
+    socket.read_exact(&mut body).await?;
+    String::from_utf8(body).map_err(|_| std::io::Error::other("non-UTF8 fixture request"))
+}
+
+async fn start_stream(socket: &mut tokio::net::TcpStream) -> std::io::Result<()> {
     socket
         .write_all(
             b"HTTP/1.1 200 Fake\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
         )
-        .await?;
+        .await
+}
+
+/// The scripted dialect over chunked HTTP.
+async fn stream(socket: &mut tokio::net::TcpStream, turn: &Turn) -> std::io::Result<()> {
+    if turn.dialect == Dialect::Anthropic {
+        return anthropic::stream(socket, turn).await;
+    }
+    start_stream(socket).await?;
     for event in &turn.events {
         match event {
             Event::Drop => return socket.shutdown().await,
@@ -178,7 +250,7 @@ async fn stream(socket: &mut tokio::net::TcpStream, turn: &Turn) -> std::io::Res
                 continue;
             }
             Event::Split(_) => {
-                let bytes = format!("data: {}\r\n\r\n", event.payload()).into_bytes();
+                let bytes = format!("data: {}\r\n\r\n", event.payload()?).into_bytes();
                 // Inside the first character that is more than one byte, or the middle.
                 let at = bytes
                     .iter()
@@ -197,7 +269,7 @@ async fn stream(socket: &mut tokio::net::TcpStream, turn: &Turn) -> std::io::Res
             }
             _ => {}
         }
-        chunk(socket, &format!("data: {}\n\n", event.payload())).await?;
+        chunk(socket, &format!("data: {}\n\n", event.payload()?)).await?;
     }
     chunk(socket, "data: [DONE]\n\n").await?;
     socket.write_all(b"0\r\n\r\n").await?;
@@ -210,8 +282,12 @@ async fn chunk(socket: &mut tokio::net::TcpStream, text: &str) -> std::io::Resul
         .await
 }
 
-async fn refuse(socket: &mut tokio::net::TcpStream, status: u16, why: &str) -> std::io::Result<()> {
-    let body = serde_json::json!({"error": {"message": why}}).to_string();
+async fn refuse(
+    socket: &mut tokio::net::TcpStream,
+    status: u16,
+    body: serde_json::Value,
+) -> std::io::Result<()> {
+    let body = body.to_string();
     socket
         .write_all(
             format!(
@@ -248,40 +324,93 @@ fn choose(turns: &[Turn], used: &mut [bool], body: &str) -> Option<usize> {
     Some(chosen)
 }
 
+fn read_script(path: &str) -> std::io::Result<Vec<Turn>> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(melchior::framing::MOST as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > melchior::framing::MOST {
+        return Err(std::io::Error::other(
+            "fixture script exceeds the frame cap",
+        ));
+    }
+    let turns: Vec<Turn> = serde_json::from_slice(&bytes)?;
+    if turns.len() > 4096 {
+        return Err(std::io::Error::other("too many fixture turns"));
+    }
+    for turn in &turns {
+        turn.validate()?;
+    }
+    rendezvous::Groups::new(&turns)?;
+    Ok(turns)
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
-    let flags = flags();
-    let script = flags
-        .get("script")
-        .ok_or_else(|| std::io::Error::other("--script <file> is required"))?;
-    let turns: std::sync::Arc<Vec<Turn>> =
-        std::sync::Arc::new(serde_json::from_str(&std::fs::read_to_string(script)?)?);
-    let port: u16 = flags.get("port").map_or(0, |p| p.parse().unwrap_or(0));
-    let record = flags.get("record").cloned();
+    let flags = bounded::Flags::parse(std::env::args().skip(1))?;
+    let turns = std::sync::Arc::new(read_script(&flags.script)?);
+    if let Some(policy) = flags.bounded {
+        let record = flags
+            .record
+            .ok_or_else(|| std::io::Error::other("bounded capture missing"))?;
+        return bounded::run(turns, flags.port, &record, policy).await;
+    }
+    if turns.iter().any(|turn| turn.rendezvous.is_some()) {
+        return Err(std::io::Error::other(
+            "rendezvous requires bounded provider mode",
+        ));
+    }
+    let port = flags.port;
+    let record = flags
+        .record
+        .as_ref()
+        .map(|path| {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(path)
+        })
+        .transpose()?;
+    let record = std::sync::Arc::new(std::sync::Mutex::new(record));
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     println!("PORT={}", listener.local_addr()?.port());
     std::io::Write::flush(&mut std::io::stdout())?;
 
     let used = std::sync::Arc::new(std::sync::Mutex::new(vec![false; turns.len()]));
+    let capacity = std::sync::Arc::new(tokio::sync::Semaphore::new(16));
     loop {
+        let permit = std::sync::Arc::clone(&capacity)
+            .acquire_owned()
+            .await
+            .map_err(|_| std::io::Error::other("fixture capacity closed"))?;
         let (mut socket, _) = listener.accept().await?;
         let (turns, used, record) = (turns.clone(), used.clone(), record.clone());
         // Each on its own task, as a provider serves its customers: one answer held open must
         // not keep everybody else waiting behind it.
         tokio::spawn(async move {
-            let Ok(Some(body)) = request(&mut socket).await else {
+            let _permit = permit;
+            let Ok(Ok(Some(body))) =
+                tokio::time::timeout(std::time::Duration::from_secs(15), request(&mut socket))
+                    .await
+            else {
                 return;
             };
-            if let Some(path) = &record {
+            let recorded = (|| {
                 use std::io::Write;
-                if let Ok(mut file) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                {
-                    let _ = writeln!(file, "{body}");
+                let mut held = record
+                    .lock()
+                    .map_err(|_| std::io::Error::other("fixture capture lock poisoned"))?;
+                if let Some(file) = &mut *held {
+                    writeln!(file, "{body}")?;
                 }
+                Ok::<(), std::io::Error>(())
+            })();
+            if let Err(error) = recorded {
+                eprintln!("fixture capture failed: {error}");
+                return;
             }
             let chosen = used
                 .lock()
@@ -289,10 +418,10 @@ async fn main() -> std::io::Result<()> {
                 .and_then(|mut used| choose(&turns, &mut used, &body));
             let _ = match chosen.and_then(|at| turns.get(at)) {
                 Some(turn) => match &turn.refuse {
-                    Some(no) => refuse(&mut socket, no.status, &no.message).await,
+                    Some(no) => refuse(&mut socket, no.status, no.body()).await,
                     None => stream(&mut socket, turn).await,
                 },
-                None => refuse(&mut socket, 500, "no turn was scripted for this request").await,
+                None => refuse(&mut socket, 500, serde_json::json!({"error":{"message":"no turn was scripted for this request"}})).await,
             };
         });
     }

@@ -9,6 +9,92 @@
 -- dollars held against a one-line answer. `max_tokens` in the config says otherwise.
 local OUTPUT = 32000
 
+local function output(model, opts)
+  local explicit = not opts.max_tokens_automatic and opts.max_tokens or nil
+  local chosen = explicit or melchior.max_tokens
+  local limit = math.min(chosen or OUTPUT, model.max_tokens)
+  if not chosen and opts.max_tokens then limit = math.min(limit, opts.max_tokens) end
+  return limit, chosen == nil
+end
+
+local function prepared(body, model, opts, keys)
+  local limit, automatic = output(model, opts)
+  local minimum = opts.thinking and opts.thinking ~= "off" and limit or 1
+  local reduced = opts.__output_limit
+  if automatic and reduced and reduced >= minimum and reduced < limit then limit = reduced end
+  local target = body
+  for i = 1, #keys - 1 do target = target[keys[i]] end
+  target[keys[#keys]] = limit
+  body.__budget = {
+    version = 1, automatic = automatic, effective = limit, minimum = minimum,
+    path = "/" .. table.concat(keys, "/"),
+  }
+  return body
+end
+
+local function token_count(value)
+  if type(value) == "number" and value >= 0 and value < 18446744073709551616.0
+      and value % 1 == 0 then return value end
+end
+
+local function measured_usage(raw, fields)
+  local measured = {}
+  if type(raw) ~= "table" then return measured end
+  for field, key in pairs(fields) do measured[field] = token_count(raw[key]) end
+  local cost = type(raw.cost) == "number" and raw.cost >= 0 and raw.cost * 1000000
+  measured.cost_micros = cost and token_count(math.floor(cost + 0.5)) or nil
+  return measured
+end
+
+local function inclusive_usage(previous, raw, total_key, output_key, details_key, cache_key, alternate, known, evidence)
+  known = token_count(known)
+  if type(raw) ~= "table" then return previous, 1, known, {} end
+  local anomalies = 0
+  local function count(value)
+    local n = token_count(value)
+    if value ~= nil and n == nil then anomalies = anomalies + 1 end
+    return n
+  end
+  local details = raw
+  if details_key then
+    details = raw[details_key]
+    if details ~= nil and type(details) ~= "table" then anomalies = anomalies + 1 end
+    details = type(details) == "table" and details or {}
+  end
+  local total, output = count(raw[total_key]), count(raw[output_key])
+  local nested, other = count(details[cache_key]), alternate and count(raw[alternate]) or nil
+  local read = nested or other
+  if nested and other then read = math.max(nested, other) end
+  local reported_read = read
+  local measured = measured_usage(raw, { output = output_key })
+  local usage = {
+    input = previous.input, output = output or previous.output,
+    cache_read = previous.cache_read, cache_write = previous.cache_write,
+    cost_micros = previous.cost_micros,
+  }
+  if total and known and total < known then
+    anomalies = anomalies + 1
+    read = previous.cache_read
+  else known = total or known end
+  if known then
+    read = math.max(read or 0, previous.cache_read)
+    if read > known then anomalies = anomalies + 1 end
+    usage.cache_read = math.min(read, known)
+    usage.input = known - usage.cache_read
+  elseif read then usage.cache_read = read end
+  if raw.cost ~= nil then
+    local cost = type(raw.cost) == "number" and raw.cost >= 0 and raw.cost * 1000000
+    local micros = cost and token_count(math.floor(cost + 0.5))
+    if micros then usage.cost_micros = micros else anomalies = anomalies + 1 end
+  end
+  if reported_read == usage.cache_read then measured.cache_read = reported_read end
+  local retained_read = evidence and token_count(evidence.cache_read)
+  if known and (measured.cache_read == usage.cache_read or retained_read == usage.cache_read) then
+    measured.input = usage.input
+  end
+  return usage, anomalies, known, measured
+end
+
 -- A schema as a provider that checks one will take it: without the `x-` hints a caller writes
 -- for the `decisions` protocol, which a strict checker refuses as words it does not know.
 local function plain(schema)
@@ -52,7 +138,7 @@ do -- openai-completions
       elseif c.type == "tool_call" then
         tool_calls[#tool_calls + 1] = {
           id = c.id, type = "function",
-          ["function"] = { name = c.name, arguments = melchior.json.encode(c.arguments or {}) },
+          ["function"] = { name = c.name, arguments = melchior.json.encode(c.arguments) },
         }
       elseif c.type == "tool_result" then
         local r = { role = "tool", tool_call_id = c.id, content = c.content }
@@ -98,7 +184,7 @@ do -- openai-completions
     -- `compat` against the conservative defaults. So `compat.x` is safe and `compat.x or <a
     -- default>` would be a second copy of a decision that already has a home.
     local compat = model.compat
-    local messages = {}
+    local messages = melchior.json.array()
 
     if ctx.system then
       -- `developer` is an OpenAI extension most copies reject, so it is opted into.
@@ -124,7 +210,7 @@ do -- openai-completions
 
     -- Which field caps the response is the single most common way these dialects differ.
     local field = compat.max_tokens_field
-    body[field] = math.min(opts.max_tokens or OUTPUT, model.max_tokens)
+    body[field] = output(model, opts)
 
     if compat.supports_store then body.store = false end
     -- Usage is not reported while streaming unless asked for, and some dialects cannot.
@@ -188,7 +274,7 @@ do -- openai-completions
         body.reasoning_effort = level
       end
     end
-    return body
+    return prepared(body, model, opts, { field })
   end
 
   local FINISH = {
@@ -214,19 +300,13 @@ do -- openai-completions
     local scratch = state.scratch or {}
     local usage = state.usage
     local deltas = {}
+    local anomalies = 0
 
-    if d.usage then
-      local u = d.usage
-      local details = u.prompt_tokens_details or {}
-      usage = {
-        input = (u.prompt_tokens or 0) - (details.cached_tokens or 0),
-        output = u.completion_tokens or 0,
-        cache_read = details.cached_tokens or 0,
-        cache_write = 0,
-        -- Dollars from the provider, where it says, kept as millionths so totals add up exactly.
-        cost_micros = type(u.cost) == "number" and math.floor(u.cost * 1000000 + 0.5) or 0,
-      }
-      deltas[#deltas + 1] = { kind = "usage", usage = usage }
+    if d.usage ~= nil then
+      local measured
+      usage, anomalies, scratch.usage_total, measured = inclusive_usage(usage, d.usage, "prompt_tokens", "completion_tokens",
+          "prompt_tokens_details", "cached_tokens", "prompt_cache_hit_tokens", scratch.usage_total, state.measured_usage)
+      deltas[#deltas + 1] = { kind = "usage", usage = usage, measured = measured }
     end
 
     local choice = d.choices and d.choices[1]
@@ -269,7 +349,7 @@ do -- openai-completions
       end
     end
 
-    return { scratch = scratch, usage = usage, deltas = deltas }
+    return { scratch = scratch, usage = usage, deltas = deltas, usage_anomalies = anomalies }
   end
 
   melchior.api("openai-completions", M)
@@ -282,7 +362,7 @@ do -- openai-responses
   -- items of their own rather than blocks inside a message, which is the shape difference from
   -- Completions that catches people out.
   local function inputs(messages)
-    local out = {}
+    local out = melchior.json.array()
     for _, m in ipairs(messages or {}) do
       local text, images, calls, results = {}, {}, {}, {}
       for _, c in ipairs(m.content or {}) do
@@ -294,7 +374,7 @@ do -- openai-responses
         elseif c.type == "tool_call" then
           calls[#calls + 1] = {
             type = "function_call", call_id = c.id, name = c.name,
-            arguments = melchior.json.encode(c.arguments or {}),
+            arguments = melchior.json.encode(c.arguments),
           }
         elseif c.type == "tool_result" then
           local output = c.content
@@ -334,7 +414,7 @@ do -- openai-responses
       model = model.id,
       stream = true,
       input = inputs(ctx.messages),
-      max_output_tokens = math.min(opts.max_tokens or OUTPUT, model.max_tokens),
+      max_output_tokens = output(model, opts),
     }
     if ctx.system then body.instructions = ctx.system end
 
@@ -365,7 +445,7 @@ do -- openai-responses
     if level and level ~= "off" then
       body.reasoning = { effort = level, summary = "auto" }
     end
-    return body
+    return prepared(body, model, opts, { "max_output_tokens" })
   end
 
   local INCOMPLETE = { max_output_tokens = "length" }
@@ -376,6 +456,8 @@ do -- openai-responses
 
     local deltas, usage = {}, state.usage
     local kind = d.type or event.name
+    local anomalies = 0
+    local scratch = state.scratch or {}
 
     if kind == "response.output_text.delta" then
       deltas[#deltas + 1] = { kind = "text", text = d.delta or "" }
@@ -399,15 +481,11 @@ do -- openai-responses
         or kind == "response.failed" then
       local r = d.response or {}
       local u = r.usage
-      if u then
-        local details = u.input_tokens_details or {}
-        usage = {
-          input = (u.input_tokens or 0) - (details.cached_tokens or 0),
-          output = u.output_tokens or 0,
-          cache_read = details.cached_tokens or 0,
-          cache_write = 0,
-        }
-        deltas[#deltas + 1] = { kind = "usage", usage = usage }
+      if u ~= nil then
+        local measured
+        usage, anomalies, scratch.usage_total, measured = inclusive_usage(usage, u, "input_tokens", "output_tokens",
+            "input_tokens_details", "cached_tokens", nil, scratch.usage_total, state.measured_usage)
+        deltas[#deltas + 1] = { kind = "usage", usage = usage, measured = measured }
       end
 
       local reason = "end_turn"
@@ -427,7 +505,7 @@ do -- openai-responses
       deltas[#deltas + 1] = { kind = "stop", reason = reason }
     end
 
-    return { scratch = state.scratch, usage = usage, deltas = deltas }
+    return { scratch = scratch, usage = usage, deltas = deltas, usage_anomalies = anomalies }
   end
 
   -- ---------------------------------------------------------------- the three hostings
@@ -523,7 +601,7 @@ do -- anthropic-messages
   -- shape difference from the Completions dialect. Consecutive same-role messages are merged
   -- because the API refuses two user turns in a row, and a result after a user message is that.
   local function messages(list)
-    local out = {}
+    local out = melchior.json.array()
     for _, m in ipairs(list or {}) do
       local role = (m.role == "assistant") and "assistant" or "user"
       local blocks = {}
@@ -543,11 +621,38 @@ do -- anthropic-messages
     return out
   end
 
+  local function cacheable(message, content)
+    if content.type == "text" then
+      return type(content.text) == "string" and content.text ~= ""
+    elseif content.type == "image" or content.type == "tool_result" then
+      return message.role == "user"
+    elseif content.type == "tool_use" then
+      return message.role == "assistant"
+    end
+    return false
+  end
+
+  local function cache_conversation(list)
+    local marked = 0
+    for index = #list, 1, -1 do
+      local message = list[index]
+      for index = #message.content, 1, -1 do
+        local content = message.content[index]
+        if cacheable(message, content) then
+          content.cache_control = { type = "ephemeral" }
+          marked = marked + 1
+          break
+        end
+      end
+      if marked == 2 then break end
+    end
+  end
+
   function M.request(model, ctx, opts)
     local body = {
       model = model.id,
       stream = true,
-      max_tokens = math.min(opts.max_tokens or OUTPUT, model.max_tokens),
+      max_tokens = output(model, opts),
       messages = messages(ctx.messages),
     }
     if ctx.system then body.system = ctx.system end
@@ -579,7 +684,16 @@ do -- anthropic-messages
       local cap = math.max(body.max_tokens - 1024, 1024)
       body.thinking = { type = "enabled", budget_tokens = math.min(budget, cap) }
     end
-    return body
+    if model.compat.prompt_cache == "anthropic_ephemeral" then
+      if body.system and body.system ~= "" then
+        body.system = { { type = "text", text = body.system, cache_control = { type = "ephemeral" } } }
+      end
+      if body.tools and #body.tools > 0 then
+        body.tools[#body.tools].cache_control = { type = "ephemeral" }
+      end
+      cache_conversation(body.messages)
+    end
+    return prepared(body, model, opts, { "max_tokens" })
   end
 
   local STOP = {
@@ -602,7 +716,10 @@ do -- anthropic-messages
         cache_read = u.cache_read_input_tokens or 0,
         cache_write = u.cache_creation_input_tokens or 0,
       }
-      deltas[#deltas + 1] = { kind = "usage", usage = usage }
+      deltas[#deltas + 1] = { kind = "usage", usage = usage, measured = measured_usage(u, {
+        input = "input_tokens", output = "output_tokens", cache_read = "cache_read_input_tokens",
+        cache_write = "cache_creation_input_tokens",
+      }) }
 
     elseif event.name == "content_block_start" then
       local b = d.content_block or {}
@@ -632,7 +749,7 @@ do -- anthropic-messages
           input = usage.input, cache_read = usage.cache_read,
           cache_write = usage.cache_write, output = d.usage.output_tokens,
         }
-        deltas[#deltas + 1] = { kind = "usage", usage = usage }
+        deltas[#deltas + 1] = { kind = "usage", usage = usage, measured = measured_usage(d.usage, { output = "output_tokens" }) }
       end
       local reason = d.delta and d.delta.stop_reason
       if reason then
@@ -665,7 +782,7 @@ do -- google
     elseif c.type == "image" then
       return { inlineData = { mimeType = c.media_type, data = c.data } }
     elseif c.type == "tool_call" then
-      local p = { functionCall = { name = c.name, args = c.arguments or {} } }
+      local p = { functionCall = { name = c.name, args = c.arguments } }
       -- Google issues a signature per call rather than per message.
       if c.thought_signature then p.thoughtSignature = c.thought_signature end
       return p
@@ -675,7 +792,7 @@ do -- google
   end
 
   local function contents(messages)
-    local out = {}
+    local out = melchior.json.array()
     for _, m in ipairs(messages or {}) do
       local role = (m.role == "assistant") and "model" or "user"
       local parts = {}
@@ -710,7 +827,7 @@ do -- google
     local body = {
       contents = contents(ctx.messages),
       generationConfig = {
-        maxOutputTokens = math.min(opts.max_tokens or OUTPUT, model.max_tokens),
+        maxOutputTokens = output(model, opts),
       },
     }
     -- Google puts it on the generation config, and wants the mime type set with it.
@@ -741,7 +858,7 @@ do -- google
         includeThoughts = true,
       }
     end
-    return body
+    return prepared(body, model, opts, { "generationConfig", "maxOutputTokens" })
   end
 
   local FINISH = {
@@ -757,14 +874,12 @@ do -- google
     local scratch = state.scratch or {}
 
     local u = d.usageMetadata
-    if u then
-      usage = {
-        input = (u.promptTokenCount or 0) - (u.cachedContentTokenCount or 0),
-        output = u.candidatesTokenCount or 0,
-        cache_read = u.cachedContentTokenCount or 0,
-        cache_write = 0,
-      }
-      deltas[#deltas + 1] = { kind = "usage", usage = usage }
+    local anomalies = 0
+    if u ~= nil then
+      local measured
+      usage, anomalies, scratch.usage_total, measured = inclusive_usage(usage, u, "promptTokenCount", "candidatesTokenCount",
+          nil, "cachedContentTokenCount", nil, scratch.usage_total, state.measured_usage)
+      deltas[#deltas + 1] = { kind = "usage", usage = usage, measured = measured }
     end
 
     local candidate = d.candidates and d.candidates[1]
@@ -801,7 +916,7 @@ do -- google
       end
     end
 
-    return { scratch = scratch, usage = usage, deltas = deltas }
+    return { scratch = scratch, usage = usage, deltas = deltas, usage_anomalies = anomalies }
   end
 
   -- ---------------------------------------------------------------- the two hostings
@@ -857,7 +972,7 @@ do -- pi-messages
     elseif c.type == "image" then
       return { type = "image", data = c.data, mimeType = c.media_type }
     elseif c.type == "tool_call" then
-      return { type = "toolCall", id = c.id, name = c.name, arguments = c.arguments or {} }
+      return { type = "toolCall", id = c.id, name = c.name, arguments = c.arguments }
     elseif c.type == "tool_result" then
       local content = { { type = "text", text = c.content } }
       for _, image in ipairs(c.images or {}) do
@@ -868,7 +983,7 @@ do -- pi-messages
   end
 
   function M.request(model, ctx, opts)
-    local messages = {}
+    local messages = melchior.json.array()
     for _, m in ipairs(ctx.messages or {}) do
       local blocks = {}
       for _, c in ipairs(m.content or {}) do
@@ -884,12 +999,12 @@ do -- pi-messages
       model = model.id,
       stream = true,
       messages = messages,
-      maxTokens = math.min(opts.max_tokens or OUTPUT, model.max_tokens),
+      maxTokens = output(model, opts),
     }
     if ctx.system then body.system = ctx.system end
     if ctx.tools and #ctx.tools > 0 then body.tools = ctx.tools end
     if opts.thinking and opts.thinking ~= "off" then body.thinking = opts.thinking end
-    return body
+    return prepared(body, model, opts, { "maxTokens" })
   end
 
   local STOP = {
@@ -924,7 +1039,9 @@ do -- pi-messages
           input = u.input or 0, output = u.output or 0,
           cache_read = u.cacheRead or 0, cache_write = u.cacheWrite or 0,
         }
-        deltas[#deltas + 1] = { kind = "usage", usage = usage }
+        deltas[#deltas + 1] = { kind = "usage", usage = usage, measured = measured_usage(u, {
+          input = "input", output = "output", cache_read = "cacheRead", cache_write = "cacheWrite",
+        }) }
       end
       deltas[#deltas + 1] = { kind = "stop", reason = STOP[d.stopReason] or "end_turn" }
     elseif kind == "error" then
@@ -1058,7 +1175,8 @@ do -- decisions
       cache_read = 0, cache_write = 0,
       cost_micros = type(u.cost) == "number" and math.floor(u.cost * 1000000 + 0.5) or 0,
     }
-    deltas[#deltas + 1] = { kind = "usage", usage = usage }
+    deltas[#deltas + 1] = { kind = "usage", usage = usage,
+      measured = measured_usage(u, { input = "input_tokens", output = "output_tokens" }) }
 
     local text
     if shape.plain then

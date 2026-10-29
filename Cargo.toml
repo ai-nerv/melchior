@@ -1,6 +1,6 @@
 [package]
 name = "melchior"
-version = "0.7.3"
+version = "0.8.0"
 edition = "2024"
 description = "One agent talking to another: naming, finding, reaching and refusing"
 license = "MIT"
@@ -20,7 +20,7 @@ path = "src/main.rs"
 # makes melchior an agent runtime rather than a message bus. What a harness needs still crosses as
 # data and as bytes on a pipe.
 [dependencies]
-rustix = { version = "0.38", features = ["process", "fs", "net"] }
+rustix = { version = "0.38", features = ["process", "fs", "net", "stdio"] }
 serde = { version = "1.0", features = ["derive"] }
 # Already in the lockfile, through luna: the kernel's randomness, as an error rather than a panic.
 getrandom = "0.3"

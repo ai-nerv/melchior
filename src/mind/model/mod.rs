@@ -5,9 +5,16 @@
 //! on [`Content::Text`] and [`Content::Thinking`], and `thought_signature` on
 //! [`Content::ToolCall`]. Dropping one corrupts reasoning continuity across a model change.
 
+mod measured_usage;
+pub mod overflow;
+mod pricing;
+mod request_frame;
 mod usage;
 
-pub use usage::{Cost, Pricing, Usage};
+pub use measured_usage::MeasuredUsage;
+pub use pricing::{Cost, PricePresence, Pricing};
+pub use request_frame::RequestFrame;
+pub use usage::Usage;
 
 use serde::{Deserialize, Serialize};
 

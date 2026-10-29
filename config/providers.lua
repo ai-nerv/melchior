@@ -15,6 +15,7 @@ melchior.provider("anthropic", {
   api = "anthropic-messages",
   base_url = "https://api.anthropic.com",
   auth = { kind = "api-key", vars = { "ANTHROPIC_API_KEY" } },
+  compat = { prompt_cache = "anthropic_ephemeral" },
   models = {
     { id = "claude-opus-4-6", name = "Claude Opus 4.6", context_window = 200000, max_tokens = 64000, reasoning = true, input = { "text", "image" }, cost = { input = 5.0, output = 25.0, cache_read = 0.5, cache_write = 6.25 } },
     { id = "claude-sonnet-4-5", name = "Claude Sonnet 4.5", context_window = 200000, max_tokens = 64000, reasoning = true, input = { "text", "image" }, cost = { input = 3.0, output = 15.0, cache_read = 0.3, cache_write = 3.75 } },

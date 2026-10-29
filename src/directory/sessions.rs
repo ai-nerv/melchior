@@ -49,22 +49,30 @@ fn read(path: &std::path::Path) -> Option<String> {
 /// Leave the note saying which run this agent belongs to. A root mints the name, where it writes
 /// no `.parent` at all: a missing run note would leave every reader to guess it.
 pub fn began(me: &Identity) -> Result<(), String> {
-    let run = inherited().unwrap_or_else(|| minted(&me.id, since_epoch()));
+    began_with(me, inherited(), nonce)
+}
+
+fn began_with(
+    me: &Identity,
+    carried: Option<String>,
+    nonce: impl FnOnce() -> Result<u128, String>,
+) -> Result<(), String> {
+    let run = match carried {
+        Some(run) => run,
+        None => minted(&me.id, nonce()?),
+    };
     super::wrote(&session_at(me), &run)
 }
 
-/// A run name that no later run can be handed. The id alone recycles, because
-/// [`free_of`](crate::identity::free_of) only avoids the names currently listening, and balthasar
-/// files a session's history under the run: a returning name would reopen a months-old record.
-fn minted(id: &str, at: u64) -> String {
-    format!("{id}-{at}")
+/// The agent name followed by a fixed-width decimal nonce.
+fn minted(id: &str, nonce: u128) -> String {
+    format!("{id}-{nonce:039}")
 }
 
-/// Seconds since the epoch.
-fn since_epoch() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
+fn nonce() -> Result<u128, String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|why| format!("cannot mint run identity: {why}"))?;
+    Ok(u128::from_be_bytes(bytes))
 }
 
 /// Take the notes back down.
@@ -338,15 +346,84 @@ mod tests {
     }
 
     #[test]
-    fn a_run_name_does_not_come_round_again_when_its_id_does() {
-        // `free_of` only avoids the names currently listening, so an id is handed out again.
-        let earlier = minted("alpha-rho", 1_700_000_000);
-        let later = minted("alpha-rho", 1_800_000_000);
-        assert_ne!(earlier, later, "the same id twice named one run");
-        assert!(
-            earlier.starts_with("alpha-rho") && later.starts_with("alpha-rho"),
-            "and it still reads as the run a roster names"
+    fn a_reused_agent_name_gets_a_fresh_run_on_every_announcement() {
+        let project = alone("reused");
+        let root = id(&project, "alpha-rho");
+        let mut runs = std::collections::BTreeSet::new();
+        for _ in 0..32 {
+            began(&root).expect("announced");
+            let run = session_of(&root).expect("run note");
+            assert!(runs.insert(run), "recycled agent reopened a previous run");
+            ended(&root);
+        }
+    }
+
+    #[test]
+    fn a_run_nonce_keeps_every_bit_and_the_numeric_suffix_shape() {
+        for value in [0, 1, u128::from(u64::MAX), u128::MAX] {
+            let run = minted("alpha-rho", value);
+            let (agent, suffix) = run.rsplit_once('-').expect("numeric suffix");
+            assert_eq!(agent, "alpha-rho");
+            assert_eq!(suffix.len(), 39);
+            assert!(suffix.bytes().all(|c| c.is_ascii_digit()));
+            assert_eq!(suffix.parse::<u128>().expect("decimal nonce"), value);
+            assert_ne!(run, "alpha-rho-1700000000");
+        }
+    }
+
+    #[test]
+    fn concurrent_run_nonces_are_not_process_local_counters() {
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    (0..256)
+                        .map(|_| minted("alpha-rho", nonce().expect("kernel randomness")))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let mut seen = std::collections::BTreeSet::new();
+        for worker in workers {
+            for run in worker.join().expect("worker") {
+                assert!(seen.insert(run), "duplicate root run");
+            }
+        }
+        assert_eq!(seen.len(), 2048);
+    }
+
+    #[test]
+    fn entropy_failure_never_publishes_or_replaces_a_run() {
+        let project = alone("entropy");
+        let root = id(&project, "alpha-rho");
+        let refused = || Err("entropy unavailable".to_owned());
+        assert_eq!(
+            began_with(&root, None, refused),
+            Err("entropy unavailable".to_owned())
         );
+        assert!(!session_at(&root).exists());
+        std::fs::write(session_at(&root), "alpha-rho-1700000000").expect("legacy note");
+        assert!(began_with(&root, None, refused).is_err());
+        assert_eq!(
+            session_in(&project, "alpha-rho").as_deref(),
+            Some("alpha-rho-1700000000")
+        );
+    }
+
+    #[test]
+    fn inherited_legacy_and_nonce_runs_are_written_without_minting() {
+        let project = alone("inherit");
+        let child = id(&project, "psi-eta");
+        for run in [
+            "alpha-rho-1700000000".to_owned(),
+            minted("alpha-rho", u128::MAX),
+        ] {
+            began_with(&child, Some(run.clone()), || {
+                panic!("child requested entropy")
+            })
+            .expect("inherited note");
+            assert_eq!(session_in(&project, "psi-eta"), Some(run));
+            ended(&child);
+        }
     }
 
     #[test]
@@ -432,8 +509,6 @@ mod tests {
 
     #[test]
     fn a_child_is_on_the_roster_of_a_run_named_as_runs_are() {
-        // A run is `<root>-<started>`, never the root's bare id: a roster that walked up to the
-        // id and compared it with the run held nobody but the root.
         let project = alone("named");
         let _bound: Vec<_> = [
             ("alpha-rho", "alpha-rho-1789480440"),

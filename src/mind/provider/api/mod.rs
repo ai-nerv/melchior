@@ -2,7 +2,7 @@
 //! contract. Adapters are pure: `request` builds JSON and `on_event` folds one server-sent event
 //! into a stream's state, with no HTTP, no sockets and no clock.
 
-use crate::mind::model::{Context, StopReason, ThinkingLevel, Usage};
+use crate::mind::model::{Context, MeasuredUsage, StopReason, ThinkingLevel, Usage};
 use crate::mind::provider::model::Model;
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +12,14 @@ pub struct Options {
     pub thinking: Option<ThinkingLevel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub max_tokens_automatic: bool,
+    #[serde(
+        default,
+        rename = "__output_limit",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) output_limit: Option<u64>,
     /// A JSON Schema the answer must satisfy; each protocol names the field differently.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<Schema>,
@@ -52,6 +60,8 @@ pub struct StreamState {
     /// Whatever the adapter is keeping between events, shaped as the protocol needs.
     pub scratch: serde_json::Value,
     pub usage: Usage,
+    pub measured_usage: MeasuredUsage,
+    pub usage_anomalies: u64,
 }
 
 /// A wire protocol magi can speak, implemented in Lua rather than here. `Send + Sync` is
@@ -63,11 +73,31 @@ pub trait Adapter {
 
     fn request(&self, model: &Model, context: &Context, options: &Options) -> serde_json::Value;
 
+    fn request_observed(
+        &self,
+        model: &Model,
+        context: &Context,
+        options: &Options,
+    ) -> (serde_json::Value, Option<crate::mind::model::RequestFrame>) {
+        (self.request(model, context, options), None)
+    }
+
     fn on_event(
         &self,
         state: &mut StreamState,
         event: &crate::mind::provider::sse::Event,
     ) -> Vec<Delta>;
+
+    fn on_event_measured(
+        &self,
+        state: &mut StreamState,
+        event: &crate::mind::provider::sse::Event,
+    ) -> Vec<(Delta, MeasuredUsage)> {
+        self.on_event(state, event)
+            .into_iter()
+            .map(|delta| (delta, MeasuredUsage::default()))
+            .collect()
+    }
 }
 
 #[cfg(test)]

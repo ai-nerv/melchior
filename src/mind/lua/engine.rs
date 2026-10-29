@@ -83,6 +83,7 @@ impl Registered {
 /// The Lua VM, holding whatever the config has declared so far.
 pub struct Engine {
     lua: Lua,
+    json_types: luna::StashedTable,
     config: Rc<RefCell<Config>>,
 }
 
@@ -96,8 +97,11 @@ impl Engine {
     /// A VM with the `magi` module installed and nothing declared.
     #[must_use]
     pub fn new() -> Self {
+        let mut lua = Lua::full();
+        let json_types = lua.enter(|ctx| ctx.stash(crate::mind::lua::convert::shape::types(ctx)));
         let mut engine = Self {
-            lua: Lua::full(),
+            lua,
+            json_types,
             config: Rc::new(RefCell::new(Config::default())),
         };
         engine.lua.set_memory_limit(Some(MEMORY));
@@ -255,7 +259,7 @@ impl Engine {
             ctx.set_global("__stream", stream);
             let fs = crate::mind::lua::fs::table(ctx);
             melchior.set(ctx, "fs", fs).ok();
-            let json = crate::mind::lua::json::table(ctx);
+            let json = crate::mind::lua::json::table(ctx, ctx.fetch(&self.json_types));
             melchior.set(ctx, "json", json).ok();
 
             // Protocols carry functions, which cannot be described as data, so the VM keeps them
@@ -337,6 +341,9 @@ fn raise<'gc>(ctx: luna::Context<'gc>, message: &str) -> luna::Error<'gc> {
 /// registered is functions, which cannot cross the boundary.
 const APIS: &str = "__melchior_apis";
 
+#[cfg(test)]
+mod json_tests;
+
 impl Engine {
     /// The protocols a config registered.
     #[must_use]
@@ -364,9 +371,9 @@ impl Engine {
         method: &str,
         args: &[serde_json::Value],
     ) -> Option<serde_json::Value> {
-        let args = serde_json::Value::Array(args.to_vec());
         self.lua.enter(|ctx| {
-            let value = crate::mind::lua::convert::lua_from_json(ctx, &args);
+            let value =
+                crate::mind::lua::convert::api_args(ctx, ctx.fetch(&self.json_types), method, args);
             ctx.set_global("__melchior_args", value);
         });
 

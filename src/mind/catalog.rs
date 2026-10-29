@@ -16,6 +16,9 @@ const APIS: &str = include_str!("../../config/apis.lua");
 /// The catalog this build ships, for the same reason.
 const PROVIDERS: &str = include_str!("../../config/providers.lua");
 
+#[cfg(test)]
+mod cache_tests;
+
 /// Everything a config declared.
 pub struct Catalog {
     /// Discovery failures, identified by provider rather than endpoint or credentials.
@@ -176,6 +179,50 @@ fn assemble(name: &str, value: &serde_json::Value) -> Option<Provider> {
         }
     }
     serde_json::from_value(value).ok()
+}
+
+#[cfg(test)]
+mod price_presence_tests {
+    use super::*;
+
+    #[test]
+    fn actual_lua_declarations_preserve_absent_zero_and_positive_cached_prices() {
+        let mut engine = Engine::new();
+        engine
+            .run(
+                r#"
+            local models = {}
+            for i, cost in ipairs({ {input=3}, {input=3,cache_read=0}, {input=3,cache_read=1} }) do
+                models[i] = {id=tostring(i), name=tostring(i), context_window=8192,
+                             max_tokens=128, cost=cost}
+            end
+            melchior.provider("prices", {name="Prices", api="openai-completions",
+                              auth={kind="none"}, models=models})
+        "#,
+                "prices.lua",
+            )
+            .expect("source declarations");
+        engine.harvest();
+        let config = engine.config();
+        let (name, value) = config.all("provider").into_iter().next().expect("provider");
+        let provider = assemble(name, value).expect("catalog models");
+        let usage = crate::mind::model::Usage {
+            cache_read: 1_000_000,
+            ..Default::default()
+        };
+        let actual: Vec<_> = provider
+            .models
+            .iter()
+            .map(|model| usage.price(model.cost))
+            .collect();
+        assert_eq!(actual, vec![3.0, 0.0, 1.0]);
+        for model in provider.models {
+            let value = serde_json::to_value(&model).expect("model");
+            assert_eq!(value["cost"]["presence"]["version"], 1);
+            let reloaded: Model = serde_json::from_value(value).expect("model reload");
+            assert_eq!(usage.price(model.cost), usage.price(reloaded.cost));
+        }
+    }
 }
 
 /// One model, described without naming a secret. `needs` is the first of the several variables
