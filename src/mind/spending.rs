@@ -32,7 +32,7 @@ pub fn cap(said: Option<&serde_json::Value>) -> Option<u64> {
 /// What `usage` cost, in millionths of a dollar: what the provider said, else the model's own
 /// prices, and nothing for a model that has none.
 #[must_use]
-pub fn cost(usage: Usage, price: Cost) -> u64 {
+pub fn cost(usage: Usage, price: &Cost) -> u64 {
     if usage.estimated_micros.is_some() {
         usage.charged_micros()
     } else if usage.cost_micros > 0 {
@@ -253,7 +253,7 @@ impl Meter {
     }
 
     pub(crate) fn heard_observed(&mut self, usage: Usage) -> Settlement {
-        let now = cost(usage, self.price);
+        let now = cost(usage, &self.price);
         if now == self.charged {
             return if self.ledger.is_some() {
                 Settlement::Unchanged

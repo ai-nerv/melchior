@@ -1,16 +1,20 @@
 //! Asking a provider what it offers, and remembering the answer. A fetch never writes back to
-//! `providers.lua`; what it finds goes to a cache under `$XDG_CACHE_HOME/melchior/models/`. That
+//! `providers.lua`; what it finds goes to a private identity-keyed cache under
+//! `$XDG_CACHE_HOME/melchior/models/v2/`. That
 //! cache is read at load time. Missing, expired, or explicitly refreshed catalogs are fetched;
 //! a failed fetch leaves whatever the cache last held.
 
 use crate::mind::model::ThinkingLevel;
 use crate::mind::provider::endpoint::Provider;
 use crate::mind::provider::model::Model;
-use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
+pub(crate) mod cache;
 mod capabilities;
+mod loading;
 mod ollama;
+mod strategy;
+pub use strategy::{Header, Strategy};
 
 #[cfg(test)]
 mod cache_tests;
@@ -34,99 +38,25 @@ pub fn discover(providers: &mut [Provider]) {
 
 /// Discover catalogs, optionally bypassing fresh caches, and name providers that failed.
 pub fn discover_with_refresh(providers: &mut [Provider], refresh: bool) -> Vec<String> {
-    let mut failed = Vec::new();
-    for provider in providers.iter_mut() {
-        if !provider.discover {
-            continue;
-        }
-        let Some(base) = provider.base_url.clone() else {
-            continue;
-        };
-        let found = cached(&provider.id)
-            .filter(|held| held.fresh && !refresh)
-            .map(|held| held.models)
-            .or_else(|| {
-                let key = key_for(provider);
-                let popularity = provider.details.as_deref() == Some("openrouter")
-                    || reqwest::Url::parse(&base).is_ok_and(|url| {
-                        url.host_str() == Some("openrouter.ai")
-                            && url.path().trim_end_matches('/') == "/api/v1"
-                    });
-                let fetched = fetch(
-                    &base,
-                    key.as_deref(),
-                    provider.details.as_deref(),
-                    popularity,
-                );
-                match fetched {
-                    Some(models) => {
-                        write_cache(&provider.id, &models);
-                        Some(models)
-                    }
-                    // A failed fetch falls back to a stale cache.
-                    _ => {
-                        failed.push(provider.id.clone());
-                        cached(&provider.id).map(|held| held.models)
-                    }
-                }
-            });
-        if let Some(found) = found {
-            provider.models = found
-                .into_iter()
-                .map(|model| joined(model, provider))
-                .collect();
-        }
-    }
-    failed
+    loading::discover(providers, refresh)
 }
 
 /// A discovered model as its provider serves it: the provider's id, protocol and dialect. Without
 /// the dialect it spoke plain OpenAI, and a reasoning level, off included, never reached the provider.
 fn joined(mut model: Model, provider: &crate::mind::provider::endpoint::Provider) -> Model {
+    model.base_url = None;
+    model.headers.clear();
     model.provider.clone_from(&provider.id);
     model.api = provider.api;
     model.compat = Some(model.compat.unwrap_or_default().over(provider.compat));
     model
 }
 
-/// A cached catalog, and whether it is still worth using without asking again.
-struct Held {
-    models: Vec<Model>,
-    fresh: bool,
-}
-
-/// Where a provider's fetched catalog is kept.
-pub(crate) fn cache_path(id: &str) -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-    // The provider id comes from a config, so it is flattened to a single path segment.
-    let safe: String = id
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect();
-    Some(
-        base.join("melchior")
-            .join("models")
-            .join(format!("{safe}.json")),
-    )
-}
-
-/// Read what was last fetched for this provider.
-fn cached(id: &str) -> Option<Held> {
-    let path = cache_path(id)?;
-    let raw = std::fs::read_to_string(&path).ok()?;
-    let models = cached_models(&raw)?;
-    let fresh = std::fs::metadata(&path)
-        .and_then(|meta| meta.modified())
-        .ok()
-        .and_then(|when| SystemTime::now().duration_since(when).ok())
-        .is_some_and(|age| age < FRESH);
-    Some(Held { models, fresh })
-}
-
 fn cached_models(raw: &str) -> Option<Vec<Model>> {
     let mut values: Vec<serde_json::Value> = serde_json::from_str(raw).ok()?;
+    if values.len() > loading::MODELS {
+        return None;
+    }
     for value in &mut values {
         if let Some(cost) = value
             .get_mut("cost")
@@ -142,90 +72,25 @@ fn cached_models(raw: &str) -> Option<Vec<Model>> {
             cost.insert("presence".into(), serde_json::to_value(presence).ok()?);
         }
     }
-    values
+    let models: Vec<Model> = values
         .into_iter()
         .map(|value| serde_json::from_value(value).ok())
-        .collect()
+        .collect::<Option<_>>()?;
+    identities(&models).then_some(models)
 }
 
-/// Keep what was fetched, so the next start does not have to ask.
-fn write_cache(id: &str, models: &[Model]) {
-    let Some(path) = cache_path(id) else {
-        return;
-    };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(text) = serde_json::to_string(models) {
-        let _ = std::fs::write(&path, text);
-    }
+fn identities(models: &[Model]) -> bool {
+    let mut ids = std::collections::BTreeSet::new();
+    models.iter().all(|model| {
+        !model.id.trim().is_empty()
+            && !model.id.chars().any(char::is_control)
+            && ids.insert(&model.id)
+    })
 }
 
 /// The key this provider authenticates with, if the environment has one.
 pub(crate) fn key_for(provider: &Provider) -> Option<String> {
-    let crate::mind::provider::endpoint::Auth::ApiKey { vars } = &provider.auth else {
-        return None;
-    };
-    vars.iter().find_map(|name| std::env::var(name).ok())
-}
-
-/// Ask `<base>/models` what there is, on a thread with a runtime of its own: the synchronous
-/// caller is reached from an async daemon too, and building a runtime inside a running one
-/// panics.
-fn fetch(
-    base: &str,
-    key: Option<&str>,
-    details: Option<&str>,
-    popularity: bool,
-) -> Option<Vec<Model>> {
-    let mut url = reqwest::Url::parse(&format!("{}/models", base.trim_end_matches('/'))).ok()?;
-    if popularity {
-        url.query_pairs_mut().append_pair("sort", "most-popular");
-    }
-    let key = key.map(ToOwned::to_owned);
-    let ollama = (details == Some("ollama")).then(|| ollama::root(base));
-    std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .ok()?;
-        runtime.block_on(async move {
-            let client = crate::mind::provider::http()
-                .timeout(PATIENCE)
-                .build()
-                .ok()?;
-            let mut request = client.get(url);
-            if let Some(key) = key {
-                request = request.bearer_auth(key);
-            }
-            let body: serde_json::Value = request
-                .send()
-                .await
-                .ok()?
-                .error_for_status()
-                .ok()?
-                .json()
-                .await
-                .ok()?;
-            let entries = body.get("data")?.as_array()?;
-            let listed = ranked(&body, popularity);
-            if !entries.is_empty() && listed.is_empty() {
-                return None;
-            }
-            // Fetch Ollama metadata before storing the refreshed cards.
-            let Some(root) = ollama else {
-                return Some(listed);
-            };
-            let mut detailed = Vec::with_capacity(listed.len());
-            for model in listed {
-                detailed.push(ollama::detailed(model, &root, &client).await);
-            }
-            Some(detailed)
-        })
-    })
-    .join()
-    .ok()
-    .flatten()
+    provider.resolve_key().ok().flatten()
 }
 
 /// Read an OpenAI-shaped `{"data": [...]}` answer into models. What an entry carries varies by
@@ -285,9 +150,12 @@ fn one(entry: &serde_json::Value) -> Option<Model> {
         pricing: pricing(entry),
         popularity_rank: None,
         capabilities: Some(capabilities::from_entry(entry)),
+        input_limits: None,
         // Overwritten by the provider, which knows its own id and protocol.
         provider: String::new(),
         api: crate::mind::provider::model::Api::OpenAiCompletions,
+        base_url: None,
+        headers: Default::default(),
         input: {
             use crate::mind::provider::model::Modality;
             let mut input = vec![Modality::Text];
@@ -320,8 +188,27 @@ fn levels(entry: &serde_json::Value) -> std::collections::BTreeMap<ThinkingLevel
         .and_then(|it| it.get("mandatory"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
+    let efforts = reasoning
+        .and_then(|it| it.get("supported_efforts"))
+        .and_then(serde_json::Value::as_array);
+    if let Some(efforts) = efforts {
+        for level in ThinkingLevel::ALL {
+            let supported = efforts
+                .iter()
+                .any(|value| value.as_str() == Some(level.as_str()));
+            let name = (supported || (level == ThinkingLevel::Off && !mandatory))
+                .then(|| level.as_str().to_owned());
+            out.insert(level, name);
+        }
+    }
     if mandatory {
-        out.insert(ThinkingLevel::Off, Some(least(reasoning)));
+        let least = least(reasoning);
+        let available = efforts.is_none_or(|values| {
+            values
+                .iter()
+                .any(|value| value.as_str() == Some(least.as_str()))
+        });
+        out.insert(ThinkingLevel::Off, available.then_some(least));
     }
     out
 }
@@ -343,23 +230,48 @@ fn least(reasoning: Option<&serde_json::Value>) -> String {
 
 /// Whether the provider says this model can reason.
 fn reasons(entry: &serde_json::Value) -> bool {
-    entry
-        .get("supported_parameters")
-        .and_then(|p| p.as_array())
-        .is_some_and(|params| {
-            params
-                .iter()
-                .filter_map(|p| p.as_str())
-                .any(|p| p == "reasoning" || p == "include_reasoning" || p == "reasoning_effort")
-        })
+    entry.get("reasoning").and_then(serde_json::Value::as_bool) == Some(true)
+        || entry
+            .pointer("/reasoning/mandatory")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        || entry
+            .pointer("/reasoning/supported_efforts")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|values| {
+                values
+                    .iter()
+                    .any(|value| value.as_str().is_some_and(|name| name != "off"))
+            })
+        || entry
+            .get("supported_parameters")
+            .and_then(|p| p.as_array())
+            .is_some_and(|params| {
+                params.iter().filter_map(|p| p.as_str()).any(|p| {
+                    p == "reasoning" || p == "include_reasoning" || p == "reasoning_effort"
+                })
+            })
 }
 
 /// Price per million tokens, from the dollars-per-token decimal string providers quote; an
 /// unreadable price is no price rather than a wrong one.
 fn cost(entry: &serde_json::Value) -> crate::mind::model::Cost {
+    let input = rate(entry, "prompt");
+    let output = rate(entry, "completion");
+    let cache_read = rate(entry, "input_cache_read");
+    let cache_write = rate(entry, "input_cache_write");
     crate::mind::model::Cost {
-        input: rate(entry, "prompt").unwrap_or_default(),
-        output: rate(entry, "completion").unwrap_or_default(),
+        input: input.unwrap_or_default(),
+        output: output.unwrap_or_default(),
+        cache_read: cache_read.unwrap_or_default(),
+        cache_write: cache_write.unwrap_or_default(),
+        presence: crate::mind::model::PricePresence {
+            input: input.is_some(),
+            output: output.is_some(),
+            cache_read: cache_read.is_some(),
+            cache_write: cache_write.is_some(),
+            ..Default::default()
+        },
         ..crate::mind::model::Cost::default()
     }
 }
@@ -514,12 +426,15 @@ mod tests {
 
     #[test]
     fn a_provider_id_cannot_escape_the_cache_directory() {
-        let path = cache_path("../../etc/passwd").expect("a path");
+        let path = cache::path("models", &[b"../../etc/passwd"]).expect("a path");
         assert!(
-            path.ends_with("------etc-passwd.json"),
-            "{}",
-            path.display()
+            path.parent()
+                .expect("cache directory")
+                .ends_with("models/v2")
         );
+        let name = path.file_stem().expect("filename").to_str().expect("UTF-8");
+        assert_eq!(name.len(), 64);
+        assert!(name.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 
     #[test]
@@ -528,11 +443,14 @@ mod tests {
             id: "fixed".into(),
             name: "Fixed".into(),
             base_url: Some("http://127.0.0.1:1/v1".into()),
+            credential_origins: Vec::new(),
+            headers: Default::default(),
             api: crate::mind::provider::model::Api::OpenAiCompletions,
             auth: crate::mind::provider::endpoint::Auth::None,
             compat: None,
             models: Vec::new(),
             discover: false,
+            discovery: None,
             details: None,
             avoid: Vec::new(),
         }];
@@ -547,6 +465,8 @@ mod tests {
             id: "router".into(),
             name: "Router".into(),
             base_url: None,
+            credential_origins: Vec::new(),
+            headers: Default::default(),
             api: crate::mind::provider::model::Api::OpenAiCompletions,
             auth: crate::mind::provider::endpoint::Auth::None,
             compat: Some(Compat {
@@ -555,10 +475,18 @@ mod tests {
             }),
             models: Vec::new(),
             discover: true,
+            discovery: None,
             details: None,
             avoid: Vec::new(),
         };
-        let model = joined(parse(&bare()).remove(0), &provider);
+        let mut model = parse(&bare()).remove(0);
+        model.base_url = Some("https://untrusted.invalid".into());
+        model
+            .headers
+            .insert("x-untrusted".into(), "private-sentinel".into());
+        let model = joined(model, &provider);
+        assert!(model.base_url.is_none());
+        assert!(model.headers.is_empty());
         assert_eq!(model.provider, "router");
         assert_eq!(
             resolve(model.compat).thinking_format,
@@ -571,6 +499,27 @@ mod tests {
 mod cached_price_tests {
     use super::*;
     use crate::mind::model::{Cost, Usage};
+
+    #[test]
+    fn published_free_and_cached_rates_survive_normalized_cache_roundtrips() {
+        for (read, expected) in [
+            (serde_json::json!("0"), 0.0),
+            (serde_json::json!("0.000001"), 1.0),
+            (serde_json::Value::Null, 3.0),
+        ] {
+            let models = parse(&serde_json::json!({"data":[{"id":"priced","pricing":{
+                "prompt":"0.000003","completion":"0","input_cache_read":read}}]}));
+            let cached =
+                cached_models(&serde_json::to_string(&models).expect("cache")).expect("reload");
+            let usage = Usage {
+                cache_read: 1_000_000,
+                ..Default::default()
+            };
+            assert_eq!(usage.price(&cached[0].cost), expected);
+            assert!(cached[0].cost.presence.output);
+            assert_eq!(cached[0].cost.presence.cache_read, !read.is_null());
+        }
+    }
     use serde_json::json;
 
     fn reload(cost: serde_json::Value) -> Model {
@@ -591,9 +540,9 @@ mod cached_price_tests {
     #[test]
     fn legacy_generated_zero_prices_are_not_deliberately_free() {
         let model = reload(json!({"input":3,"output":15,"cache_read":0,"cache_write":0}));
-        assert_eq!(usage().price(model.cost), 6.0);
+        assert_eq!(usage().price(&model.cost), 6.0);
         let model = reload(json!({"input":3,"cache_read":1,"cache_write":5}));
-        assert_eq!(usage().price(model.cost), 6.0);
+        assert_eq!(usage().price(&model.cost), 6.0);
     }
 
     #[test]
@@ -608,7 +557,7 @@ mod cached_price_tests {
             let model = reload(json!({"input":3,"cache_read":0,"cache_write":0,
                 "presence":presence}));
             assert_eq!(model.id, "cached");
-            assert_eq!(usage().price(model.cost), 6.0);
+            assert_eq!(usage().price(&model.cost), 6.0);
         }
     }
 
@@ -633,14 +582,14 @@ mod cached_price_tests {
                 6.0,
             ),
         ] {
-            let model = reload(serde_json::to_value(cost).expect("cache writer"));
-            assert_eq!(usage().price(model.cost), expected);
+            let model = reload(serde_json::to_value(&cost).expect("cache writer"));
+            assert_eq!(usage().price(&model.cost), expected);
             assert_eq!(model.cost, cost);
         }
         let discovered = parse(&json!({"data":[{"id":"d","pricing":{"prompt":"0.000003"}}]}));
         let reloaded = cached_models(&serde_json::to_string(&discovered).expect("discovery cache"))
             .expect("offline reload");
-        assert_eq!(usage().price(reloaded[0].cost), 6.0);
+        assert_eq!(usage().price(&reloaded[0].cost), 6.0);
     }
 }
 
@@ -700,6 +649,8 @@ mod reasoning_tests {
         // Every provider but OpenRouter says nothing here, and silence must not take a level away.
         assert!(levels(&serde_json::json!({})).is_empty());
         assert!(levels(&card(serde_json::json!("yes"))).is_empty());
-        assert!(levels(&card(serde_json::json!({ "supported_efforts": ["low"] }))).is_empty());
+        let held = levels(&card(serde_json::json!({ "supported_efforts": ["low"] })));
+        assert_eq!(held.get(&ThinkingLevel::Low), Some(&Some("low".into())));
+        assert_eq!(held.get(&ThinkingLevel::High), Some(&None));
     }
 }

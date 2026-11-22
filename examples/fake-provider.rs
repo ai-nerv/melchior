@@ -1,4 +1,4 @@
-//! Scripted Chat Completions and Anthropic Messages over HTTP, with JSONL request capture.
+//! Scripted provider streams over HTTP, with JSONL request capture.
 
 use std::io::Read as _;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -16,6 +16,9 @@ mod rendezvous;
 mod refusal;
 use refusal::Refusal;
 
+#[path = "fake-provider/raw.rs"]
+mod raw;
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 enum Dialect {
     #[default]
@@ -23,6 +26,8 @@ enum Dialect {
     Chat,
     #[serde(rename = "anthropic-messages")]
     Anthropic,
+    #[serde(rename = "raw-sse")]
+    Raw,
 }
 
 #[derive(Debug, Default, Clone, Copy, serde::Deserialize)]
@@ -58,14 +63,18 @@ impl Turn {
             return Err(std::io::Error::other("too many fixture events"));
         }
         match self.dialect {
+            Dialect::Raw => raw::validate(self),
             Dialect::Anthropic if self.refuse.is_some() => Ok(()),
             Dialect::Anthropic => anthropic::validate(self),
             Dialect::Chat
                 if self.usage.is_some()
-                    || self.events.iter().any(|e| matches!(e, Event::Signature(_))) =>
+                    || self
+                        .events
+                        .iter()
+                        .any(|e| matches!(e, Event::Signature(_) | Event::Sse { .. })) =>
             {
                 Err(std::io::Error::other(
-                    "turn-level usage and signatures require Anthropic",
+                    "turn-level usage, signatures and raw frames require their declared dialect",
                 ))
             }
             Dialect::Chat => Ok(()),
@@ -108,6 +117,10 @@ impl When {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Event {
+    Sse {
+        name: Option<String>,
+        data: serde_json::Value,
+    },
     Text(String),
     Thinking(String),
     Signature(String),
@@ -167,9 +180,9 @@ impl Event {
                 "usage": {"prompt_tokens": input, "completion_tokens": output}
             }),
             Self::Metrics(metrics) => serde_json::json!({"choices":[],"usage":metrics}),
-            Self::Signature(_) => {
+            Self::Signature(_) | Self::Sse { .. } => {
                 return Err(std::io::Error::other(
-                    "signatures require the Anthropic dialect",
+                    "event is unavailable in the Chat dialect",
                 ));
             }
         })
@@ -239,6 +252,9 @@ async fn start_stream(socket: &mut tokio::net::TcpStream) -> std::io::Result<()>
 async fn stream(socket: &mut tokio::net::TcpStream, turn: &Turn) -> std::io::Result<()> {
     if turn.dialect == Dialect::Anthropic {
         return anthropic::stream(socket, turn).await;
+    }
+    if turn.dialect == Dialect::Raw {
+        return raw::stream(socket, turn).await;
     }
     start_stream(socket).await?;
     for event in &turn.events {

@@ -10,12 +10,16 @@ use crate::mind::provider::sse;
 use std::cell::RefCell;
 
 mod frame;
+mod instructions;
 
 #[cfg(test)]
 mod measured_tests;
 
 #[cfg(test)]
 mod cache_policy;
+
+#[cfg(test)]
+mod strict_tests;
 
 /// One registered protocol, driven through the VM.
 pub struct LuaAdapter {
@@ -95,7 +99,33 @@ fn asked(model: &Model, options: &Options) -> serde_json::Value {
     let Some(object) = value.as_object_mut() else {
         return value;
     };
-    match effective_thinking(model, options) {
+    object.remove("session_id");
+    if let Some(session) = &options.provider_session {
+        object.insert("__session_id".into(), session.clone().into());
+    }
+    if let Some(binding) = &options.continuation_binding {
+        object.insert("__credential_binding".into(), binding.clone().into());
+    }
+    let effective = effective_thinking(model, options);
+    if let Some(control) =
+        crate::mind::provider::thinking::google::configuration(model, options.thinking)
+    {
+        object.insert("__google_control".into(), control);
+    }
+    if crate::mind::provider::compat::resolve(model.compat).thinking_format
+        == crate::mind::provider::compat::ThinkingFormat::Baseten
+        && (options.thinking.is_none() || effective.is_some())
+    {
+        object.insert(
+            "__thinking_enabled".into(),
+            serde_json::Value::Bool(
+                options
+                    .thinking
+                    .is_some_and(|level| level != crate::mind::model::ThinkingLevel::Off),
+            ),
+        );
+    }
+    match effective {
         Some(level) => {
             object.insert("thinking".to_owned(), serde_json::Value::String(level));
         }
@@ -106,37 +136,23 @@ fn asked(model: &Model, options: &Options) -> serde_json::Value {
     value
 }
 
-/// What to ask this model for. Nothing for a level a model that does not reason cannot use —
-/// one sent `reasoning_effort` that has none answers 400 — but `off` is always said, and each
-/// dialect turns it into that provider's own way of saying it rather than an effort.
+/// Resolve requested reasoning through the model's capabilities and protocol.
 fn effective_thinking(model: &Model, options: &Options) -> Option<String> {
+    use crate::mind::provider::{compat::AnthropicThinking, model::Api};
+    if model.api == Api::MistralConversations {
+        return crate::mind::provider::thinking::mistral::requested(model, options.thinking);
+    }
     let level = options.thinking?;
-    // Said rather than left out, and said even where the catalog believes this model does not
-    // reason: that belief is the provider's word, and being wrong about it costs the whole
-    // answer. A helper asking for 1000 tokens spent 999 of them reasoning and returned nothing,
-    // because "off" was dropped here. Telling a model that cannot reason not to reason costs a
-    // field it ignores.
-    if level == crate::mind::model::ThinkingLevel::Off {
-        // Unless this model has no "off": one that must reason takes the least it will do instead.
-        // Saying nothing would leave its own default standing, which is usually the largest.
-        return match model.thinking.get(&level) {
-            Some(Some(least)) => Some(least.clone()),
-            Some(None) => None,
-            None => Some("off".to_owned()),
-        };
-    }
-    if !model.reasoning {
-        return None;
-    }
-    match model.thinking.get(&level) {
-        // Named: this model calls that level something else.
-        Some(Some(name)) => Some(name.clone()),
-        // Present and empty: it cannot do this level, and asking anyway is a refusal.
-        Some(None) => None,
-        // Unmapped: the provider's own word for it.
-        None => serde_json::to_value(level)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_owned)),
+    let effective = crate::mind::provider::thinking::effective(model, level)?;
+    if model.api == Api::AnthropicMessages
+        && level == crate::mind::model::ThinkingLevel::Off
+        && matches!(effective.as_str(), "off" | "none")
+        && crate::mind::provider::compat::resolve(model.compat).anthropic_thinking
+            != AnthropicThinking::Budget
+    {
+        Some("off".into())
+    } else {
+        Some(effective)
     }
 }
 
@@ -170,6 +186,43 @@ impl Adapter for LuaAdapter {
         out
     }
 
+    fn request_endpoint(
+        &self,
+        base_url: &str,
+        model: &Model,
+        body: &serde_json::Value,
+    ) -> Result<String, String> {
+        let mut projected = body.get("tools").cloned().unwrap_or_default();
+        if self.name == "openai-completions" {
+            for added in body
+                .get("messages")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|message| message["role"] == "system")
+                .filter_map(|message| message.get("tools").and_then(serde_json::Value::as_array))
+            {
+                if projected.is_null() {
+                    projected = serde_json::json!([]);
+                }
+                projected
+                    .as_array_mut()
+                    .ok_or("invalid prepared tool declarations")?
+                    .extend(added.iter().cloned());
+            }
+        }
+        self.call(
+            "endpoint",
+            &[
+                serde_json::json!(base_url.trim_end_matches('/')),
+                described(model),
+                serde_json::json!({ "tools": projected }),
+            ],
+        )
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or_else(|| format!("{}: request endpoint conversion failed", self.name))
+    }
+
     fn request(&self, model: &Model, context: &Context, options: &Options) -> serde_json::Value {
         let mut body = self.request_observed(model, context, options).0;
         if let Some(fields) = body.as_object_mut() {
@@ -184,7 +237,39 @@ impl Adapter for LuaAdapter {
         context: &Context,
         options: &Options,
     ) -> (serde_json::Value, Option<crate::mind::model::RequestFrame>) {
-        let mut context = context.clone();
+        self.prepare(model, context, options).unwrap_or_default()
+    }
+
+    fn prepare(
+        &self,
+        model: &Model,
+        context: &Context,
+        options: &Options,
+    ) -> Result<(serde_json::Value, Option<crate::mind::model::RequestFrame>), String> {
+        if matches!(
+            self.name.as_str(),
+            "openai-completions"
+                | "mistral-conversations"
+                | "openai-responses"
+                | "azure-openai-responses"
+                | "openai-codex-responses"
+                | "anthropic-messages"
+        ) && options.schema.is_some()
+            && !crate::mind::provider::compat::resolve(model.compat).supports_json_schema
+        {
+            return Err("this model does not support JSON-schema structured answers".into());
+        }
+        if self.name == "anthropic-messages"
+            && options.schema.is_some()
+            && crate::mind::provider::compat::resolve(model.compat).anthropic_schema
+                == crate::mind::provider::compat::AnthropicSchema::ForcedTool
+            && !crate::mind::provider::compat::resolve(model.compat).supports_forced_tool_choice
+        {
+            return Err(
+                "this model does not support forced tool selection for structured answers".into(),
+            );
+        }
+        let mut context = instructions::context(&self.name, model, context)?;
         let mut omitted_images = 0_u64;
         if !model.accepts_images() {
             use crate::mind::model::Content;
@@ -213,20 +298,23 @@ impl Adapter for LuaAdapter {
                 }
             }
         }
+        let encoded = crate::mind::provider::strict::context(&self.name, model, &context, options)?;
+        let mut description = described(model);
+        let fields = description
+            .as_object_mut()
+            .ok_or_else(|| format!("{}: invalid model description", self.name))?;
+        if let Some(base) = model.base_url.as_deref() {
+            fields.insert("__endpoint".into(), self.endpoint(base, model).into());
+        }
+        fields.insert("__protocol".into(), self.name.clone().into());
         let body = self
-            .call(
-                "request",
-                &[
-                    described(model),
-                    serde_json::to_value(&context).unwrap_or_default(),
-                    asked(model, options),
-                ],
-            )
-            .unwrap_or(serde_json::Value::Null);
-        (
+            .call("request", &[description, encoded, asked(model, options)])
+            .filter(|value| value.is_object())
+            .ok_or_else(|| format!("{}: request conversion failed", self.name))?;
+        Ok((
             body,
             frame::observed(&self.name, model, options, omitted_images),
-        )
+        ))
     }
 
     fn on_event(&self, state: &mut StreamState, event: &sse::Event) -> Vec<Delta> {
@@ -371,6 +459,8 @@ pub fn engine_with_builtins() -> Result<Engine, crate::mind::lua::LuaError> {
 mod images;
 
 #[cfg(test)]
+mod anthropic_tests;
+#[cfg(test)]
 mod cache_conversation;
 #[cfg(test)]
 mod cache_markers;
@@ -381,7 +471,46 @@ mod deciding;
 #[cfg(test)]
 mod fidelity_tests;
 #[cfg(test)]
+mod google_calls;
+#[cfg(test)]
+mod google_replay;
+#[cfg(test)]
+mod google_thinking;
+
+#[cfg(test)]
+mod google_usage;
+#[cfg(test)]
+mod mistral;
+
+#[cfg(test)]
 mod protocols;
+#[cfg(test)]
+mod reasoning_content_tests;
+#[cfg(test)]
+mod zai;
+
+#[cfg(test)]
+mod moonshot;
+
+#[cfg(test)]
+mod baseten;
+
+#[cfg(test)]
+mod fireworks;
+
+#[cfg(test)]
+mod qwen;
+
+#[cfg(test)]
+mod together;
+
+#[cfg(test)]
+mod ant_ling;
+
+#[cfg(test)]
+mod completions_tests;
+#[cfg(test)]
+mod responses_tests;
 #[cfg(test)]
 mod support;
 #[cfg(test)]
@@ -401,8 +530,11 @@ mod thinking_tests {
             name: "M".into(),
             provider: "p".into(),
             api: crate::mind::provider::model::Api::OpenAiCompletions,
+            base_url: None,
+            headers: BTreeMap::new(),
             reasoning,
             input: Vec::new(),
+            input_limits: None,
             context_window: 1000,
             max_tokens: 100,
             cost: crate::mind::model::Cost::default(),

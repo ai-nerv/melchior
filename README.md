@@ -323,17 +323,21 @@ make verify
 
 ## Nix
 
-Each release tag publishes a static build for x86_64 and aarch64 Linux to the `ai-nerv` cache,
+Each release tag publishes a static build for x86_64 and aarch64 Linux to the `bresilla` cache,
 with `config/` and the Lua client under `share/melchior/`.
 
 ```sh
-cachix use ai-nerv
 nix run github:ai-nerv/melchior -- verbs
 nix build github:ai-nerv/melchior
 ```
 
-The flake names the cache itself, so `--accept-flake-config` does the same as `cachix use`. In
+The flake names the cache itself; pass `--accept-flake-config` or answer yes when Nix prompts. In
 another flake, take `inputs.melchior.packages.${system}.default`, and configure the cache on the
-consuming machine: an input's `nixConfig` is not inherited.
+consuming machine: an input's `nixConfig` is not inherited. Add to `/etc/nix/nix.conf`:
+
+```ini
+extra-substituters = https://cache.bresilla.com/bresilla
+extra-trusted-public-keys = bresilla:zsecaZYIrjCJQS4AuGPmEVU5PRkiMmB/Mds3KaCzTvE=
+```
 
 Here, `make nix-build` builds it into `result/`, and `make nix-check` checks the flake.

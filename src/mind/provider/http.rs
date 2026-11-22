@@ -128,7 +128,18 @@ fn admitted(url: &reqwest::Url) -> Result<(), Unanswered> {
     })
 }
 
-/// `localhost`, a loopback address, or the unspecified address, which reaches this machine too.
+/// A credential-free HTTPS endpoint or local HTTP endpoint.
+pub(crate) fn usable_url(raw: &str) -> bool {
+    reqwest::Url::parse(raw).is_ok_and(|url| {
+        url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.fragment().is_none()
+            && (url.scheme() == "https"
+                || (url.scheme() == "http" && local(url.host_str().unwrap_or_default())))
+    })
+}
+
 fn local(host: &str) -> bool {
     let bare = host
         .strip_prefix('[')

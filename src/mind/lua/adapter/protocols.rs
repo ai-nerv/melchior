@@ -101,10 +101,15 @@ fn a_completed_response_carrying_a_call_is_waiting_on_it() {
         &adapter("openai-responses"),
         &[(
             "",
-            r#"{"type":"response.completed","response":{"output":[{"type":"function_call"}]}}"#,
+            r#"{"type":"response.completed","response":{"output":[{"type":"function_call","id":"fc_1","call_id":"c1","name":"read","arguments":"{}"}]}}"#,
         )],
     );
     assert_eq!(deltas.last(), Some(&Delta::Stop(StopReason::ToolUse)));
+    assert!(deltas.contains(&Delta::ToolCallStart {
+        id: "c1".into(),
+        name: "read".into()
+    }));
+    assert!(deltas.contains(&Delta::ToolCallArgs("{}".into())));
 }
 
 #[test]
@@ -141,21 +146,17 @@ fn google_streams_over_sse_only_when_asked() {
 }
 
 #[test]
-fn google_reports_a_thought_and_its_signature() {
+fn google_streams_visible_thinking_without_unbound_replay_state() {
     let deltas = stream(
         &adapter("google-generative-ai"),
         &[(
             "",
-            r#"{"candidates":[{"content":{"parts":[{"text":"why","thought":true,"thoughtSignature":"sig"},{"text":"Hi"}]}}]}"#,
+            r#"{"candidates":[{"content":{"parts":[{"text":"why","thought":true,"thoughtSignature":"c2ln"},{"text":"Hi"}]}}]}"#,
         )],
     );
     assert_eq!(
         deltas,
-        vec![
-            Delta::Thinking("why".into()),
-            Delta::Signature("sig".into()),
-            Delta::Text("Hi".into()),
-        ]
+        vec![Delta::Thinking("why".into()), Delta::Text("Hi".into()),]
     );
 }
 
@@ -172,7 +173,7 @@ fn google_reports_a_call_as_one_whole_set_of_arguments() {
     assert_eq!(
         deltas[0],
         Delta::ToolCallStart {
-            id: "read".into(),
+            id: "melchior-google-call-1".into(),
             name: "read".into()
         }
     );
@@ -224,10 +225,12 @@ fn pi_messages_reports_a_signature_when_its_block_closes() {
 fn every_registered_protocol_survives_a_malformed_payload() {
     let mut engine = engine_with_builtins().expect("builtins");
     for name in engine.apis() {
-        assert!(
-            stream(&adapter(&name), &[("", "not json")]).is_empty(),
-            "{name}"
-        );
+        let deltas = stream(&adapter(&name), &[("", "not json")]);
+        if matches!(name.as_str(), "google-generative-ai" | "google-vertex") {
+            assert_eq!(deltas, [Delta::Stop(StopReason::Error)], "{name}");
+        } else {
+            assert!(deltas.is_empty(), "{name}");
+        }
     }
 }
 
@@ -266,8 +269,8 @@ fn a_stated_gap_explains_itself_rather_than_restating_the_name() {
 }
 
 #[test]
-fn magi_speaks_nine_of_the_ten_protocols_it_knows() {
+fn melchior_speaks_ten_of_the_eleven_protocols_it_knows() {
     let mut engine = engine_with_builtins().expect("builtins");
-    assert_eq!(engine.apis().len(), 9);
-    assert_eq!(Api::all().len(), 10);
+    assert_eq!(engine.apis().len(), 10);
+    assert_eq!(Api::all().len(), 11);
 }

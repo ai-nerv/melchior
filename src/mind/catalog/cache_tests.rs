@@ -22,8 +22,8 @@ fn load(source: &str) -> Catalog {
 }
 
 fn body(catalog: Catalog, id: &str) -> serde_json::Value {
-    let (provider, model) = catalog.find(id).expect("model");
-    let (protocol, model) = (provider.api.as_str(), model.clone());
+    let (_, model) = catalog.find(id).expect("model");
+    let (protocol, model) = (model.api.as_str(), model.clone());
     LuaAdapter::new(catalog.engine, protocol)
         .expect("adapter")
         .request(
@@ -38,13 +38,13 @@ fn body(catalog: Catalog, id: &str) -> serde_json::Value {
 }
 
 #[test]
-fn shipped_cache_capability_is_declared_only_on_the_direct_provider() {
+fn shipped_cache_capability_is_declared_only_on_reviewed_providers_and_protocols() {
     let catalog = load("");
     for provider in &catalog.providers {
         for model in &provider.models {
             assert_eq!(
                 resolve(model.compat).prompt_cache,
-                if provider.id == "anthropic" {
+                if matches!(provider.id.as_str(), "anthropic" | "fireworks") {
                     PromptCache::AnthropicEphemeral
                 } else {
                     PromptCache::None
@@ -63,6 +63,16 @@ fn shipped_cache_capability_is_declared_only_on_the_direct_provider() {
         body(load(""), "github-copilot/claude-sonnet-4.5")["system"],
         "rules"
     );
+    assert_eq!(
+        body(
+            load(""),
+            "fireworks/accounts/fireworks/models/deepseek-v4p1-flash"
+        )["system"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
+    let chat = body(load(""), "fireworks/accounts/fireworks/models/kimi-k3");
+    assert_eq!(chat["messages"][0]["content"], "rules");
+    assert!(!chat.to_string().contains("\"cache_control\""));
 }
 
 #[test]

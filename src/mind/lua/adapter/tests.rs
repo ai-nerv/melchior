@@ -425,7 +425,11 @@ fn completions_streams_text_and_reasoning() {
     );
     assert_eq!(
         deltas,
-        vec![Delta::Thinking("why".into()), Delta::Text("Hi".into())]
+        vec![
+            Delta::Thinking("why".into()),
+            Delta::Signature("reasoning_content".into()),
+            Delta::Text("Hi".into())
+        ]
     );
 }
 
@@ -463,7 +467,10 @@ fn completions_maps_its_finish_reasons() {
     for (wire, expected) in [
         ("stop", StopReason::EndTurn),
         ("length", StopReason::Length),
-        ("tool_calls", StopReason::ToolUse),
+        ("repetition_truncation", StopReason::Length),
+        ("content_filter", StopReason::Error),
+        ("unknown", StopReason::Error),
+        ("tool_calls", StopReason::Error),
     ] {
         let deltas = stream(
             &adapter("openai-completions"),

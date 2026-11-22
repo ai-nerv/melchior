@@ -100,22 +100,37 @@ async fn worker() {
             chunk(b"data: {\"choices\":[{\"delta\":{\"content\":\"private-input-canary\"}}]}\n\n"),
             Step::Hold,
         ]],
-        "estimate" | "zero" => {
-            let input = if scenario == "zero" { 0 } else { 10 };
+        "estimate" | "zero" | "tiered" | "tiered_cache" => {
+            let input = if scenario == "zero" {
+                0
+            } else if scenario == "tiered_cache" {
+                1
+            } else {
+                10
+            };
+            let cached = if scenario == "tiered_cache" { 9 } else { 0 };
             let output = if scenario == "zero" { 0 } else { 2 };
-            vec![reply(200, format!("event: message_start\ndata: {}\n\nevent: message_delta\ndata: {}\n\n", json!({"message":{"usage":{"input_tokens":input,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}), json!({"usage":{"output_tokens":output},"delta":{"stop_reason":"end_turn"}})).as_bytes())]
+            vec![reply(200, format!("event: message_start\ndata: {}\n\nevent: message_delta\ndata: {}\n\n", json!({"message":{"usage":{"input_tokens":input,"output_tokens":0,"cache_read_input_tokens":cached,"cache_creation_input_tokens":0}}}), json!({"usage":{"output_tokens":output},"delta":{"stop_reason":"end_turn"}})).as_bytes())]
         }
         "full" => vec![success(), success()],
         _ => vec![success()],
     };
     let server = Server::start(replies).await;
     let config = std::path::PathBuf::from(std::env::var_os("MELCHIOR_CONFIG").expect("config"));
-    let api = if matches!(scenario.as_str(), "estimate" | "zero") {
+    let api = if matches!(
+        scenario.as_str(),
+        "estimate" | "zero" | "tiered" | "tiered_cache"
+    ) {
         "anthropic-messages"
     } else {
         "openai-completions"
     };
-    std::fs::write(config.join("providers.lua"), format!(r#"melchior.provider("private-provider-canary", {{ name="Synthetic", api="{api}", base_url="{}", auth={{kind="none"}}, models={{{{id="private-model-canary",name="Synthetic",context_window=8192,max_tokens=128,cost={{input=3,output=5}}}}}} }})"#, server.url)).expect("owned provider");
+    let prices = if matches!(scenario.as_str(), "tiered" | "tiered_cache") {
+        "{input=3,output=5,tiers={{input_tokens_above=5,input=6,output=10,cache_read=2}}}"
+    } else {
+        "{input=3,output=5}"
+    };
+    std::fs::write(config.join("providers.lua"), format!(r#"melchior.provider("private-provider-canary", {{ name="Synthetic", api="{api}", base_url="{}", auth={{kind="none"}}, models={{{{id="private-model-canary",name="Synthetic",context_window=8192,max_tokens=128,cost={prices}}}}} }})"#, server.url)).expect("owned provider");
     let ledger = Ledger::at(&Ledger::kept(), "private-run-canary");
     let receiver = enable_local().expect("explicit isolated activation");
     if scenario == "full" {
@@ -253,13 +268,16 @@ async fn worker() {
             assert_eq!(last["reported_cost_micros"], 11);
             assert_eq!(ledger.spent(), 11);
         }
-        "estimate" | "zero" => {
+        "estimate" | "zero" | "tiered" | "tiered_cache" => {
+            let expected = match scenario.as_str() {
+                "estimate" => 40,
+                "tiered" => 80,
+                "tiered_cache" => 44,
+                _ => 0,
+            };
             assert!(last["reported_cost_micros"].is_null());
-            assert_eq!(
-                last["estimated_cost_micros"],
-                if scenario == "estimate" { 40 } else { 0 }
-            );
-            assert_eq!(ledger.spent(), if scenario == "estimate" { 40 } else { 0 });
+            assert_eq!(last["estimated_cost_micros"], expected);
+            assert_eq!(ledger.spent(), expected);
             if scenario == "zero" {
                 assert!(!Ledger::kept().exists());
             }
@@ -311,20 +329,20 @@ fn native_usage_snapshots_follow_accounting_and_cancellation() {
         "recover",
         "untracked",
         "estimate",
+        "tiered",
+        "tiered_cache",
         "zero",
         "full",
     ] {
         let root = melchior::scratch::Scratch::new("event-usage", scenario);
         std::fs::create_dir_all(root.join("cfg")).expect("config");
-        std::fs::create_dir_all(root.join("cache/melchior/models")).expect("cache");
         melchior::places::ensure(&root.join("r")).expect("runtime");
-        for provider in ["openrouter", "ollama"] {
-            std::fs::write(
-                root.join(format!("cache/melchior/models/{provider}.json")),
-                "[]",
-            )
-            .expect("offline cache");
-        }
+        std::fs::create_dir_all(root.join("cfg/after/plugin")).expect("offline plugins");
+        std::fs::write(
+            root.join("cfg/after/plugin/offline.lua"),
+            include_str!("fixtures/offline-providers.lua"),
+        )
+        .expect("offline providers");
         let mut command = Command::new(std::env::current_exe().expect("test executable"));
         command
             .args(["--exact", "worker", "--nocapture"])

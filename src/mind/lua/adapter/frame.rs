@@ -38,7 +38,9 @@ pub(super) fn observed(
             &model.thinking,
             model.max_tokens,
             &options.avoid,
+            options.disable_preferred_strict,
         ))?,
         omitted_images,
+        disable_preferred_strict: options.disable_preferred_strict,
     })
 }

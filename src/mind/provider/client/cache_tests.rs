@@ -71,6 +71,7 @@ async fn consecutive_marked_http_requests_preserve_frames_and_supplied_cache_acc
         system: Some("unchanged rules\r\n".into()),
         messages: vec![Message::user("first")],
         tools: vec![crate::mind::model::Tool {
+            strict: None,
             name: "lookup".into(),
             description: "Lookup".into(),
             parameters: json!({"type":"object","properties":{},"required":[]}),
@@ -138,7 +139,7 @@ async fn consecutive_marked_http_requests_preserve_frames_and_supplied_cache_acc
             counts
         );
         assert!(
-            (usage.price(model.cost) - price).abs() < 1e-12,
+            (usage.price(&model.cost) - price).abs() < 1e-12,
             "supplied-counter estimate round{round}"
         );
         context.messages.extend([

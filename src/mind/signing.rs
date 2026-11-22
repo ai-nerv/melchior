@@ -1,157 +1,100 @@
-//! `melchior auth` — signing in to a subscription, whose token expires and is renewed on the
-//! person's behalf rather than being a string they can put in a shell profile. The sign-in page
-//! opens in the person's own browser and is never rendered here.
+//! Provider authentication and the interactive command-line entry points.
+
+mod browser;
+pub mod manage;
 
 use crate::mind::provider::endpoint::{Auth, Provider};
-use crate::mind::provider::oauth::{self, Pkce, Store};
+use crate::mind::provider::oauth::{self, Store};
 use anyhow::{Context, Result, bail};
 
-/// Sign in to a provider.
 pub async fn login(id: &str) -> Result<()> {
     let provider = find(id)?;
-    let Auth::OAuth {
-        service,
-        authorize_url,
-        token_url,
-        client_id,
-        scopes,
-    } = &provider.auth
-    else {
-        bail!(
-            "{id} does not sign in; {}",
-            requirement_or_nothing(&provider)
-        );
-    };
-    // A provider can be in the catalog before this build knows how to sign in to it.
-    let (Some(authorize_url), Some(token_url), Some(client_id)) = (
-        authorize_url.as_ref(),
-        token_url.as_ref(),
-        client_id.as_ref(),
-    ) else {
-        bail!(
-            "this build has no sign-in details for {id}. Add `authorize_url`, `token_url` and \
-             `client_id` to its `auth` block in your own providers.lua to use one you have."
-        );
-    };
-
-    // Bound to the loopback interface before the URL is built, because the port is part of the
-    // redirect the authorization server is told to use and has to be the one actually waiting.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .context("listening for the browser to come back")?;
-    let port = listener.local_addr()?.port();
-    let redirect = format!("http://127.0.0.1:{port}");
-
-    let pkce = Pkce::generate().context("generating a proof key")?;
-    // The state is a second random value, checked on the way back. It is what stops a link
-    // somebody else crafted from completing a sign-in in this terminal.
-    let state = Pkce::generate()
-        .context("generating a state value")?
-        .verifier;
-    let url = oauth::authorize_url(authorize_url, client_id, &redirect, scopes, &pkce, &state);
-
-    println!("Sign in to {service} in your browser:\n\n  {url}\n");
-    open_browser(&url);
-    println!("Waiting for the callback…");
-
-    let callback = oauth::listen_for_code(&listener)?;
-    if callback.state != state {
-        bail!("the callback did not match this sign-in; nothing was saved");
+    if matches!(provider.auth, Auth::GitHubCopilot { .. }) {
+        crate::mind::provider::copilot::login(&provider, |device| {
+            println!(
+                "Open {} and enter code {} (expires in {} seconds).",
+                device.url, device.code, device.expires_in
+            );
+            Ok(())
+        })
+        .await?;
+        println!("Signed in to {}.", provider.name);
+        return Ok(());
     }
-
-    let tokens = oauth::exchange(
-        &crate::mind::provider::http().build()?,
-        token_url,
-        &[
-            ("grant_type", "authorization_code"),
-            ("code", &callback.code),
-            ("redirect_uri", &redirect),
-            ("client_id", client_id),
-            ("code_verifier", &pkce.verifier),
-        ],
-    )
-    .await?;
-
-    let _held = oauth::hold(id)?;
-    Store::amend(|store| store.put(id, tokens))?;
-    println!(
-        "Signed in to {service}. Credentials are in {}.",
-        oauth::path().display()
-    );
-    Ok(())
-}
-
-/// Forget a provider's credentials.
-pub fn logout(id: &str) -> Result<()> {
-    let _held = oauth::hold(id)?;
-    let mut forgotten = false;
-    Store::amend(|store| forgotten = store.forget(id))?;
-    if forgotten {
-        println!("Signed out of {id}.");
-    } else {
-        println!("Not signed in to {id}.");
-    }
-    Ok(())
-}
-
-/// What is signed in, and what is not.
-pub fn status() -> Result<()> {
-    let store = Store::load()?;
-    let loaded = crate::mind::catalog::Catalog::load(&crate::mind::catalog::Catalog::dir())?;
-    let now = oauth::now();
-
-    let mut any = false;
-    for provider in &loaded.providers {
-        if !matches!(provider.auth, Auth::OAuth { .. }) {
-            continue;
+    browser::login(&provider, |url| {
+        println!("Sign in to {} in your browser:\n\n  {url}\n", provider.name);
+        let mut command = std::process::Command::new("xdg-open");
+        crate::inherited::scrub(&mut command);
+        if let Ok(mut child) = command
+            .arg(url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
         }
-        any = true;
-        let state = match store.get(&provider.id) {
-            None => "not signed in".to_owned(),
-            // A stale token is renewed on the next request, so it is not reported as expired.
-            Some(tokens) if tokens.is_stale(now) => "signed in (will renew)".to_owned(),
-            Some(_) => "signed in".to_owned(),
-        };
-        println!("{:<14} {}", provider.id, state);
+        Ok(())
+    })
+    .await?;
+    println!("Signed in to {}.", provider.name);
+    Ok(())
+}
+
+pub fn logout(id: &str) -> Result<()> {
+    remove(id)?;
+    println!("Removed saved credentials for {id}. Environment keys are unchanged.");
+    Ok(())
+}
+
+fn remove(id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 256 {
+        bail!("invalid provider identity");
     }
-    if !any {
-        println!("No provider in your configuration signs in with `melchior auth`.");
+    let _held = oauth::hold(id)?;
+    Store::amend(|store| {
+        store.forget(id);
+        store.api_keys.remove(id);
+        store.attempts.remove(id);
+        store.configurations.remove(id);
+        store.copilot.remove(id);
+    })?;
+    Ok(())
+}
+
+fn save_key(provider: &Provider, key: String) -> Result<()> {
+    if !matches!(&provider.auth, Auth::ApiKey { vars } if !vars.is_empty()) {
+        bail!("this provider does not accept saved API keys");
+    }
+    if key.is_empty() || key.len() > 8192 || !key.bytes().all(|b| b.is_ascii_graphic()) {
+        bail!("API keys must contain 1–8192 printable ASCII characters without spaces");
+    }
+    let _held = oauth::hold(&provider.id)?;
+    Store::amend(|store| {
+        store.api_keys.insert(
+            provider.id.clone(),
+            oauth::SavedKey {
+                value: key,
+                configuration: provider.credential_scope(),
+            },
+        );
+    })?;
+    Ok(())
+}
+
+pub fn status() -> Result<()> {
+    for row in manage::list()? {
+        println!("{:<24} {:<12} {}", row.id, row.method, row.status);
     }
     Ok(())
 }
 
-/// One provider from the catalog, by id.
 fn find(id: &str) -> Result<Provider> {
     let catalog = crate::mind::catalog::Catalog::load(&crate::mind::catalog::Catalog::dir())?;
     catalog
         .providers
         .into_iter()
         .find(|p| p.id == id)
-        .with_context(|| {
-            format!("there is no provider called {id:?}; `melchior models --all` lists them")
-        })
-}
-
-/// How a provider says it is enabled, for the case where it is not by signing in.
-fn requirement_or_nothing(provider: &Provider) -> String {
-    let requirement = provider.auth.requirement();
-    if requirement.is_empty() {
-        "it needs no credential".to_owned()
-    } else {
-        requirement
-    }
-}
-
-/// Ask the desktop to open a URL, and shrug if it cannot: the URL is printed above regardless.
-fn open_browser(url: &str) {
-    let mut opening = std::process::Command::new("xdg-open");
-    // Not a member of the family, so it is started with none of the family's capability.
-    crate::inherited::scrub(&mut opening);
-    if let Err(why) = opening
-        .arg(url)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        crate::noted!("signing: xdg-open could not be started: {why}");
-    }
+        .context("unknown provider")
 }

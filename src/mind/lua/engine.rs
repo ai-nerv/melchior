@@ -345,6 +345,25 @@ const APIS: &str = "__melchior_apis";
 mod json_tests;
 
 impl Engine {
+    pub fn usable_apis(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.lua.enter(|ctx| {
+            if let Value::Table(apis) = ctx.get_global_value(APIS) {
+                for (key, value) in apis.iter(ctx) {
+                    if let (Value::String(name), Value::Table(api)) = (key, value)
+                        && ["request", "on_event"]
+                            .iter()
+                            .all(|method| matches!(api.get_value(ctx, *method), Value::Function(_)))
+                    {
+                        out.push(String::from_utf8_lossy(name.as_bytes()).into_owned());
+                    }
+                }
+            }
+        });
+        out.sort();
+        out
+    }
+
     /// The protocols a config registered.
     #[must_use]
     pub fn apis(&mut self) -> Vec<String> {

@@ -346,6 +346,7 @@ mod tests {
             id: "p/m".into(),
             provider: "p".into(),
             name: "m".into(),
+            display_name: Some("Model M".into()),
             api: "openai-completions".into(),
             context_window: Some(1),
             max_output: None,
@@ -355,6 +356,7 @@ mod tests {
             vision: false,
             reasons: false,
             ready: true,
+            setup: None,
             needs: None,
         };
         let mut as_json = Vec::new();

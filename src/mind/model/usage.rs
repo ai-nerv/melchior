@@ -23,7 +23,7 @@ pub struct Usage {
     /// not say. Read as a number of either kind, because it arrives from Lua.
     #[serde(default, deserialize_with = "whole")]
     pub cost_micros: u64,
-    /// Configured estimates for attempts with no positive provider cost; absent on legacy totals.
+    /// Known configured estimates for attempts with no positive provider cost.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -142,7 +142,8 @@ impl Usage {
 
     /// What these tokens cost at `cost`.
     #[must_use]
-    pub fn price(self, cost: Cost) -> f64 {
+    pub fn price(self, cost: &Cost) -> f64 {
+        let cost = cost.at(self.prompt_tokens());
         let per_million = |tokens: u64, rate: f64| tokens as f64 / 1_000_000.0 * rate;
         per_million(self.input, cost.input)
             + per_million(self.output, cost.output)
@@ -236,9 +237,9 @@ mod tests {
             ..Cost::default()
         };
         assert!(
-            (usage.price(cost) - 10.5).abs() < 1e-9,
+            (usage.price(&cost) - 10.5).abs() < 1e-9,
             "{}",
-            usage.price(cost)
+            usage.price(&cost)
         );
     }
 }

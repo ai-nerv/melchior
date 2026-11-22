@@ -13,7 +13,7 @@ impl Client {
     ) -> Result<(), ProviderError> {
         self.attempt(
             call,
-            &budget::Prepared::new(call, call.options),
+            &budget::Prepared::new(call, call.options)?,
             |delta, _| on_delta(delta),
             on_frame,
             &mut observing::Attempt::new(crate::mind::accounting::Trace::attempts()),
@@ -34,11 +34,14 @@ fn provider(url: &str) -> Provider {
         id: "local".into(),
         name: "Local".into(),
         base_url: Some(url.into()),
+        credential_origins: Vec::new(),
+        headers: Default::default(),
         api: crate::mind::provider::model::Api::OpenAiCompletions,
         auth: Auth::None,
         compat: None,
         models: Vec::new(),
         discover: false,
+        discovery: None,
         details: None,
         avoid: Vec::new(),
     }

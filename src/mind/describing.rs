@@ -124,27 +124,22 @@ pub fn describe(provider: &Provider, model: &Model) -> Described {
 /// This model's entry in the provider's `/models`, kept whole for a day: the list is large, and the
 /// card is opened far more often than it changes.
 fn listed(base: &str, key: Option<&str>, id: &str) -> Option<Value> {
-    let path = crate::mind::discovering::cache_path("openrouter-listing");
+    let path = crate::mind::discovering::cache::path(
+        "description",
+        &[base.as_bytes(), key.unwrap_or("").as_bytes()],
+    );
     let kept = path.as_ref().and_then(|path| {
-        let fresh = std::fs::metadata(path)
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|when| std::time::SystemTime::now().duration_since(when).ok())
-            .is_some_and(|age| age < crate::mind::discovering::FRESH);
-        fresh
-            .then(|| std::fs::read_to_string(path).ok())
+        let held = crate::mind::discovering::cache::read(path)?;
+        held.fresh
+            .then(|| serde_json::from_str::<Value>(&held.raw).ok())
             .flatten()
-            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
     });
     let body = match kept {
         Some(body) => body,
         None => {
             let body = get(&format!("{}/models", base.trim_end_matches('/')), key)?;
             if let Some(path) = &path {
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let _ = std::fs::write(path, body.to_string());
+                let _ = crate::mind::discovering::cache::write(path, body.to_string().as_bytes());
             }
             body
         }

@@ -32,6 +32,23 @@ fn constructors_preserve_empty_containers_null_positions_and_identity() {
 }
 
 #[test]
+fn exact_decoder_preserves_json_data_and_leaves_control_decode_unchanged() {
+    let mut engine = Engine::new();
+    let result = evaluate(
+        &mut engine,
+        r#"
+        local j = melchior.json
+        assert(j.decode('null') == nil and j.decode('{"v":null}').v == nil)
+        assert(j.decode_value('broken') == nil and j.decode_value(42) == nil)
+        local value = j.decode_value('[null,[],{},18446744073709551615,-9223372036854775808]')
+        assert(value[1] == j.null)
+        result = j.decode_value(j.encode(value))
+    "#,
+    );
+    assert_eq!(result, json!([null, [], {}, u64::MAX, i64::MIN]));
+}
+
+#[test]
 fn typed_arrays_sort_integer_entries_and_refuse_holes_or_noninteger_keys() {
     let mut engine = Engine::new();
     let result = evaluate(
@@ -149,8 +166,10 @@ fn exact_request_payloads_preserve_scalars_and_nested_literal_metadata_keys() {
         melchior.api('echo', {request = function(model, ctx, opts)
             assert(model.optional == nil and opts.optional == nil)
             local p, a, s = ctx.tools[1].parameters, ctx.messages[1].content[1].arguments, opts.schema.schema
+            local added = ctx.messages[2].content[1].added[1]
+            assert(added.optional == nil)
             assert(p == melchior.json.null or p ~= nil)
-            return {parameters = p, arguments = a, schema = s}
+            return {parameters = p, arguments = a, schema = s, added = added.parameters}
         end})
     "#, "echo.lua").expect("register");
     for value in [
@@ -165,7 +184,7 @@ fn exact_request_payloads_preserve_scalars_and_nested_literal_metadata_keys() {
         json!({}),
         json!({"__metatable":null,"cache_control":[null,[],{}],"__melchior_json_types":{}}),
     ] {
-        let context = json!({"tools":[{"parameters":value}], "messages":[{"content":[{"type":"tool_call","arguments":value}]}]});
+        let context = json!({"tools":[{"parameters":value}], "messages":[{"content":[{"type":"tool_call","arguments":value}]},{"content":[{"type":"tool_changes","added":[{"parameters":value,"optional":null}]}]}]});
         let options = json!({"schema":{"schema":value},"optional":null});
         let result = engine.call_api(
             "echo",
@@ -174,7 +193,7 @@ fn exact_request_payloads_preserve_scalars_and_nested_literal_metadata_keys() {
         );
         assert_eq!(
             result,
-            Some(json!({"parameters":value,"arguments":value,"schema":value}))
+            Some(json!({"parameters":value,"arguments":value,"schema":value,"added":value}))
         );
     }
 }
