@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.8.1] - 2026-11-22
+
+### <!-- 0 -->⛰️  Features
+
+- Expand catalog and auth
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Publish to cache.bresilla.com
+
+### Build
+
+- Patch the rustls-webpki advisories
+
 ## [0.8.0] - 2026-10-29
 
 ### <!-- 7 -->⚙️ Miscellaneous Tasks
