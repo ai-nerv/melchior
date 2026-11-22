@@ -56,6 +56,7 @@ fn context() -> Context {
     Context {
         system: Some("unchanged rules\r\n".into()),
         tools: vec![Tool {
+            strict: None,
             name: "lookup".into(),
             description: "Lookup".into(),
             parameters: json!({"type":"object","required":[],"properties":{}}),

@@ -1,11 +1,8 @@
-//! What melchior can talk to, read out of Lua: `providers.lua` says which endpoints exist and
-//! what they serve, `apis.lua` says how each is spoken to. Nothing in here resolves a
-//! credential — whether a provider is ready is answered by looking for the variable it names and
-//! never by reading it, because a card crosses a socket and a key must not.
+//! Lua provider declarations, model cards and secret-free setup status.
 
 use crate::mind::lua::LuaError;
 use crate::mind::lua::engine::Engine;
-use crate::mind::provider::endpoint::{Auth, Provider};
+use crate::mind::provider::endpoint::Provider;
 use crate::mind::provider::model::Model;
 use crate::mind::wire::Card;
 use std::path::{Path, PathBuf};
@@ -19,6 +16,14 @@ const PROVIDERS: &str = include_str!("../../config/providers.lua");
 #[cfg(test)]
 mod cache_tests;
 
+mod declarations;
+mod imports;
+mod readiness;
+use declarations::assemble;
+
+#[cfg(test)]
+mod declaration_tests;
+
 /// Everything a config declared.
 pub struct Catalog {
     /// Discovery failures, identified by provider rather than endpoint or credentials.
@@ -27,6 +32,7 @@ pub struct Catalog {
     pub providers: Vec<Provider>,
     /// The VM the protocol descriptions live in, because an adapter *is* a Lua function.
     pub engine: Engine,
+    protocols: std::collections::BTreeSet<String>,
 }
 
 impl Catalog {
@@ -95,17 +101,20 @@ impl Catalog {
         let providers: Vec<Provider> = config
             .all("provider")
             .into_iter()
-            .filter_map(|(name, value)| assemble(name, value))
-            .collect();
+            .map(|(name, value)| assemble(name, value))
+            .collect::<Result<_, _>>()?;
         drop(config);
+        let protocols = engine.usable_apis().into_iter().collect();
         // Ask the providers that asked to be asked.
         let mut providers = providers;
         let discovery_failed =
             crate::mind::discovering::discover_with_refresh(&mut providers, refresh);
+        crate::mind::provider::copilot::apply_catalog(&mut providers);
         Ok(Self {
             providers,
             engine,
             discovery_failed,
+            protocols,
         })
     }
 
@@ -131,13 +140,22 @@ impl Catalog {
     /// Every model, as a card.
     #[must_use]
     pub fn cards(&self) -> Vec<Card> {
+        let store = readiness::store(&self.providers);
+        let now = crate::mind::provider::oauth::now();
         self.providers
             .iter()
             .flat_map(|provider| {
+                let setup = readiness::provider(provider, &store, now);
                 provider
                     .models
                     .iter()
-                    .map(|model| card(provider, model))
+                    .map(|model| {
+                        let mut setup = readiness::model(provider, model, setup.clone());
+                        if !self.protocols.contains(model.api.as_str()) {
+                            setup.state = crate::mind::wire::SetupState::ProtocolUnavailable;
+                        }
+                        card(provider, model, setup)
+                    })
                     .collect::<Vec<_>>()
             })
             .collect()
@@ -151,34 +169,6 @@ impl Catalog {
         let model = provider.models.iter().find(|m| m.id == model)?;
         Some((provider, model))
     }
-}
-
-/// One declaration, as a `Provider`. The registrar keys by name and the value does not repeat
-/// it, so the id, the owning provider and the interface are put back onto each model here.
-fn assemble(name: &str, value: &serde_json::Value) -> Option<Provider> {
-    let mut value = value.clone();
-    let object = value.as_object_mut()?;
-    object.insert("id".into(), serde_json::Value::String(name.to_owned()));
-    let api = object.get("api").cloned();
-    if let Some(serde_json::Value::Array(models)) = object.get_mut("models") {
-        for model in models.iter_mut() {
-            let Some(model) = model.as_object_mut() else {
-                continue;
-            };
-            model.insert(
-                "provider".into(),
-                serde_json::Value::String(name.to_owned()),
-            );
-            // A model may name its own interface, one provider serving several, and takes the
-            // provider's only when it does not.
-            if !model.contains_key("api")
-                && let Some(api) = api.clone()
-            {
-                model.insert("api".into(), api);
-            }
-        }
-    }
-    serde_json::from_value(value).ok()
 }
 
 #[cfg(test)]
@@ -213,59 +203,67 @@ mod price_presence_tests {
         let actual: Vec<_> = provider
             .models
             .iter()
-            .map(|model| usage.price(model.cost))
+            .map(|model| usage.price(&model.cost))
             .collect();
         assert_eq!(actual, vec![3.0, 0.0, 1.0]);
         for model in provider.models {
             let value = serde_json::to_value(&model).expect("model");
             assert_eq!(value["cost"]["presence"]["version"], 1);
             let reloaded: Model = serde_json::from_value(value).expect("model reload");
-            assert_eq!(usage.price(model.cost), usage.price(reloaded.cost));
+            assert_eq!(usage.price(&model.cost), usage.price(&reloaded.cost));
         }
     }
 }
 
 /// One model, described without naming a secret. `needs` is the first of the several variables
 /// a key-authenticated provider would accept, not all of them.
-fn card(provider: &Provider, model: &Model) -> Card {
-    let needs = match &provider.auth {
-        Auth::ApiKey { vars } => vars.first().cloned(),
-        _ => None,
-    };
-    // Ready when nothing is wanted, or when one accepted name is set to something non-empty: an
-    // empty variable is how a shell says unset, and treating it as configured yields a 401.
-    let ready = match &provider.auth {
-        Auth::ApiKey { vars } => vars
-            .iter()
-            .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty())),
-        Auth::None => true,
-        // OAuth and the cloud signatures cannot be answered from the environment.
-        _ => false,
-    };
+fn card(provider: &Provider, model: &Model, setup: crate::mind::wire::Setup) -> Card {
+    let ready = setup.state == crate::mind::wire::SetupState::Ready;
+    let needs = setup
+        .variables
+        .first()
+        .and_then(|group| group.first())
+        .cloned();
     Card {
         vision: model.accepts_images(),
         id: format!("{}/{}", provider.id, model.id),
         provider: provider.id.clone(),
         name: model.id.clone(),
+        display_name: (!model.name.trim().is_empty() && model.name != model.id)
+            .then(|| model.name.clone()),
         api: serde_json::to_value(model.api)
             .ok()
             .and_then(|value| value.as_str().map(str::to_owned))
             .unwrap_or_default(),
         context_window: Some(model.context_window).filter(|n| *n > 0),
         max_output: Some(model.max_tokens).filter(|n| *n > 0),
-        pricing: model.pricing.clone().or_else(|| {
-            let positive = |rate: f64| (rate.is_finite() && rate > 0.0).then(|| rate.to_string());
-            let input = positive(model.cost.input);
-            let output = positive(model.cost.output);
-            (input.is_some() || output.is_some())
-                .then_some(crate::mind::model::Pricing { input, output })
-        }),
+        pricing: model.pricing.clone().or_else(|| model.cost.pricing()),
         popularity_rank: model.popularity_rank,
-        capabilities: model.capabilities.clone(),
+        capabilities: Some(session_capabilities(model)),
         reasons: model.reasoning,
         ready,
         needs: if ready { None } else { needs },
+        setup: Some(setup),
     }
+}
+
+fn session_capabilities(model: &Model) -> crate::mind::model::Capabilities {
+    use crate::mind::{model::Capabilities, provider::model::Modality};
+    let mut caps =
+        crate::mind::provider::thinking::capabilities(model).unwrap_or_else(|| Capabilities {
+            input: model
+                .input
+                .iter()
+                .map(|input| match input {
+                    Modality::Text => "text".into(),
+                    Modality::Image => "image".into(),
+                })
+                .collect(),
+            output: vec!["text".into()],
+            ..Capabilities::default()
+        });
+    caps.session_identity = Some(true);
+    caps
 }
 
 #[cfg(test)]
@@ -331,18 +329,27 @@ mod tests {
             })
         );
         assert_eq!(opus.popularity_rank, None);
-        let chat = find("deepseek/deepseek-chat");
+        let chat = find("deepseek/deepseek-v4-pro");
         assert!(!chat.vision);
         assert_eq!(
             chat.pricing.as_ref().and_then(|p| p.output.as_deref()),
-            Some("0.42")
+            Some("3.96")
+        );
+        let flash = find("deepseek/deepseek-flash");
+        assert!(flash.vision);
+        assert_eq!(
+            flash.pricing.as_ref().and_then(|p| p.output.as_deref()),
+            Some("1.2")
         );
         let jev = find("decisions/typesafe/jev-1.13");
         assert_eq!(
             jev.pricing.as_ref().and_then(|p| p.input.as_deref()),
             Some("0.042")
         );
-        assert_eq!(jev.pricing.as_ref().and_then(|p| p.output.as_deref()), None);
+        assert_eq!(
+            jev.pricing.as_ref().and_then(|p| p.output.as_deref()),
+            Some("0")
+        );
     }
 }
 

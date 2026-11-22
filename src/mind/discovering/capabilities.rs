@@ -42,9 +42,13 @@ pub(super) fn from_entry(entry: &Value) -> Capabilities {
     let output = names(entry.pointer("/architecture/output_modalities"));
     let thinking = names(entry.pointer("/reasoning/supported_efforts"));
     Capabilities {
+        session_identity: None,
         input,
         output,
         thinking: (!thinking.is_empty()).then_some(thinking),
+        thinking_levels: None,
+        strict_tools: None,
+        input_limits: None,
     }
 }
 

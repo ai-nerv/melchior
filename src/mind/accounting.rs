@@ -76,7 +76,7 @@ impl Trace {
             let mut state = state.borrow_mut();
             state.current = Totals {
                 measured: usage,
-                estimate: estimate(native, usage, state.price),
+                estimate: estimate(native, usage, &state.price),
             };
         }
     }
@@ -178,7 +178,7 @@ impl State {
     }
 }
 
-fn estimate(native: Usage, measured: MeasuredUsage, price: Cost) -> Option<u64> {
+fn estimate(native: Usage, measured: MeasuredUsage, price: &Cost) -> Option<u64> {
     if native.cost_micros > 0 {
         return Some(0);
     }
@@ -189,23 +189,8 @@ fn estimate(native: Usage, measured: MeasuredUsage, price: Cost) -> Option<u64> 
         cache_write: measured.cache_write?,
         ..Usage::default()
     };
-    for (tokens, rate, explicit_zero) in [
-        (usage.input, price.input, false),
-        (usage.output, price.output, false),
-        (
-            usage.cache_read,
-            price.cache_read_rate(),
-            price.presence.version == 1 && price.presence.cache_read && price.cache_read == 0.0,
-        ),
-        (
-            usage.cache_write,
-            price.cache_write_rate(),
-            price.presence.version == 1 && price.presence.cache_write && price.cache_write == 0.0,
-        ),
-    ] {
-        if tokens > 0 && (!rate.is_finite() || rate < 0.0 || (rate == 0.0 && !explicit_zero)) {
-            return None;
-        }
+    if !price.at(usage.prompt_tokens()).known(usage) {
+        return None;
     }
     let cost = spending::cost(usage, price);
     (cost != u64::MAX).then_some(cost)
@@ -214,6 +199,22 @@ fn estimate(native: Usage, measured: MeasuredUsage, price: Cost) -> Option<u64> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn telemetry_estimates_use_the_same_context_tier_and_explicit_free_rates() {
+        let cost: Cost = serde_json::from_value(serde_json::json!({"input":1,"output":0,
+            "tiers":[{"input_tokens_above":100,"input":2,"cache_read":0}]}))
+        .expect("rates");
+        let mut measured = Totals::zero().measured;
+        measured.input = Some(101);
+        measured.output = Some(5);
+        assert_eq!(estimate(Usage::default(), measured, &cost), Some(202));
+        measured.input = Some(1);
+        measured.cache_read = Some(100);
+        assert_eq!(estimate(Usage::default(), measured, &cost), Some(2));
+        measured.input = None;
+        assert_eq!(estimate(Usage::default(), measured, &cost), None);
+    }
 
     #[test]
     fn revisions_exhaust_without_wrapping() {
@@ -260,10 +261,13 @@ mod tests {
             input: 3.0,
             ..Default::default()
         };
-        assert_eq!(estimate(Usage::default(), measured, price), Some(3_000_000));
-        assert_eq!(estimate(Usage::default(), measured, Cost::default()), None);
+        assert_eq!(
+            estimate(Usage::default(), measured, &price),
+            Some(3_000_000)
+        );
+        assert_eq!(estimate(Usage::default(), measured, &Cost::default()), None);
         measured.output = None;
-        assert_eq!(estimate(Usage::default(), measured, price), None);
+        assert_eq!(estimate(Usage::default(), measured, &price), None);
         assert_eq!(
             estimate(
                 Usage {
@@ -271,19 +275,19 @@ mod tests {
                     ..Default::default()
                 },
                 measured,
-                price
+                &price
             ),
             Some(0)
         );
         let mut cached = Totals::zero().measured;
         cached.cache_read = Some(100);
         let free: Cost = serde_json::from_value(serde_json::json!({"cache_read":0})).expect("cost");
-        assert_eq!(estimate(Usage::default(), cached, free), Some(0));
+        assert_eq!(estimate(Usage::default(), cached, &free), Some(0));
         assert_eq!(
             estimate(
                 Usage::default(),
                 cached,
-                Cost {
+                &Cost {
                     cache_read: -1.0,
                     ..free
                 }

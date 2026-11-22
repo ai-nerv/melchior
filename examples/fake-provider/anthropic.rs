@@ -126,7 +126,7 @@ impl Encoder {
                 out.push(("message_stop", json!({"type":"message_stop"})));
                 self.finished = true;
             }
-            Event::Usage { .. } | Event::Metrics(_) => {
+            Event::Usage { .. } | Event::Metrics(_) | Event::Sse { .. } => {
                 return Err(std::io::Error::other(
                     "Anthropic counts belong in turn.usage",
                 ));

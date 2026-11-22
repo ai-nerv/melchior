@@ -689,6 +689,9 @@ fn brief(project: Option<&str>, asked: &std::collections::BTreeMap<String, Strin
 /// `melchior auth login|logout|status`, on a runtime of its own for the loopback redirect.
 fn signing(mut args: impl Iterator<Item = String>) -> std::io::Result<()> {
     let what = args.next().unwrap_or_else(|| "status".to_owned());
+    if what == "--stdio" {
+        return melchior::mind::signing::manage::stdio();
+    }
     let who = args.next().unwrap_or_default();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

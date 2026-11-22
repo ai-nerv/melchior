@@ -112,8 +112,8 @@ async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
         });
         return;
     }
-    let mut meter = Meter::new(ledger, model.cost);
-    let trace = crate::mind::accounting::Trace::accounted(model.cost);
+    let mut meter = Meter::new(ledger, model.cost.clone());
+    let trace = crate::mind::accounting::Trace::accounted(model.cost.clone());
     let mut say = |said: Said| {
         if let Said::Spent { usage } = &said {
             trace.settled(meter.heard_observed(*usage));
@@ -153,6 +153,10 @@ async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
     };
 
     let options = Options {
+        session_id: asked.wants.session_id.clone(),
+        provider_session: None,
+        continuation_binding: None,
+        disable_preferred_strict: asked.wants.disable_preferred_strict,
         thinking: asked.wants.thinking,
         max_tokens: asked.wants.max_tokens,
         max_tokens_automatic: asked.wants.max_tokens_automatic,
@@ -184,8 +188,8 @@ async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
     // twice. A cell rather than a channel: this is one thread and the cost is a borrow check.
     let ended = std::cell::Cell::new(None);
     let say = std::cell::RefCell::new(say);
-    let tally = std::cell::Cell::new(Tally {
-        price: model.cost,
+    let tally = std::cell::RefCell::new(Tally {
+        price: model.cost.clone(),
         ..Tally::default()
     });
     let outcome = Client::new()
@@ -195,9 +199,7 @@ async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
                 Said::Stop { reason } => ended.set(Some(reason)),
                 Said::Spent { usage } => {
                     trace.measured(usage, measured);
-                    let mut held = tally.get();
-                    let usage = held.heard(usage);
-                    tally.set(held);
+                    let usage = tally.borrow_mut().heard(usage);
                     (say.borrow_mut())(Said::Spent { usage });
                 }
                 said => (say.borrow_mut())(said),
@@ -205,9 +207,7 @@ async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
             // Said during the wait, not after it. A broker showing a spinner has no other way to
             // tell somebody that forty seconds of nothing is a backoff rather than a hang.
             |retry| {
-                let mut held = tally.get();
-                let paid = held.retried();
-                tally.set(held);
+                let paid = tally.borrow_mut().retried();
                 (say.borrow_mut())(Said::Retrying {
                     attempt: retry.attempt,
                     of: retry.max_attempts,
@@ -228,7 +228,7 @@ async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
     let mut say = say.into_inner();
     match outcome {
         Err(why) => {
-            let total = tally.get().total();
+            let total = tally.borrow().total();
             if total != Usage::default() {
                 say(Said::Spent { usage: total });
             }
@@ -250,7 +250,7 @@ async fn asking(asked: &Ask, mut say: impl FnMut(Said)) {
 
 /// What one ask has cost across its attempts: the ones that failed, and the one in progress as it
 /// last said. Every `Spent` the caller hears is the whole of it.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct Tally {
     paid: Usage,
     this: Usage,
@@ -261,17 +261,19 @@ impl Tally {
     /// The attempt in progress said it has cost `usage` so far; the whole ask's cost.
     fn heard(&mut self, usage: Usage) -> Usage {
         self.this.observe(usage);
-        self.this.estimated_micros = Some(if self.this.cost_micros > 0 {
-            0
+        self.this.estimated_micros = if self.this.cost_micros > 0 {
+            Some(0)
         } else {
-            spending::cost(
+            let estimate = spending::cost(
                 Usage {
                     estimated_micros: None,
                     ..self.this
                 },
-                self.price,
-            )
-        });
+                &self.price,
+            );
+            (estimate > 0 || self.price.at(self.this.prompt_tokens()).known(self.this))
+                .then_some(estimate)
+        };
         self.total()
     }
 
@@ -282,7 +284,7 @@ impl Tally {
         self.paid
     }
 
-    fn total(self) -> Usage {
+    fn total(&self) -> Usage {
         let mut total = self.paid;
         total.add(self.this);
         total
@@ -491,9 +493,67 @@ mod tally_tests {
             input,
             output,
             cost_micros,
-            estimated_micros: Some(0),
+            estimated_micros: (cost_micros > 0).then_some(0),
             ..Usage::default()
         }
+    }
+
+    #[test]
+    fn unknown_rates_do_not_become_zero_estimates_but_explicit_free_rates_do() {
+        let tokens = Usage {
+            input: 60,
+            output: 20,
+            cache_read: 40,
+            ..Usage::default()
+        };
+        let mut unknown = Tally::default();
+        assert_eq!(unknown.heard(tokens).estimated_micros, None);
+        assert_eq!(unknown.retried().estimated_micros, None);
+        assert_eq!(unknown.heard(tokens).estimated_micros, None);
+        let mut free = Tally {
+            price: serde_json::from_value(serde_json::json!({
+                "input":0,"output":0,"cache_read":0,"cache_write":0
+            }))
+            .expect("explicit free prices"),
+            ..Default::default()
+        };
+        assert_eq!(free.heard(tokens).estimated_micros, Some(0));
+        let mut billed = Tally::default();
+        let billed = billed.heard(Usage {
+            cost_micros: 9,
+            ..tokens
+        });
+        assert_eq!(billed.cost_micros, 9);
+        assert_eq!(billed.estimated_micros, Some(0));
+        let mut partial = Tally {
+            price: crate::mind::model::Cost {
+                input: 3.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(partial.heard(tokens).estimated_micros, Some(300));
+        partial.retried();
+        assert_eq!(partial.heard(tokens).estimated_micros, Some(600));
+    }
+
+    #[test]
+    fn context_tiers_are_selected_per_attempt_not_for_accumulated_retry_tokens() {
+        let mut tally = Tally {
+            price: serde_json::from_value(serde_json::json!({"input":1,
+            "tiers":[{"input_tokens_above":100,"input":2}]}))
+            .expect("rates"),
+            ..Default::default()
+        };
+        assert_eq!(tally.heard(usage(75, 0, 0)).charged_micros(), 75);
+        tally.retried();
+        assert_eq!(tally.heard(usage(75, 0, 0)).charged_micros(), 150);
+        assert_eq!(tally.heard(usage(101, 0, 0)).charged_micros(), 277);
+        assert_eq!(tally.heard(usage(99, 0, 0)).charged_micros(), 277);
+        let reported = tally.heard(usage(101, 0, 7));
+        assert_eq!(reported.estimated_micros, Some(75));
+        assert_eq!(reported.cost_micros, 7);
+        assert_eq!(reported.charged_micros(), 82);
     }
 
     #[test]

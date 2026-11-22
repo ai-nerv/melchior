@@ -21,11 +21,13 @@ pub(super) fn context() -> Context {
         messages: vec![Message::user("hi")],
         tools: vec![
             Tool {
+                strict: None,
                 name: "first".into(),
                 description: "First".into(),
                 parameters: json!({"type":"object"}),
             },
             Tool {
+                strict: None,
                 name: "last".into(),
                 description: "Last".into(),
                 parameters: json!({"type":"object","required":[],

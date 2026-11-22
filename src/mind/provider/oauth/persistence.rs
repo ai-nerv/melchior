@@ -21,6 +21,7 @@ fn store() -> Store {
             access: "synthetic-access".into(),
             refresh: Some("synthetic-refresh".into()),
             expires_at: 1000,
+            binding: None,
         },
     );
     store
@@ -39,6 +40,7 @@ fn tokens(provider: &str) -> Tokens {
         access: format!("{provider}-access"),
         refresh: Some(format!("{provider}-refresh")),
         expires_at: 2000,
+        binding: None,
     }
 }
 
@@ -138,6 +140,7 @@ fn a_refresh_without_a_replacement_keeps_the_stored_refresh_token() {
             access: "renewed".into(),
             refresh: None,
             expires_at: 2000,
+            binding: None,
         },
     );
     let held = store.get("test").expect("tokens");
@@ -149,6 +152,7 @@ fn a_refresh_without_a_replacement_keeps_the_stored_refresh_token() {
             access: "again".into(),
             refresh: Some("rotated".into()),
             expires_at: 3000,
+            binding: None,
         },
     );
     let held = store.get("test").expect("tokens");

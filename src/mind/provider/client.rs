@@ -4,13 +4,18 @@
 use crate::mind::provider::Unanswered;
 use crate::mind::provider::api::{Adapter, Delta, Options};
 use crate::mind::provider::control;
-use crate::mind::provider::endpoint::{Auth, Provider};
+#[cfg(test)]
+use crate::mind::provider::endpoint::Auth;
+use crate::mind::provider::endpoint::Provider;
 use crate::mind::provider::model::Model;
 use crate::mind::provider::retry::RetryClass;
 
 mod budget;
+mod credentials;
+mod input_limits;
 mod observing;
 mod overflow;
+mod session;
 
 #[cfg(test)]
 mod cache_tests;
@@ -19,7 +24,18 @@ mod overflow_tests;
 #[cfg(test)]
 mod refusing;
 #[cfg(test)]
+mod responses;
+
+#[cfg(test)]
+mod anthropic;
+
+#[cfg(test)]
+mod completions;
+#[cfg(test)]
 mod streaming;
+
+#[cfg(test)]
+mod strict_tests;
 
 /// How many times a request is made before the failure is the answer.
 const MAX_ATTEMPTS: u32 = 4;
@@ -49,6 +65,7 @@ use futures_util::StreamExt;
 /// Why a turn could not be streamed.
 #[derive(Debug, thiserror::Error)]
 pub struct ProviderError {
+    pub strict_tool_limit: bool,
     pub class: RetryClass,
     pub message: String,
     pub overflow: Option<crate::mind::model::overflow::Detail>,
@@ -68,6 +85,7 @@ impl std::fmt::Display for ProviderError {
 impl ProviderError {
     fn new(class: RetryClass, message: impl Into<String>) -> Self {
         Self {
+            strict_tool_limit: false,
             class,
             message: message.into(),
             again: class.is_retryable(),
@@ -171,7 +189,13 @@ impl Client {
     ) -> Result<(), ProviderError> {
         let mut attempt = 1;
         let mut observed = observing::Attempt::new(trace.clone());
-        let mut prepared = budget::Prepared::new(call, call.options);
+        let mut prepared = match budget::Prepared::new(call, call.options) {
+            Ok(prepared) => prepared,
+            Err(why) => {
+                observed.finish(false);
+                return Err(why);
+            }
+        };
         loop {
             // Deltas reach the caller as they arrive, so `on_retry` is the caller's signal to
             // retract whatever it has already published before the next attempt starts.
@@ -182,7 +206,9 @@ impl Client {
             match outcome {
                 Ok(()) => return Ok(()),
                 Err(why) if attempt < MAX_ATTEMPTS => {
-                    let lowered = prepared.lowered(call, &why);
+                    let lowered = prepared
+                        .lowered(call, &why)
+                        .or_else(|| prepared.without_preferred_strict(call, &why));
                     if lowered.is_none() && !why.again {
                         return Err(why);
                     }
@@ -235,41 +261,74 @@ impl Client {
             model,
             ..
         } = call;
-        let Some(base_url) = provider.base_url.as_deref() else {
-            return Err(ProviderError::new(
+        let invalid = |field: &str| {
+            ProviderError::new(
                 RetryClass::Invalid,
-                format!("{} has no endpoint configured", provider.id),
-            ));
+                format!("{}: invalid or unbound {field}", provider.id),
+            )
         };
-        // Resolved per attempt rather than at catalog load: an OAuth token has a lifetime.
-        let key = match credential(&self.http, provider).await {
-            Ok(key) => key,
-            Err(why) => return Err(ProviderError::new(RetryClass::Auth, why.to_string())),
-        };
-        if key.is_none() && !matches!(provider.auth, crate::mind::provider::endpoint::Auth::None) {
-            return Err(ProviderError::new(
-                RetryClass::Auth,
-                format!("{}: {}", provider.id, provider.auth.requirement()),
-            ));
-        }
-
-        let mut request = self.http.post(adapter.endpoint(base_url, model));
-        for (name, value) in adapter.headers(key.as_deref()) {
-            // A header that cannot be built is the request's fault, and asking again repeats it.
-            let (Ok(named), Ok(valued)) = (
-                reqwest::header::HeaderName::from_bytes(name.as_bytes()),
-                reqwest::header::HeaderValue::from_str(&value),
-            ) else {
+        let base_url = super::routing::base(provider, model).map_err(invalid)?;
+        let endpoint = adapter
+            .request_endpoint(base_url, model, &prepared.body)
+            .map_err(|why| ProviderError::new(RetryClass::Invalid, why).finally())?;
+        let mut url = super::routing::destination(provider, model, &endpoint).map_err(invalid)?;
+        let mut headers = reqwest::header::HeaderMap::new();
+        let mut authenticated = None;
+        credentials::with(&self.http, provider, |credential| {
+            if credential
+                .models
+                .as_ref()
+                .is_some_and(|models| !models.contains(&model.id))
+            {
                 return Err(ProviderError::new(
-                    RetryClass::Invalid,
-                    format!(
-                        "{}: the `{name}` header cannot be sent as it stands — a key with a space \
-                         or a line break in it, perhaps",
-                        provider.id
-                    ),
-                ));
-            };
-            request = request.header(named, valued);
+                    RetryClass::Auth,
+                    "This model is not enabled for the signed-in Copilot account",
+                )
+                .finally());
+            }
+            if let Some(base) = &credential.endpoint {
+                let endpoint = adapter
+                    .request_endpoint(base, model, &prepared.body)
+                    .map_err(|_| invalid("Copilot endpoint"))?;
+                url = super::copilot::destination(provider, &endpoint)
+                    .map_err(|_| invalid("Copilot endpoint"))?;
+                if url.origin()
+                    != super::copilot::destination(provider, base)
+                        .map_err(|_| invalid("Copilot endpoint"))?
+                        .origin()
+                {
+                    return Err(invalid("Copilot endpoint"));
+                }
+            }
+            headers = super::routing::headers(
+                provider,
+                model,
+                adapter.headers(credential.key.as_deref()),
+            )
+            .map_err(invalid)?;
+            if matches!(provider.auth, super::endpoint::Auth::GitHubCopilot { .. }) {
+                super::copilot::headers(
+                    call.context,
+                    &mut headers,
+                    credential.key.as_deref().unwrap_or_default(),
+                )
+                .map_err(|_| invalid("Copilot request headers"))?;
+            }
+            authenticated =
+                prepared.bound(call, credential.binding(provider, &headers)?, url.as_str())?;
+            session::headers(
+                model,
+                authenticated.as_ref().and_then(budget::Prepared::session),
+                &mut headers,
+            )
+            .map_err(|why| ProviderError::new(RetryClass::Invalid, why).finally())?;
+            Ok(())
+        })
+        .await?;
+        let prepared = authenticated.as_ref().unwrap_or(prepared);
+        let mut request = self.http.post(url);
+        for (name, value) in &headers {
+            request = request.header(name.clone(), value.clone());
         }
         if let Some(frame) = prepared.frame {
             on_frame(frame);
@@ -330,6 +389,8 @@ impl Client {
                 ),
             );
             refused.after = after;
+            refused.strict_tool_limit =
+                super::strict::limit_error(model.api, status.as_u16(), &detail);
             refused.overflow = overflow::classified(model.api, status.as_u16(), class, &detail);
             return Err(refused);
         }
@@ -640,79 +701,6 @@ fn unleaked(said: &str, provider: &str) -> Result<(), ProviderError> {
         RetryClass::Transport,
         format!("{provider} wrote a tool call as text"),
     ))
-}
-
-/// The credential to send, renewed if it was about to expire. The exchange is not retried: if the
-/// provider will not renew, signing in again is the only thing that helps.
-async fn credential(
-    http: &crate::mind::provider::Http,
-    provider: &Provider,
-) -> Result<Option<String>, crate::mind::provider::oauth::Error> {
-    let Auth::OAuth {
-        token_url: Some(token_url),
-        client_id: Some(client_id),
-        ..
-    } = &provider.auth
-    else {
-        return Ok(provider.auth.resolve());
-    };
-
-    let store = crate::mind::provider::oauth::Store::load()?;
-    let tokens = store
-        .get(&provider.id)
-        .ok_or_else(|| crate::mind::provider::oauth::Error::NotSignedIn(provider.id.clone()))?;
-    if !tokens.is_stale(crate::mind::provider::oauth::now()) {
-        return Ok(Some(tokens.access.clone()));
-    }
-
-    // Claim this provider before spending its refresh token, so that two processes do not both
-    // rotate it, and then look again: whoever held the claim may have just renewed it.
-    let id = provider.id.clone();
-    let _held = off_thread(move || crate::mind::provider::oauth::hold(&id)).await?;
-    let store = crate::mind::provider::oauth::Store::load()?;
-    let tokens = store
-        .get(&provider.id)
-        .ok_or_else(|| crate::mind::provider::oauth::Error::NotSignedIn(provider.id.clone()))?;
-    if !tokens.is_stale(crate::mind::provider::oauth::now()) {
-        return Ok(Some(tokens.access.clone()));
-    }
-    let refresh = tokens
-        .refresh
-        .clone()
-        .ok_or_else(|| crate::mind::provider::oauth::Error::Expired(provider.id.clone()))?;
-
-    let renewed = crate::mind::provider::oauth::exchange(
-        http,
-        token_url,
-        &[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", &refresh),
-            ("client_id", client_id),
-        ],
-    )
-    .await?;
-    let access = renewed.access.clone();
-    let id = provider.id.clone();
-    // Reported rather than ignored: a rotated refresh token that was not written is one the
-    // provider has already retired, which signs the person out at the next start.
-    off_thread(move || {
-        crate::mind::provider::oauth::Store::amend(|store| store.renew(&id, renewed)).map(drop)
-    })
-    .await?;
-    Ok(Some(access))
-}
-
-/// Credential work touches the filesystem and waits on a lock another process may hold, neither of
-/// which belongs on a thread that is driving requests.
-async fn off_thread<T: Send + 'static>(
-    work: impl FnOnce() -> Result<T, crate::mind::provider::oauth::Error> + Send + 'static,
-) -> Result<T, crate::mind::provider::oauth::Error> {
-    match tokio::task::spawn_blocking(work).await {
-        Ok(done) => done,
-        Err(why) => Err(crate::mind::provider::oauth::Error::Refused(format!(
-            "credentials could not be reached: {why}"
-        ))),
-    }
 }
 
 #[cfg(test)]

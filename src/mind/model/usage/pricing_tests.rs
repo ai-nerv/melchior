@@ -18,11 +18,12 @@ fn absent_cached_rates_use_input_but_explicit_zero_stays_free() {
         (json!({}), 0.0),
     ] {
         let cost: Cost = serde_json::from_value(raw.clone()).expect("source prices");
-        assert!((cached().price(cost) - expected).abs() < 1e-9, "{raw}");
-        let reloaded: Cost = serde_json::from_value(serde_json::to_value(cost).expect("serialize"))
-            .expect("reload prices");
+        assert!((cached().price(&cost) - expected).abs() < 1e-9, "{raw}");
+        let reloaded: Cost =
+            serde_json::from_value(serde_json::to_value(&cost).expect("serialize"))
+                .expect("reload prices");
         assert_eq!(cost, reloaded);
-        assert!((cached().price(reloaded) - expected).abs() < 1e-9);
+        assert!((cached().price(&reloaded) - expected).abs() < 1e-9);
     }
 }
 
@@ -32,11 +33,11 @@ fn generated_unknown_rates_serialize_versioned_presence() {
         input: 3.0,
         ..Cost::default()
     };
-    let value = serde_json::to_value(cost).expect("prices");
+    let value = serde_json::to_value(&cost).expect("prices");
     assert_eq!(value["presence"]["version"], 1);
     assert_eq!(value["presence"]["cache_read"], false);
     assert_eq!(value["presence"]["cache_write"], false);
-    assert!((cached().price(cost) - 3.3).abs() < 1e-9);
+    assert!((cached().price(&cost) - 3.3).abs() < 1e-9);
 }
 
 #[test]
@@ -47,7 +48,7 @@ fn positive_programmatic_rates_remain_usable_without_presence() {
         cache_write: 5.0,
         ..Cost::default()
     };
-    assert_eq!(cached().price(cost), 1.5);
+    assert_eq!(cached().price(&cost), 1.5);
 }
 
 #[test]
@@ -55,7 +56,7 @@ fn an_unknown_presence_version_does_not_claim_free_cached_tokens() {
     let raw = json!({"input":3,"cache_read":0,"cache_write":0,
         "presence":{"version":2,"cache_read":true,"cache_write":true}});
     let cost: Cost = serde_json::from_value(raw).expect("future metadata");
-    assert!((cached().price(cost) - 3.3).abs() < 1e-9);
+    assert!((cached().price(&cost) - 3.3).abs() < 1e-9);
 }
 
 #[test]
@@ -70,7 +71,7 @@ fn cached_price_metadata_is_additive_for_old_readers() {
     let cost: Cost = serde_json::from_value(json!({"input":3,"output":15,"cache_read":0}))
         .expect("source prices");
     let old: OldCost =
-        serde_json::from_value(serde_json::to_value(cost).expect("prices")).expect("old reader");
+        serde_json::from_value(serde_json::to_value(&cost).expect("prices")).expect("old reader");
     assert_eq!(
         (old.input, old.output, old.cache_read, old.cache_write),
         (3.0, 15.0, 0.0, 0.0)

@@ -17,10 +17,19 @@ enum Boundary {
     Exact,
 }
 
+pub(in crate::mind::lua) fn exact<'gc>(
+    ctx: Context<'gc>,
+    types: Table<'gc>,
+    value: &Json,
+) -> Value<'gc> {
+    convert(ctx, types, value, Boundary::Exact)
+}
+
 impl Boundary {
     fn field(self, key: &str) -> Self {
         match (self, key) {
             (Self::Context, "tools") => Self::Tools,
+            (Self::Content, "added") => Self::Tools,
             (Self::Context, "messages") => Self::Messages,
             (Self::Tool, "parameters")
             | (Self::Content, "arguments")

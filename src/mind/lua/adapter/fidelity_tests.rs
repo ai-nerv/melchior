@@ -79,6 +79,7 @@ fn actual_protocol_requests_preserve_all_json_argument_forms_and_schema_data() {
                 system: None,
                 messages: vec![Message::user("call"), assistant],
                 tools: vec![Tool {
+                    strict: None,
                     name: "lookup".into(),
                     description: "Lookup".into(),
                     parameters: parameters.clone(),
@@ -129,5 +130,69 @@ fn generated_empty_conversation_fields_are_arrays_not_objects() {
             body.get("tools").is_none(),
             "no phantom tools for {protocol}"
         );
+    }
+}
+
+#[test]
+fn completions_preserves_the_reasoning_field_once_per_stream_and_replays_it() {
+    use crate::mind::provider::api::Delta;
+    for field in ["reasoning", "reasoning_content", "reasoning_text"] {
+        let event = json!({"choices":[{"delta":{field:"why"}}]}).to_string();
+        let deltas = super::support::stream(
+            &adapter("openai-completions"),
+            &[("", &event), ("", &event)],
+        );
+        assert_eq!(
+            deltas,
+            vec![
+                Delta::Thinking("why".into()),
+                Delta::Signature(field.into()),
+                Delta::Thinking("why".into())
+            ]
+        );
+        let mut message = Message::assistant("");
+        message.content = vec![Content::Thinking {
+            thinking: "whywhy".into(),
+            signature: Some(field.into()),
+        }];
+        let context = Context {
+            messages: vec![message],
+            ..Default::default()
+        };
+        let body =
+            adapter("openai-completions").request(&plain_model(), &context, &Options::default());
+        assert_eq!(body["messages"][0][field], "whywhy");
+        for other in ["reasoning", "reasoning_content", "reasoning_text"]
+            .into_iter()
+            .filter(|name| *name != field)
+        {
+            assert!(body["messages"][0].get(other).is_none());
+        }
+    }
+}
+
+#[test]
+fn completions_does_not_turn_opaque_signatures_into_request_fields() {
+    for signature in [
+        None,
+        Some("private-opaque"),
+        Some("tool_calls"),
+        Some("content"),
+    ] {
+        let mut message = Message::assistant("answer");
+        message.content.push(Content::Thinking {
+            thinking: "why".into(),
+            signature: signature.map(str::to_owned),
+        });
+        let context = Context {
+            messages: vec![message],
+            ..Default::default()
+        };
+        let body =
+            adapter("openai-completions").request(&plain_model(), &context, &Options::default());
+        assert_eq!(body["messages"][0]["content"], "answer");
+        assert_eq!(body["messages"][0]["reasoning_content"], "why");
+        assert!(body["messages"][0].get("tool_calls").is_none());
+        assert!(!body.to_string().contains("private-opaque"));
     }
 }

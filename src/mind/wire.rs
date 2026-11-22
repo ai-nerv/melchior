@@ -21,6 +21,8 @@ pub struct Card {
     pub id: String,
     pub provider: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     /// The wire protocol it is spoken to over — `anthropic`, `openai`, `google` — not the vendor.
     pub api: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -42,17 +44,52 @@ pub struct Card {
     /// What it would need to become ready: the name of a variable, never a credential value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<Setup>,
+}
+
+/// Secret-free credential and configuration requirements.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Setup {
+    pub state: SetupState,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub methods: Vec<String>,
+    /// All groups are required; any variable within a group can satisfy it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variables: Vec<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub login: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SetupState {
+    Ready,
+    CredentialMissing,
+    CredentialExpired,
+    CredentialUnreadable,
+    ConfigurationIncomplete,
+    ProtocolUnavailable,
+    AuthUnavailable,
+    #[serde(other)]
+    Unknown,
 }
 
 /// What a caller wants beyond the conversation.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Wants {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingLevel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub max_tokens_automatic: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_preferred_strict: bool,
     /// A JSON Schema the answer must satisfy, and what to call it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<Schema>,
@@ -206,9 +243,11 @@ mod tests {
                 tools: Vec::new(),
             },
             wants: Wants {
+                session_id: Some("opaque-session".into()),
                 thinking: Some(ThinkingLevel::Medium),
                 max_tokens: Some(256),
                 max_tokens_automatic: false,
+                disable_preferred_strict: false,
                 schema: None,
                 provider: None,
             },
@@ -260,6 +299,7 @@ mod tests {
                     dialect: [1; 32],
                     policy: [2; 32],
                     omitted_images: 3,
+                    disable_preferred_strict: false,
                 },
             },
             Said::Text { text: "hi".into() },
@@ -328,6 +368,7 @@ mod tests {
             id: "openrouter/x".into(),
             provider: "openrouter".into(),
             name: "x".into(),
+            display_name: None,
             api: "openai".into(),
             context_window: Some(200_000),
             max_output: None,
@@ -337,6 +378,7 @@ mod tests {
             vision: false,
             reasons: true,
             ready: false,
+            setup: None,
             needs: Some("OPENROUTER_API_KEY".into()),
         };
         let text = serde_json::to_string(&card).expect("encode");
@@ -383,6 +425,7 @@ mod cbor_tests {
                 dialect: [7; 32],
                 policy: [11; 32],
                 omitted_images: u64::MAX,
+                disable_preferred_strict: false,
             },
         };
         assert_eq!(through_cbor(&said), said);

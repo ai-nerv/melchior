@@ -249,7 +249,7 @@ make.recipe{ name = "build-fake-provider", desc = "build the deterministic HTTP 
 make.recipe{ name = "build-fake-provider-release", desc = "build the release-profile offline provider fixture",
              run = function() sh.cargo("build", "--release", "--example", "fake-provider") end }
 
-make.recipe{ name = "test-fake-provider", desc = "scripted Chat/Anthropic lifecycle and decoder contract",
+make.recipe{ name = "test-fake-provider", desc = "scripted provider streams, literal SSE and decoder contracts",
              run = function() sh.cargo("test", "--example", "fake-provider") end }
 
 make.recipe{ name = "build-metered-proxy", desc = "build the capped live-provider proxy",
@@ -257,6 +257,381 @@ make.recipe{ name = "build-metered-proxy", desc = "build the capped live-provide
 
 make.recipe{ name = "test-model-refresh", desc = "forced discovery with disposable cache and provider",
              run = function() sh.cargo("test", "--test", "model_refresh") end }
+
+make.recipe{ name = "test-provider-discovery", desc = "bounded discovery, authenticated strategies and private cache identities",
+             run = function()
+               sh.cargo("test", "--lib", "mind::discovering::")
+               sh.cargo("test", "--test", "model_refresh")
+             end }
+
+make.recipe{ name = "test-provider-thinking", desc = "effective effort mapping, discovery restrictions and native model roles",
+             run = function()
+               sh.cargo("test", "--lib", "mind::provider::thinking::")
+               sh.cargo("test", "--lib", "mind::lua::adapter::thinking_tests::")
+               sh.cargo("test", "--lib", "mind::discovering::reasoning_tests::")
+               sh.cargo("test", "--test", "provider_readiness")
+             end }
+
+make.recipe{ name = "test-provider-strict", desc = "bounded provider-specific strict tool schema conversion",
+             run = function()
+               sh.cargo("test", "--lib", "mind::provider::strict_schema::")
+               sh.cargo("test", "--lib", "mind::lua::adapter::strict_tests::")
+               sh.cargo("test", "--lib", "mind::provider::client::strict_tests::")
+               sh.cargo("test", "--test", "provider_readiness", "strict::")
+             end }
+
+make.recipe{ name = "test-provider-catalog", desc = "pinned offline source integrity, mappings and deterministic output",
+             run = function()
+               sh.cargo("test", "--test", "provider_catalog")
+               sh.cargo("run", "--locked", "--offline", "--example", "provider-catalog", "--", "--check")
+             end }
+
+make.recipe{ name = "test-provider-input-limits", desc = "validated image metadata and exact pre-authentication request limits",
+             run = function()
+               sh.cargo("test", "--lib", "mind::model::input_limits::")
+               sh.cargo("test", "--lib", "mind::provider::thinking::tests::input_limits_")
+               sh.cargo("test", "--lib", "mind::provider::client::input_limits::")
+               sh.cargo("test", "--test", "provider_readiness", "input_limits::")
+             end }
+
+make.recipe{ name = "test-provider-imports", desc = "explicit pinned catalog selection, overrides and offline native inference",
+             run = function()
+               sh.cargo("test", "--lib", "mind::catalog::imports::")
+               sh.cargo("test", "--test", "provider_readiness", "imports::")
+             end }
+
+make.recipe{ name = "catalog-generate", desc = "convert pinned local model metadata and report every pending mapping",
+             run = function()
+               sh.cargo("run", "--locked", "--offline", "--example", "provider-catalog", "--", "--write")
+             end }
+
+make.recipe{ name = "test-provider-presets", desc = "bundled API-key models, native authentication and tool round trips",
+             run = function()
+               sh.cargo("test", "--lib", "mind::lua::adapter::fidelity_tests::completions_")
+               sh.cargo("test", "--lib", "mind::lua::adapter::reasoning_content_tests::")
+               sh.cargo("test", "--test", "provider_readiness", "presets::")
+             end }
+
+make.recipe{ name = "test-provider-anthropic", desc = "Anthropic adaptive controls and complete bound assistant replay",
+             run = function()
+               sh.cargo("test", "--lib", "mind::lua::adapter::anthropic_tests::")
+               sh.cargo("test", "--lib", "mind::provider::client::anthropic::")
+               sh.cargo("test", "--lib", "mind::provider::compat::")
+               sh.cargo("test", "--lib", "mind::provider::thinking::")
+               sh.cargo("test", "--test", "provider_readiness", "anthropic::")
+             end }
+
+make.recipe{ name = "test-provider-completions", desc = "indexed Chat Completions tools and terminal contracts",
+             run = function()
+               sh.cargo("test", "--lib", "mind::lua::adapter::completions_tests::")
+               sh.cargo("test", "--lib", "mind::lua::adapter::tests::completions_")
+               sh.cargo("test", "--lib", "mind::provider::client::completions::")
+               sh.cargo("test", "--test", "provider_readiness", "completions::")
+             end }
+
+make.recipe{ name = "test-provider-mistral", desc = "native Mistral translation without tool execution",
+             run = function()
+               for _, suite in ipairs({
+                 { count = 7, args = { "test", "--lib", "mind::lua::adapter::mistral::" } },
+                 { count = 2, args = { "test", "--test", "provider_catalog", "mistral::" } },
+                 { count = 4, args = { "test", "--test", "provider_readiness", "mistral::" } },
+               }) do
+                 local inventory = { "cargo", capture = true }
+                 for _, arg in ipairs(suite.args) do inventory[#inventory + 1] = arg end
+                 table.insert(inventory, "--"); table.insert(inventory, "--list")
+                 local listed = oslo.run(inventory)
+                 local _, count = (listed.out or ""):gsub(": test\r?\n", "")
+                 assert(listed.ok and count == suite.count,
+                   "Mistral test inventory: expected " .. suite.count .. ", got " .. count .. "\n" .. (listed.out or "") .. (listed.err or ""))
+                 sh.cargo(table.unpack(suite.args))
+               end
+               sh.cargo("test", "--lib", "mind::provider::client::session::")
+               sh.cargo("test", "--lib", "mind::provider::client::input_limits::")
+               sh.cargo("test", "--lib", "mind::lua::adapter::protocols::")
+             end }
+
+make.recipe{ name = "test-provider-instructions", desc = "ordered system-message history and safe fallback",
+             run = function()
+               sh.cargo("test", "--lib", "mind::lua::adapter::instructions::")
+               sh.cargo("test", "--test", "provider_catalog", "instructions::")
+               sh.cargo("test", "--test", "provider_readiness", "instructions::")
+             end }
+
+make.recipe{ name = "test-provider-tool-history", desc = "bounded tool-state replay and anchored Chat additions",
+             run = function()
+               for _, suite in ipairs({
+                 { args = { "test", "--lib", "mind::lua::adapter::instructions::tools::tests::" }, count = 13 },
+                 { args = { "test", "--test", "provider_catalog", "tool_history::" }, count = 2 },
+                 { args = { "test", "--test", "provider_readiness", "tool_history::" }, count = 5 },
+               }) do
+                 local inventory = { "cargo", capture = true }
+                 for _, arg in ipairs(suite.args) do inventory[#inventory + 1] = arg end
+                 table.insert(inventory, "--")
+                 table.insert(inventory, "--list")
+                 local listed = oslo.run(inventory)
+                 local _, count = (listed.out or ""):gsub(": test\n", "")
+                 assert(listed.ok and count == suite.count,
+                   "tool-history test inventory: expected " .. suite.count .. ", got " .. count .. "\n" .. (listed.out or "") .. (listed.err or ""))
+               end
+               sh.cargo("test", "--lib", "mind::lua::adapter::instructions::")
+               sh.cargo("test", "--lib", "mind::lua::adapter::strict_tests::")
+               sh.cargo("test", "--test", "provider_catalog", "tool_history::")
+               sh.cargo("test", "--test", "provider_readiness", "tool_history::")
+             end }
+
+make.recipe{ name = "test-provider-deepseek", desc = "DeepSeek strict schema and request routing contracts",
+             run = function()
+               sh.cargo("test", "--lib", "mind::provider::strict_schema::")
+               sh.cargo("test", "--lib", "mind::lua::adapter::strict_tests::")
+               sh.cargo("test", "--test", "provider_readiness", "deepseek::")
+             end }
+
+make.recipe{ name = "test-provider-zai", desc = "ZAI regions, preserved reasoning and streamed tool contracts",
+             run = function()
+               for _, suite in ipairs({
+                 { count = 3, args = { "test", "--lib", "mind::lua::adapter::zai::" } },
+                 { count = 2, args = { "test", "--test", "provider_catalog", "zai::" } },
+                 { count = 6, args = { "test", "--test", "provider_readiness", "presets::zai::" } },
+               }) do
+                 local inventory = { "cargo", capture = true }
+                 for _, arg in ipairs(suite.args) do inventory[#inventory + 1] = arg end
+                 table.insert(inventory, "--")
+                 table.insert(inventory, "--list")
+                 local listed = oslo.run(inventory)
+                 local _, count = (listed.out or ""):gsub(": test\r?\n", "")
+                 assert(listed.ok and count == suite.count,
+                   "ZAI test inventory: expected " .. suite.count .. ", got " .. count .. "\n" .. (listed.out or "") .. (listed.err or ""))
+                 sh.cargo(table.unpack(suite.args))
+               end
+             end }
+
+make.recipe{ name = "test-provider-moonshot", desc = "Moonshot regions and Kimi Coding pinned API-key contracts",
+             run = function()
+               for _, suite in ipairs({
+                 { count = 2, args = { "test", "--lib", "mind::lua::adapter::moonshot::" } },
+                 { count = 1, args = { "test", "--test", "provider_catalog", "moonshot::" } },
+                 { count = 8, args = { "test", "--test", "provider_readiness", "presets::moonshot::" } },
+               }) do
+                 local inventory = { "cargo", capture = true }
+                 for _, arg in ipairs(suite.args) do inventory[#inventory + 1] = arg end
+                 table.insert(inventory, "--")
+                 table.insert(inventory, "--list")
+                 local listed = oslo.run(inventory)
+                 local _, count = (listed.out or ""):gsub(": test\r?\n", "")
+                 assert(listed.ok and count == suite.count,
+                   "Moonshot test inventory: expected " .. suite.count .. ", got " .. count .. "\n" .. (listed.out or "") .. (listed.err or ""))
+                 sh.cargo(table.unpack(suite.args))
+               end
+             end }
+
+make.recipe{ name = "test-provider-baseten", desc = "Baseten pinned templates, effort controls and API-key contracts",
+             run = function()
+               for _, suite in ipairs({
+                 { count = 3, args = { "test", "--lib", "mind::lua::adapter::baseten::" } },
+                 { count = 2, args = { "test", "--test", "provider_catalog", "baseten::" } },
+                 { count = 8, args = { "test", "--test", "provider_readiness", "presets::baseten::" } },
+               }) do
+                 local inventory = { "cargo", capture = true }
+                 for _, arg in ipairs(suite.args) do inventory[#inventory + 1] = arg end
+                 table.insert(inventory, "--")
+                 table.insert(inventory, "--list")
+                 local listed = oslo.run(inventory)
+                 local _, count = (listed.out or ""):gsub(": test\r?\n", "")
+                 assert(listed.ok and count == suite.count,
+                   "Baseten test inventory: expected " .. suite.count .. ", got " .. count .. "\n" .. (listed.out or "") .. (listed.err or ""))
+                 sh.cargo(table.unpack(suite.args))
+               end
+             end }
+
+make.recipe{ name = "test-provider-fireworks", desc = "Fireworks mixed-protocol pinned API-key contracts",
+             run = function()
+               for _, suite in ipairs({
+                 { count = 7, args = { "test", "--lib", "mind::lua::adapter::fireworks::" } },
+                 { count = 2, args = { "test", "--test", "provider_catalog", "fireworks::" } },
+                 { count = 8, args = { "test", "--test", "provider_readiness", "fireworks_foundation::" } },
+               }) do
+                 local inventory = { "cargo", capture = true }
+                 for _, arg in ipairs(suite.args) do inventory[#inventory + 1] = arg end
+                 table.insert(inventory, "--")
+                 table.insert(inventory, "--list")
+                 local listed = oslo.run(inventory)
+                 local _, count = (listed.out or ""):gsub(": test\r?\n", "")
+                 assert(listed.ok and count == suite.count,
+                   "Fireworks test inventory: expected " .. suite.count .. ", got " .. count .. "\n" .. (listed.out or "") .. (listed.err or ""))
+                 sh.cargo(table.unpack(suite.args))
+               end
+             end }
+
+make.alias("test-provider-fireworks-foundation", "test-provider-fireworks")
+
+make.recipe{ name = "test-provider-qwen", desc = "Qwen token plans and model-specific thinking controls",
+             run = function()
+               for _, suite in ipairs({
+                 { count = 4, args = { "test", "--lib", "mind::lua::adapter::qwen::" } },
+                 { count = 2, args = { "test", "--test", "provider_catalog", "qwen::" } },
+                 { count = 9, args = { "test", "--test", "provider_readiness", "qwen_foundation::" } },
+               }) do
+                 local inventory = { "cargo", capture = true }
+                 for _, arg in ipairs(suite.args) do inventory[#inventory + 1] = arg end
+                 table.insert(inventory, "--")
+                 table.insert(inventory, "--list")
+                 local listed = oslo.run(inventory)
+                 local _, count = (listed.out or ""):gsub(": test\r?\n", "")
+                 assert(listed.ok and count == suite.count,
+                   "Qwen foundation test inventory: expected " .. suite.count .. ", got " .. count .. "\n" .. (listed.out or "") .. (listed.err or ""))
+                 sh.cargo(table.unpack(suite.args))
+               end
+             end }
+make.alias("test-provider-qwen-foundation", "test-provider-qwen")
+
+make.recipe{ name = "test-provider-together", desc = "Together pinned reasoning and request contracts",
+             run = function()
+               for _, suite in ipairs({
+                 { count = 4, args = { "test", "--lib", "mind::lua::adapter::together::" } },
+                 { count = 2, args = { "test", "--test", "provider_catalog", "together::" } },
+                 { count = 8, args = { "test", "--test", "provider_readiness", "together::" } },
+               }) do
+                 local inventory = { "cargo", capture = true }
+                 for _, arg in ipairs(suite.args) do inventory[#inventory + 1] = arg end
+                 table.insert(inventory, "--")
+                 table.insert(inventory, "--list")
+                 local listed = oslo.run(inventory)
+                 local _, count = (listed.out or ""):gsub(": test\r?\n", "")
+                 assert(listed.ok and count == suite.count,
+                   "Together test inventory: expected " .. suite.count .. ", got " .. count .. "\n" .. (listed.out or "") .. (listed.err or ""))
+                 sh.cargo(table.unpack(suite.args))
+               end
+             end }
+
+make.recipe{ name = "test-provider-google-thinking", desc = "Google discrete levels, model budgets and advertised controls",
+             run = function()
+               local listed = oslo.run{ "cargo", "test", "--lib", "mind::lua::adapter::google_thinking::", "--", "--list", capture = true }
+               local _, count = (listed.out or ""):gsub(": test\r?\n", "")
+               assert(listed.ok and count == 7, "Google thinking inventory must contain seven tests\n" .. (listed.out or "") .. (listed.err or ""))
+               sh.cargo("test", "--lib", "mind::lua::adapter::google_thinking::")
+               local catalog = oslo.run{ "cargo", "test", "--test", "provider_catalog", "google_thinking::", "--", "--list", capture = true }
+               local _, found = (catalog.out or ""):gsub(": test\r?\n", "")
+               assert(catalog.ok and found == 2, "Google thinking compiler inventory must contain two tests\n" .. (catalog.out or "") .. (catalog.err or ""))
+               sh.cargo("test", "--test", "provider_catalog", "google_thinking::")
+               local native = oslo.run{ "cargo", "test", "--test", "provider_readiness", "google_thinking::", "--", "--list", capture = true }
+               local _, count_native = (native.out or ""):gsub(": test\r?\n", "")
+               assert(native.ok and count_native == 2, "Google thinking native inventory must contain two tests\n" .. (native.out or "") .. (native.err or ""))
+               sh.cargo("test", "--test", "provider_readiness", "google_thinking::")
+             end }
+
+make.recipe{ name = "test-provider-google-usage", desc = "Google cumulative candidate and thought accounting",
+             run = function()
+               local listed = oslo.run{ "cargo", "test", "--lib", "mind::lua::adapter::google_usage::", "--", "--list", capture = true }
+               local _, count = (listed.out or ""):gsub(": test\r?\n", "")
+               assert(listed.ok and count == 6, "Google usage inventory must contain six tests\n" .. (listed.out or "") .. (listed.err or ""))
+               sh.cargo("test", "--lib", "mind::lua::adapter::google_usage::")
+               local native = oslo.run{ "cargo", "test", "--test", "provider_readiness", "google_usage::", "--", "--list", capture = true }
+               local _, found = (native.out or ""):gsub(": test\r?\n", "")
+               assert(native.ok and found == 2, "Google usage native inventory must contain two tests\n" .. (native.out or "") .. (native.err or ""))
+               sh.cargo("test", "--test", "provider_readiness", "google_usage::")
+             end }
+
+make.recipe{ name = "test-provider-google-replay", desc = "Google ordered signed parts and bound replay",
+             run = function()
+               local listed = oslo.run{ "cargo", "test", "--lib", "mind::lua::adapter::google_replay::", "--", "--list", capture = true }
+               local _, count = (listed.out or ""):gsub(": test\r?\n", "")
+               assert(listed.ok and count == 7, "Google replay inventory must contain seven tests\n" .. (listed.out or "") .. (listed.err or ""))
+               sh.cargo("test", "--lib", "mind::lua::adapter::google_replay::")
+             end }
+
+make.recipe{ name = "test-provider-google-calls", desc = "Google tool-call identity and paired history",
+             run = function()
+               local listed = oslo.run{ "cargo", "test", "--lib", "mind::lua::adapter::google_calls::", "--", "--list", capture = true }
+               local _, count = (listed.out or ""):gsub(": test\r?\n", "")
+               assert(listed.ok and count == 5, "Google call inventory must contain five tests\n" .. (listed.out or "") .. (listed.err or ""))
+               sh.cargo("test", "--lib", "mind::lua::adapter::google_calls::")
+               local native = oslo.run{ "cargo", "test", "--test", "provider_readiness", "google_calls::", "--", "--list", capture = true }
+               local _, found = (native.out or ""):gsub(": test\r?\n", "")
+               assert(native.ok and found == 1, "Google call native inventory must contain one test\n" .. (native.out or "") .. (native.err or ""))
+               sh.cargo("test", "--test", "provider_readiness", "google_calls::")
+             end }
+
+make.recipe{ name = "test-provider-ant-ling", desc = "Ant Ling explicit mapped-effort contracts",
+             run = function()
+               local listed = oslo.run{ "cargo", "test", "--lib", "mind::lua::adapter::ant_ling::", "--", "--list", capture = true }
+               local _, count = (listed.out or ""):gsub(": test\r?\n", "")
+               assert(listed.ok and count == 4, "Ant Ling adapter inventory must contain four tests\n" .. (listed.out or "") .. (listed.err or ""))
+               sh.cargo("test", "--lib", "mind::lua::adapter::ant_ling::")
+               local catalog = oslo.run{ "cargo", "test", "--test", "provider_catalog", "ant_ling::", "--", "--list", capture = true }
+               local _, found = (catalog.out or ""):gsub(": test\r?\n", "")
+               assert(catalog.ok and found == 2, "Ant Ling compiler inventory must contain two tests\n" .. (catalog.out or "") .. (catalog.err or ""))
+               sh.cargo("test", "--test", "provider_catalog", "ant_ling::")
+               local native = oslo.run{ "cargo", "test", "--test", "provider_readiness", "ant_ling::", "--", "--list", capture = true }
+               local _, cases = (native.out or ""):gsub(": test\r?\n", "")
+               assert(native.ok and cases == 8, "Ant Ling native inventory must contain eight tests\n" .. (native.out or "") .. (native.err or ""))
+               sh.cargo("test", "--test", "provider_readiness", "ant_ling::")
+             end }
+
+make.recipe{ name = "test-provider-huggingface", desc = "Hugging Face pinned router defaults and model contracts",
+             run = function()
+               local listed = oslo.run{ "cargo", "test", "--test", "provider_catalog", "huggingface::", "--", "--list", capture = true }
+               local _, count = (listed.out or ""):gsub(": test\r?\n", "")
+               assert(listed.ok and count == 3, "Hugging Face compiler inventory must contain three tests")
+               sh.cargo("test", "--test", "provider_catalog", "huggingface::")
+               local native = oslo.run{ "cargo", "test", "--test", "provider_readiness", "huggingface::", "--", "--list", capture = true }
+               local _, found = (native.out or ""):gsub(": test\r?\n", "")
+               assert(native.ok and found == 8, "Hugging Face native inventory must contain eight tests")
+               sh.cargo("test", "--test", "provider_readiness", "huggingface::")
+             end }
+
+make.recipe{ name = "test-provider-session", desc = "bounded session identity, scoped affinity and credential rotation",
+             run = function()
+               for _, suite in ipairs({
+                 { count = 8, args = { "test", "--lib", "mind::provider::client::session::" } },
+                 { count = 3, args = { "test", "--test", "provider_catalog", "session::" } },
+                 { count = 6, args = { "test", "--test", "provider_readiness", "session::" } },
+               }) do
+                 local inventory = { "cargo", capture = true }
+                 for _, arg in ipairs(suite.args) do inventory[#inventory + 1] = arg end
+                 table.insert(inventory, "--")
+                 table.insert(inventory, "--list")
+                 local listed = oslo.run(inventory)
+                 local _, count = (listed.out or ""):gsub(": test\r?\n", "")
+                 assert(listed.ok and count == suite.count,
+                   "session test inventory: expected " .. suite.count .. ", got " .. count .. "\n" .. (listed.out or "") .. (listed.err or ""))
+                 sh.cargo(table.unpack(suite.args))
+               end
+             end }
+
+make.recipe{ name = "test-provider-responses", desc = "stateless Responses continuation and lossless JSON state",
+             run = function()
+               sh.cargo("test", "--lib", "mind::provider::api::tests::")
+               sh.cargo("test", "--lib", "mind::provider::identity::tests::")
+               sh.cargo("test", "--lib", "mind::provider::client::credentials::tests::")
+               sh.cargo("test", "--lib", "mind::provider::oauth::")
+               sh.cargo("test", "--lib", "mind::signing::")
+               sh.cargo("test", "--lib", "mind::lua::engine::json_tests::")
+               sh.cargo("test", "--lib", "mind::lua::adapter::responses_tests::")
+               sh.cargo("test", "--lib", "mind::lua::adapter::protocols::")
+               sh.cargo("test", "--lib", "mind::provider::client::responses::")
+               sh.cargo("test", "--test", "provider_readiness", "responses::")
+             end }
+
+make.recipe{ name = "test-provider-parity", desc = "pinned provider inventory and isolated HTTP qualification",
+             deps = { "test-provider-presets" },
+             run = function() sh.cargo("test", "--test", "provider_parity", "--", "--nocapture") end }
+
+make.recipe{ name = "test-provider-foundations", desc = "provider defaults, mixed protocols and declaration diagnostics",
+             run = function()
+               sh.cargo("test", "--lib", "mind::provider::endpoint::")
+               sh.cargo("test", "--lib", "mind::provider::routing::")
+               sh.cargo("test", "--lib", "mind::catalog::")
+               sh.cargo("test", "--test", "model_refresh")
+               sh.cargo("test", "--test", "provider_readiness")
+             end }
+
+make.recipe{ name = "test-provider-parity-complete", desc = "require every pinned provider contract to pass",
+             deps = { "test-provider-presets", "test-provider-fireworks", "test-provider-qwen", "test-provider-together", "test-provider-huggingface", "test-provider-ant-ling" },
+             run = function()
+               assert(oslo.run({ "env", "MELCHIOR_PROVIDER_PARITY_COMPLETE=1", "cargo", "test",
+                 "--test", "provider_parity", "--", "--nocapture" }).ok,
+                 "provider parity is incomplete")
+             end }
 
 make.recipe{ name = "test-streaming", desc = "provider byte and response boundaries",
              run = function() sh.cargo("test", "--lib", "mind::provider::") end }
@@ -273,11 +648,11 @@ make.recipe{ name = "test-overflow", desc = "bounded overflow refusals and failu
 
 make.recipe{ name = "test-usage", desc = "usage dialects, pricing, discovery, retries and spending",
              run = function()
-               for _, suite in ipairs({ "mind::lua::adapter::", "mind::model::", "mind::spending::",
+               for _, suite in ipairs({ "mind::lua::adapter::", "mind::model::", "mind::spending::", "mind::accounting::",
                                          "mind::running::", "mind::discovering::", "mind::catalog::" }) do
                  sh.cargo("test", "--lib", suite)
                end
-               sh.cargo("test", "--test", "spending", "--test", "model_refresh")
+               sh.cargo("test", "--test", "spending", "--test", "model_refresh", "--test", "event_usage")
              end }
 
 make.recipe{ name = "test-cache-contract", desc = "actual request serialization and cache compatibility contract",
@@ -317,6 +692,20 @@ make.recipe{ name = "test-all", desc = "the suite, with every feature on",
 
 make.recipe{ name = "check", desc = "type-check every target",
              run = function() sh.cargo("check", "--all-targets") end }
+
+make.recipe{ name = "test-login", desc = "saved API keys and bounded browser authentication",
+             run = function()
+               sh.cargo("test", "--test", "authentication")
+               sh.cargo("test", "--test", "provider_readiness", "login::")
+               sh.cargo("test", "--lib", "mind::provider::oauth::")
+             end }
+
+make.recipe{ name = "test-copilot", desc = "Copilot device login, refresh, policy and native request contracts",
+             run = function()
+               sh.cargo("test", "--lib", "mind::provider::copilot::")
+               sh.cargo("test", "--test", "copilot")
+               sh.cargo("test", "--test", "authentication")
+             end }
 
 make.recipe{ name = "check-all", desc = "type-check every target, every feature",
              run = function() sh.cargo("check", "--all-targets", "--all-features") end }

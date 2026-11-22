@@ -12,6 +12,7 @@ fn request(context: &Context, options: &Options) -> Value {
 
 fn tool(parameters: Value) -> Tool {
     Tool {
+        strict: None,
         name: "lookup".into(),
         description: "Find a value".into(),
         parameters,

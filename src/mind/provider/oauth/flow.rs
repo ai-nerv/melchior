@@ -222,5 +222,9 @@ async fn exchange_with_limits(
         access: granted.access_token,
         refresh: granted.refresh_token,
         expires_at: super::now().saturating_add(granted.expires_in.unwrap_or(ASSUMED_LIFETIME)),
+        binding: Some(
+            super::super::identity::nonce()
+                .map_err(|_| super::Error::Refused("could not generate a login identity".into()))?,
+        ),
     })
 }

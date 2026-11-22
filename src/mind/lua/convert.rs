@@ -9,6 +9,7 @@ mod input;
 pub(super) mod shape;
 
 pub(super) use input::api_args;
+pub(super) use input::exact;
 
 /// How deep one conversion may nest.
 const DEPTH: usize = 32;

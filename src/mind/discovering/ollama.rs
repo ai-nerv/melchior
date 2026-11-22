@@ -7,22 +7,45 @@ use crate::mind::provider::model::{Modality, Model};
 /// What ollama calls no reasoning. It refuses "off" outright.
 const NONE: &str = "none";
 
+pub(super) async fn details(
+    mut models: Vec<Model>,
+    root: &str,
+    client: &crate::mind::provider::Http,
+    headers: &reqwest::header::HeaderMap,
+    until: tokio::time::Instant,
+) -> Vec<Model> {
+    for model in &mut models {
+        if tokio::time::Instant::now() >= until {
+            break;
+        }
+        match tokio::time::timeout_at(until, detailed(model.clone(), root, client, headers)).await {
+            Ok(found) => *model = found,
+            Err(_) => break,
+        }
+    }
+    models
+}
+
 /// `model` with what `/api/show` says of it, or as it was when that cannot be asked.
 pub(super) async fn detailed(
     model: Model,
     root: &str,
     client: &crate::mind::provider::Http,
+    headers: &reqwest::header::HeaderMap,
 ) -> Model {
     let shown = async {
-        client
-            .post(format!("{root}/api/show"))
+        let mut request = client.post(format!("{root}/api/show"));
+        for (name, value) in headers {
+            request = request.header(name.clone(), value.clone());
+        }
+        let response = request
             .json(&serde_json::json!({ "model": model.id }))
             .send()
             .await
             .ok()?
-            .json::<serde_json::Value>()
-            .await
-            .ok()
+            .error_for_status()
+            .ok()?;
+        super::loading::bounded(response).await
     }
     .await;
     match shown {
@@ -73,6 +96,7 @@ pub(super) fn apply(mut model: Model, shown: &serde_json::Value) -> Model {
         model.reasoning = thinking.iter().any(|level| level != "off");
     }
     model.capabilities = Some(crate::mind::model::Capabilities {
+        session_identity: None,
         input: model
             .input
             .iter()
@@ -83,6 +107,9 @@ pub(super) fn apply(mut model: Model, shown: &serde_json::Value) -> Model {
             .collect(),
         output: vec!["text".into()],
         thinking: (!thinking.is_empty()).then_some(thinking),
+        thinking_levels: None,
+        strict_tools: None,
+        input_limits: None,
     });
     model
 }

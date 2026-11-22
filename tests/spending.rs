@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const MELCHIOR: &str = env!("CARGO_BIN_EXE_melchior");
+const OFFLINE: &str = include_str!("fixtures/offline-providers.lua");
 
 /// What the provider took for one answer: a token in and one out, which its rates make $2.
 const USAGE: &str = r#"data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
@@ -21,6 +22,8 @@ const ASK: &str = r#"{"model":"spendtest/dear","context":{"messages":[{"role":"u
 
 #[path = "spending/cancellation.rs"]
 mod cancellation;
+#[path = "spending/tiers.rs"]
+mod tiers;
 
 /// How the provider ends an answer.
 #[derive(Clone, Copy)]
@@ -31,6 +34,7 @@ enum Ending {
     Malformed,
     MixedReportedFirst,
     MixedEstimatedFirst,
+    TierRetry,
     Settled,
     /// The connection closed mid-body, after the usage: a failure melchior tries again.
     Dropped,
@@ -53,20 +57,12 @@ impl World {
     fn at(name: &str, port: u16, asked: Arc<AtomicUsize>) -> Self {
         let dir = Scratch::new("mel-sp", name);
         std::fs::create_dir_all(dir.join("cfg/plugin")).expect("config");
-        std::fs::create_dir_all(dir.join("cache/melchior/models")).expect("cache");
         melchior::places::ensure(&dir.join("r")).expect("runtime");
-        // Fresh and empty, so nothing is discovered over the network.
-        for discovered in ["openrouter", "ollama"] {
-            std::fs::write(
-                dir.join(format!("cache/melchior/models/{discovered}.json")),
-                "[]",
-            )
-            .expect("cache");
-        }
         std::fs::write(
             dir.join("cfg/providers.lua"),
             format!(
-                r#"melchior.provider("spendtest", {{
+                r#"{OFFLINE}
+melchior.provider("spendtest", {{
   name = "Spend test", api = "openai-completions",
   base_url = "http://127.0.0.1:{port}/v1", auth = {{ kind = "none" }},
   models = {{ {{ id = "dear", name = "Dear", context_window = 8192, max_tokens = 128,
@@ -84,6 +80,7 @@ impl World {
             self.dir.join("cfg/providers.lua"),
             format!(
                 r#"
+            {OFFLINE}
             melchior.provider("spendtest", {{name="Prices", api="openai-completions",
                 base_url="http://127.0.0.1:{}/v1", auth={{kind="none"}}, discover=true}})
         "#,
@@ -91,13 +88,30 @@ impl World {
             ),
         )
         .expect("discovered provider");
+        let listed = self
+            .melchior(&[])
+            .args(["models", "--refresh", "--json"])
+            .output()
+            .expect("seed cache");
+        assert!(listed.status.success());
+        let reply: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("model reply");
+        assert_eq!(reply["failed"], serde_json::json!([]));
+        assert!(
+            reply["result"]
+                .as_array()
+                .expect("cards")
+                .iter()
+                .any(|card| card["id"] == "spendtest/dear")
+        );
+        assert_eq!(self.asked.swap(0, Ordering::SeqCst), 1);
+        let paths: Vec<_> = std::fs::read_dir(self.dir.join("cache/melchior/models/v2"))
+            .expect("cache")
+            .map(|entry| entry.expect("entry").path())
+            .collect();
+        assert_eq!(paths.len(), 1);
         let card = serde_json::json!([{"id":"dear", "name":"Dear", "context_window":8192,
             "max_tokens":128, "cost":rates}]);
-        std::fs::write(
-            self.dir.join("cache/melchior/models/spendtest.json"),
-            card.to_string(),
-        )
-        .expect("offline cached prices");
+        std::fs::write(&paths[0], card.to_string()).expect("offline cached prices");
     }
 
     /// Set the cap the way a person does, in a file of melchior's own.
@@ -190,11 +204,13 @@ fn provider(ending: Ending, asked: Arc<AtomicUsize>) -> u16 {
 fn answer(stream: &mut std::net::TcpStream, ending: Ending, asked: &AtomicUsize) {
     let mut reading = BufReader::new(stream.try_clone().expect("clone"));
     let mut length = 0;
+    let mut listing = false;
     loop {
         let mut line = String::new();
         if reading.read_line(&mut line).unwrap_or(0) == 0 {
             return;
         }
+        listing |= line.starts_with("GET /v1/models ");
         if let Some(said) = line.to_ascii_lowercase().strip_prefix("content-length:") {
             length = said.trim().parse().unwrap_or(0);
         }
@@ -207,6 +223,15 @@ fn answer(stream: &mut std::net::TcpStream, ending: Ending, asked: &AtomicUsize)
         return;
     }
     let attempt = asked.fetch_add(1, Ordering::SeqCst) + 1;
+    if listing {
+        let body = r#"{"data":[{"id":"dear"}]}"#;
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        return;
+    }
     let chunk = |text: &str| format!("{:x}\r\n{text}\r\n", text.len());
     let mut out = String::from(
         "HTTP/1.1 200 Fixture\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\
@@ -248,7 +273,7 @@ fn answer(stream: &mut std::net::TcpStream, ending: Ending, asked: &AtomicUsize)
         || (attempt == 1
             && matches!(
                 ending,
-                Ending::MixedReportedFirst | Ending::MixedEstimatedFirst
+                Ending::MixedReportedFirst | Ending::MixedEstimatedFirst | Ending::TierRetry
             ));
     if !dropped {
         let done =

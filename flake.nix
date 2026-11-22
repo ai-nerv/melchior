@@ -41,6 +41,7 @@
                 ./src
                 ./lua
                 ./config
+                ./catalog
               ];
             };
 

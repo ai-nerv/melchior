@@ -1,0 +1,53 @@
+{
+  "openai-responses": [
+    {"dialect":"raw-sse","refuse":{"status":503,"message":"temporary image fixture overload"}},
+    {"dialect":"raw-sse","events":[
+      {"sse":{"name":"response.output_item.added","data":{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"type":"function_call","id":"fc_image","call_id":"image-call","name":"paint","arguments":"","status":"in_progress"}}}},
+      {"sse":{"name":"response.function_call_arguments.delta","data":{"type":"response.function_call_arguments.delta","sequence_number":1,"item_id":"fc_image","output_index":0,"delta":"{}"}}},
+      {"sse":{"name":"response.function_call_arguments.done","data":{"type":"response.function_call_arguments.done","sequence_number":2,"item_id":"fc_image","output_index":0,"arguments":"{}"}}},
+      {"sse":{"name":"response.output_item.done","data":{"type":"response.output_item.done","sequence_number":3,"output_index":0,"item":{"type":"function_call","id":"fc_image","call_id":"image-call","name":"paint","arguments":"{}","status":"completed"}}}},
+      {"sse":{"name":"response.completed","data":{"type":"response.completed","sequence_number":4,"response":{"id":"resp_image","object":"response","status":"completed","output":[{"type":"function_call","id":"fc_image","call_id":"image-call","name":"paint","arguments":"{}","status":"completed"}],"usage":{"input_tokens":7,"output_tokens":2}}}}}
+    ]},
+    {"dialect":"raw-sse","events":[
+      {"sse":{"name":"response.output_item.added","data":{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"type":"message","id":"msg_image","role":"assistant","status":"in_progress","content":[]}}}},
+      {"sse":{"name":"response.content_part.added","data":{"type":"response.content_part.added","sequence_number":1,"item_id":"msg_image","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}}},
+      {"sse":{"name":"response.output_text.delta","data":{"type":"response.output_text.delta","sequence_number":2,"item_id":"msg_image","output_index":0,"content_index":0,"delta":"image stored"}}},
+      {"sse":{"name":"response.output_text.done","data":{"type":"response.output_text.done","sequence_number":3,"item_id":"msg_image","output_index":0,"content_index":0,"text":"image stored"}}},
+      {"sse":{"name":"response.content_part.done","data":{"type":"response.content_part.done","sequence_number":4,"item_id":"msg_image","output_index":0,"content_index":0,"part":{"type":"output_text","text":"image stored","annotations":[]}}}},
+      {"sse":{"name":"response.output_item.done","data":{"type":"response.output_item.done","sequence_number":5,"output_index":0,"item":{"type":"message","id":"msg_image","role":"assistant","status":"completed","content":[{"type":"output_text","text":"image stored","annotations":[]}]}}}},
+      {"sse":{"name":"response.completed","data":{"type":"response.completed","sequence_number":6,"response":{"id":"resp_stored","object":"response","status":"completed","output":[{"type":"message","id":"msg_image","role":"assistant","status":"completed","content":[{"type":"output_text","text":"image stored","annotations":[]}]}],"usage":{"input_tokens":7,"output_tokens":2}}}}}
+    ]},
+    {"dialect":"raw-sse","events":[
+      {"sse":{"name":"response.output_item.added","data":{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"type":"message","id":"msg_resume","role":"assistant","status":"in_progress","content":[]}}}},
+      {"sse":{"name":"response.content_part.added","data":{"type":"response.content_part.added","sequence_number":1,"item_id":"msg_resume","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}}},
+      {"sse":{"name":"response.output_text.delta","data":{"type":"response.output_text.delta","sequence_number":2,"item_id":"msg_resume","output_index":0,"content_index":0,"delta":"image resumed"}}},
+      {"sse":{"name":"response.output_text.done","data":{"type":"response.output_text.done","sequence_number":3,"item_id":"msg_resume","output_index":0,"content_index":0,"text":"image resumed"}}},
+      {"sse":{"name":"response.content_part.done","data":{"type":"response.content_part.done","sequence_number":4,"item_id":"msg_resume","output_index":0,"content_index":0,"part":{"type":"output_text","text":"image resumed","annotations":[]}}}},
+      {"sse":{"name":"response.output_item.done","data":{"type":"response.output_item.done","sequence_number":5,"output_index":0,"item":{"type":"message","id":"msg_resume","role":"assistant","status":"completed","content":[{"type":"output_text","text":"image resumed","annotations":[]}]}}}},
+      {"sse":{"name":"response.completed","data":{"type":"response.completed","sequence_number":6,"response":{"id":"resp_resume","object":"response","status":"completed","output":[{"type":"message","id":"msg_resume","role":"assistant","status":"completed","content":[{"type":"output_text","text":"image resumed","annotations":[]}]}],"usage":{"input_tokens":7,"output_tokens":2}}}}}
+    ]},
+    {"dialect":"raw-sse","events":[
+      {"sse":{"name":"response.output_item.added","data":{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"type":"message","id":"msg_continue","role":"assistant","status":"in_progress","content":[]}}}},
+      {"sse":{"name":"response.content_part.added","data":{"type":"response.content_part.added","sequence_number":1,"item_id":"msg_continue","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}}},
+      {"sse":{"name":"response.output_text.delta","data":{"type":"response.output_text.delta","sequence_number":2,"item_id":"msg_continue","output_index":0,"content_index":0,"delta":"image continued"}}},
+      {"sse":{"name":"response.output_text.done","data":{"type":"response.output_text.done","sequence_number":3,"item_id":"msg_continue","output_index":0,"content_index":0,"text":"image continued"}}},
+      {"sse":{"name":"response.content_part.done","data":{"type":"response.content_part.done","sequence_number":4,"item_id":"msg_continue","output_index":0,"content_index":0,"part":{"type":"output_text","text":"image continued","annotations":[]}}}},
+      {"sse":{"name":"response.output_item.done","data":{"type":"response.output_item.done","sequence_number":5,"output_index":0,"item":{"type":"message","id":"msg_continue","role":"assistant","status":"completed","content":[{"type":"output_text","text":"image continued","annotations":[]}]}}}},
+      {"sse":{"name":"response.completed","data":{"type":"response.completed","sequence_number":6,"response":{"id":"resp_continue","object":"response","status":"completed","output":[{"type":"message","id":"msg_continue","role":"assistant","status":"completed","content":[{"type":"output_text","text":"image continued","annotations":[]}]}],"usage":{"input_tokens":7,"output_tokens":2}}}}}
+    ]}
+  ],
+  "google-generative-ai": [
+    {"dialect":"raw-sse","refuse":{"status":503,"message":"temporary image fixture overload"}},
+    {"dialect":"raw-sse","events":[{"sse":{"data":{"candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"name":"paint","args":{}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":2,"totalTokenCount":9}}}}]},
+    {"dialect":"raw-sse","events":[{"sse":{"data":{"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"image stored"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":2,"totalTokenCount":9}}}}]},
+    {"dialect":"raw-sse","events":[{"sse":{"data":{"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"image resumed"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":2,"totalTokenCount":9}}}}]},
+    {"dialect":"raw-sse","events":[{"sse":{"data":{"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"image continued"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":2,"totalTokenCount":9}}}}]}
+  ],
+  "pi-messages": [
+    {"dialect":"raw-sse","refuse":{"status":503,"message":"temporary image fixture overload"}},
+    {"dialect":"raw-sse","events":[{"sse":{"data":{"type":"toolcall_start","id":"image-call","toolName":"paint"}}},{"sse":{"data":{"type":"toolcall_delta","delta":"{}"}}},{"sse":{"data":{"type":"done","stopReason":"toolUse","usage":{"input":7,"output":2}}}}]},
+    {"dialect":"raw-sse","events":[{"sse":{"data":{"type":"text_delta","delta":"image stored"}}},{"sse":{"data":{"type":"done","stopReason":"stop","usage":{"input":7,"output":2}}}}]},
+    {"dialect":"raw-sse","events":[{"sse":{"data":{"type":"text_delta","delta":"image resumed"}}},{"sse":{"data":{"type":"done","stopReason":"stop","usage":{"input":7,"output":2}}}}]},
+    {"dialect":"raw-sse","events":[{"sse":{"data":{"type":"text_delta","delta":"image continued"}}},{"sse":{"data":{"type":"done","stopReason":"stop","usage":{"input":7,"output":2}}}}]}
+  ]
+}

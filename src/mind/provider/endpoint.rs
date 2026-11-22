@@ -2,11 +2,17 @@
 
 use crate::mind::provider::model::{Api, Model};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Where a credential comes from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", tag = "kind")]
 pub enum Auth {
+    #[serde(rename = "github-copilot")]
+    GitHubCopilot {
+        #[serde(flatten)]
+        config: super::copilot::Config,
+    },
     /// An API key read from the first environment variable that is set; several names, because
     /// vendors rename them and users still have the old ones exported.
     ApiKey {
@@ -41,10 +47,32 @@ pub enum Auth {
 }
 
 impl Auth {
+    pub(crate) fn refresh_config(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::OAuth {
+                token_url: Some(url),
+                client_id: Some(client),
+                ..
+            } if super::http::usable_url(url) && !client.trim().is_empty() => Some((url, client)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn tokens_ready(&self, tokens: &super::oauth::Tokens, now: u64) -> bool {
+        tokens.has_fresh_access(now)
+            || ((self.refresh_config().is_some()
+                || matches!(self, Self::GitHubCopilot { config } if config.valid()))
+                && tokens
+                    .refresh
+                    .as_ref()
+                    .is_some_and(|value| !value.trim().is_empty()))
+    }
+
     /// What a person would have to do to enable this.
     #[must_use]
     pub fn requirement(&self) -> String {
         match self {
+            Self::GitHubCopilot { .. } => "sign in to GitHub Copilot with :login".into(),
             Self::ApiKey { vars } => format!("set {}", vars.join(" or ")),
             Self::OAuth { service, .. } => format!("sign in to {service}"),
             // `resolve` returns `None` for both whatever the machine holds, so these say "not yet"
@@ -67,6 +95,9 @@ impl Auth {
     #[must_use]
     pub fn resolve(&self) -> Option<String> {
         match self {
+            Self::GitHubCopilot { .. } => std::env::var("COPILOT_GITHUB_TOKEN")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
             Self::ApiKey { vars } => vars
                 .iter()
                 .filter_map(|v| std::env::var(v).ok())
@@ -82,6 +113,11 @@ impl Auth {
     #[must_use]
     pub fn vars(&self) -> &[String] {
         match self {
+            Self::GitHubCopilot { .. } => {
+                static VARS: std::sync::LazyLock<[String; 1]> =
+                    std::sync::LazyLock::new(|| ["COPILOT_GITHUB_TOKEN".into()]);
+                &*VARS
+            }
             Self::ApiKey { vars } => vars,
             Self::OAuth { .. } | Self::AwsSigV4 | Self::GoogleAdc | Self::None => &[],
         }
@@ -99,6 +135,12 @@ pub struct Provider {
     /// Where its API lives, when that is fixed. `None` for endpoints derived from configuration
     /// such as a Bedrock region, which carry an explicit `compat` instead.
     pub base_url: Option<String>,
+    /// Additional origins explicitly permitted to receive this provider's requests and credentials.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_origins: Vec<String>,
+    /// Request headers overriding non-authentication protocol headers.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
     /// Which protocol it speaks.
     pub api: Api,
     /// How to authenticate.
@@ -114,6 +156,9 @@ pub struct Provider {
     /// cached, never written into the configuration.
     #[serde(default)]
     pub discover: bool,
+    /// Explicit discovery policy, overriding the legacy discover/details fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<crate::mind::discovering::Strategy>,
     /// Where a discovered model's own details are asked, when its listing leaves them out.
     /// `"ollama"` reads `/api/show` for each: its window, and whether it reasons or sees.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -124,15 +169,67 @@ pub struct Provider {
 }
 
 impl Provider {
-    /// Whether a credential for this provider is present. For OAuth that means signed in, which a
-    /// token that has since gone stale still answers yes to, since renewing is what happens next.
+    pub(crate) fn saved_tokens<'a>(
+        &self,
+        store: &'a super::oauth::Store,
+    ) -> Option<&'a super::oauth::Tokens> {
+        if store
+            .configurations
+            .get(&self.id)
+            .is_some_and(|scope| scope != &self.credential_scope())
+        {
+            return None;
+        }
+        store.get(&self.id)
+    }
+
+    pub(crate) fn credential_scope(&self) -> String {
+        let encoded = serde_json::to_vec(&(
+            &self.id,
+            &self.auth,
+            &self.base_url,
+            &self.credential_origins,
+        ))
+        .unwrap_or_default();
+        super::identity::digest("saved-provider-key-v1", &[&encoded])
+    }
+
+    pub(crate) fn saved_key<'a>(&self, store: &'a super::oauth::Store) -> Option<&'a str> {
+        store
+            .api_keys
+            .get(&self.id)
+            .filter(|key| {
+                key.configuration == self.credential_scope() && !key.value.trim().is_empty()
+            })
+            .map(|key| key.value.as_str())
+    }
+
+    pub(crate) fn resolve_key(&self) -> Result<Option<String>, super::oauth::Error> {
+        if let Some(key) = self.auth.resolve() {
+            return Ok(Some(key));
+        }
+        if !matches!(self.auth, Auth::ApiKey { .. }) {
+            return Ok(None);
+        }
+        let store = super::oauth::Store::load()?;
+        Ok(self.saved_key(&store).map(str::to_owned))
+    }
+
+    /// Whether credentials are available without an interactive sign-in.
     #[must_use]
     pub fn is_configured(&self) -> bool {
         match &self.auth {
             Auth::None => true,
-            Auth::OAuth { .. } => crate::mind::provider::oauth::Store::load()
-                .is_ok_and(|store| store.get(&self.id).is_some()),
-            _ => self.auth.resolve().is_some(),
+            Auth::GitHubCopilot { .. } => {
+                self.auth.resolve().is_some()
+                    || super::oauth::Store::load()
+                        .is_ok_and(|store| super::copilot::signed_in(&store, self))
+            }
+            Auth::OAuth { .. } => crate::mind::provider::oauth::Store::load().is_ok_and(|store| {
+                self.saved_tokens(&store)
+                    .is_some_and(|tokens| self.auth.tokens_ready(tokens, super::oauth::now()))
+            }),
+            _ => self.resolve_key().is_ok_and(|key| key.is_some()),
         }
     }
 
@@ -143,26 +240,43 @@ impl Provider {
     }
 }
 
-/// A provider exactly as a catalog file declares it, before the provider id and api are stamped
-/// onto each of its models.
+/// A provider declaration with unresolved model defaults.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 struct ProviderDecl {
     id: String,
     name: String,
     #[serde(default)]
     base_url: Option<String>,
+    #[serde(default)]
+    credential_origins: Vec<String>,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
     api: Api,
     auth: Auth,
     #[serde(default)]
     compat: Option<crate::mind::provider::compat::Compat>,
     #[serde(default)]
-    models: Vec<Model>,
+    models: Vec<ModelDecl>,
     #[serde(default)]
     discover: bool,
+    #[serde(default)]
+    discovery: Option<crate::mind::discovering::Strategy>,
     #[serde(default)]
     details: Option<String>,
     #[serde(default)]
     avoid: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+struct ModelDecl {
+    #[serde(default, deserialize_with = "explicit_api")]
+    api: Option<Api>,
+    #[serde(flatten)]
+    model: Model,
+}
+
+fn explicit_api<'de, D: serde::Deserializer<'de>>(input: D) -> Result<Option<Api>, D::Error> {
+    Api::deserialize(input).map(Some)
 }
 
 impl From<ProviderDecl> for Provider {
@@ -171,29 +285,39 @@ impl From<ProviderDecl> for Provider {
             id,
             name,
             base_url,
-            api,
-            auth,
-            compat,
-            mut models,
-            discover,
-            details,
-            avoid,
-        } = decl;
-        for model in &mut models {
-            model.provider.clone_from(&id);
-            model.api = api;
-            // Field by field, so a model correcting one flag keeps the rest of its provider's.
-            model.compat = Some(model.compat.unwrap_or_default().over(compat));
-        }
-        Self {
-            id,
-            name,
-            base_url,
+            credential_origins,
+            headers,
             api,
             auth,
             compat,
             models,
             discover,
+            discovery,
+            details,
+            avoid,
+        } = decl;
+        let models = models
+            .into_iter()
+            .map(|decl| {
+                let mut model = decl.model;
+                model.provider.clone_from(&id);
+                model.api = decl.api.unwrap_or(api);
+                model.compat = Some(model.compat.unwrap_or_default().over(compat));
+                model
+            })
+            .collect();
+        Self {
+            id,
+            name,
+            base_url,
+            credential_origins,
+            headers,
+            api,
+            auth,
+            compat,
+            models,
+            discover,
+            discovery,
             details,
             avoid,
         }
@@ -230,6 +354,43 @@ mod tests {
         assert_eq!(p.models.len(), 2);
         assert!(p.models.iter().all(|m| m.provider == "groq"));
         assert!(p.models.iter().all(|m| m.api == Api::OpenAiCompletions));
+    }
+
+    #[test]
+    fn omitted_model_api_inherits_and_explicit_api_survives_round_trip() {
+        let mut value = groq();
+        value["api"] = serde_json::json!("anthropic-messages");
+        value["models"][1]["api"] = serde_json::json!("openai-responses");
+        value["models"][1]["provider"] = serde_json::json!("incorrect");
+        let provider = declared(value);
+        assert_eq!(provider.models[0].api, Api::AnthropicMessages);
+        assert_eq!(provider.models[1].api, Api::OpenAiResponses);
+        assert!(provider.models.iter().all(|model| model.provider == "groq"));
+        let encoded = serde_json::to_value(&provider).expect("serialize");
+        assert_eq!(declared(encoded), provider);
+    }
+
+    #[test]
+    fn explicit_default_protocol_is_not_mistaken_for_an_omitted_api() {
+        let mut value = groq();
+        value["api"] = serde_json::json!("anthropic-messages");
+        value["models"][1]["api"] = serde_json::json!("openai-completions");
+        let provider = declared(value);
+        assert_eq!(provider.models[0].api, Api::AnthropicMessages);
+        assert_eq!(provider.models[1].api, Api::OpenAiCompletions);
+    }
+
+    #[test]
+    fn an_invalid_explicit_model_protocol_is_not_replaced_by_the_default() {
+        for api in [
+            serde_json::json!("unknown"),
+            serde_json::Value::Null,
+            serde_json::json!(12),
+        ] {
+            let mut value = groq();
+            value["models"][1]["api"] = api;
+            assert!(serde_json::from_value::<Provider>(value).is_err());
+        }
     }
 
     #[test]

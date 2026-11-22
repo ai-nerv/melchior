@@ -24,6 +24,9 @@ pub struct Tokens {
     pub refresh: Option<String>,
     /// Unix seconds after which `access` is no longer accepted.
     pub expires_at: u64,
+    /// Local login lineage, retained across token renewal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<String>,
 }
 
 /// How long before the stated expiry a token is treated as already expired, so that one does not
@@ -31,6 +34,21 @@ pub struct Tokens {
 const EARLY: u64 = 60;
 
 impl Tokens {
+    pub(crate) fn identity(&self) -> String {
+        self.binding
+            .as_ref()
+            .filter(|value| value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()))
+            .cloned()
+            .unwrap_or_else(|| {
+                super::identity::digest("oauth-legacy-v1", &[self.access.as_bytes()])
+            })
+    }
+
+    #[must_use]
+    pub fn has_fresh_access(&self, now: u64) -> bool {
+        !self.access.trim().is_empty() && !self.is_stale(now)
+    }
+
     /// Whether this should be renewed before it is used.
     #[must_use]
     pub fn is_stale(&self, now: u64) -> bool {
@@ -40,9 +58,29 @@ impl Tokens {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Store {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub copilot: BTreeMap<String, super::copilot::Account>,
     /// Keyed by provider id, which is what a config and a model name already use.
     #[serde(default)]
     pub providers: BTreeMap<String, Tokens>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub api_keys: BTreeMap<String, SavedKey>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attempts: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub configurations: BTreeMap<String, String>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedKey {
+    pub value: String,
+    pub configuration: String,
+}
+
+impl std::fmt::Debug for SavedKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SavedKey([redacted])")
+    }
 }
 
 impl Store {
@@ -184,6 +222,7 @@ impl Store {
     /// Record a refreshed token. A provider that issues no replacement refresh token keeps the one
     /// already stored: RFC 6749 section 6 leaves it optional, and dropping it signs the person out.
     pub fn renew(&mut self, provider: &str, mut tokens: Tokens) {
+        tokens.binding = self.get(provider).map(Tokens::identity);
         if tokens.refresh.is_none() {
             tokens.refresh = self.get(provider).and_then(|held| held.refresh.clone());
         }
@@ -200,6 +239,7 @@ mod tests {
             access: "at".into(),
             refresh: Some("rt".into()),
             expires_at,
+            binding: None,
         }
     }
 
@@ -251,5 +291,23 @@ mod tests {
         let json = r#"{"providers":{"p":{"access":"a","expires_at":1}}}"#;
         let store: Store = serde_json::from_str(json).expect("decode");
         assert_eq!(store.get("p").expect("tokens").refresh, None);
+    }
+
+    #[test]
+    fn renewals_keep_login_lineage_and_fresh_logins_replace_it() {
+        let mut store = Store::default();
+        let mut first = tokens(1000);
+        first.binding = Some(super::super::identity::nonce().expect("nonce"));
+        let expected = first.identity();
+        store.put("p", first);
+        let mut second = tokens(2000);
+        second.binding = Some(super::super::identity::nonce().expect("nonce"));
+        assert_ne!(second.identity(), expected);
+        store.renew("p", second.clone());
+        assert_eq!(store.get("p").expect("renewed").identity(), expected);
+        store.forget("p");
+        store.put("p", second.clone());
+        assert_eq!(store.get("p").expect("login").identity(), second.identity());
+        assert_ne!(second.identity(), expected);
     }
 }

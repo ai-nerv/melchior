@@ -20,11 +20,14 @@ fn provider(url: &str) -> Provider {
         id: "local".into(),
         name: "Local".into(),
         base_url: Some(url.into()),
+        credential_origins: Vec::new(),
+        headers: Default::default(),
         api: crate::mind::provider::model::Api::OpenAiCompletions,
         auth: Auth::None,
         compat: None,
         models: Vec::new(),
         discover: false,
+        discovery: None,
         details: None,
         avoid: Vec::new(),
     }
@@ -147,11 +150,7 @@ async fn a_provider_off_this_machine_over_plain_http_is_never_asked() {
     let (outcome, waits) = asked(&lua(), "http://models.invalid/v1").await;
     let why = outcome.expect_err("refused");
     assert_eq!(why.class, RetryClass::Invalid, "{}", why.message);
-    assert!(
-        why.message.contains("http://models.invalid "),
-        "{}",
-        why.message
-    );
+    assert!(why.message.contains("base_url"), "{}", why.message);
     assert!(waits.is_empty(), "asked again {} times", waits.len());
 }
 

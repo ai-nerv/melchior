@@ -9,6 +9,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Options {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip)]
+    pub(crate) provider_session: Option<String>,
+    #[serde(skip)]
+    pub(crate) continuation_binding: Option<String>,
+    #[serde(skip)]
+    pub(crate) disable_preferred_strict: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingLevel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
@@ -69,9 +77,34 @@ pub struct StreamState {
 pub trait Adapter {
     fn endpoint(&self, base_url: &str, model: &Model) -> String;
 
+    fn request_endpoint(
+        &self,
+        base_url: &str,
+        model: &Model,
+        _body: &serde_json::Value,
+    ) -> Result<String, String> {
+        Ok(self.endpoint(base_url, model))
+    }
+
     fn headers(&self, key: Option<&str>) -> Vec<(String, String)>;
 
     fn request(&self, model: &Model, context: &Context, options: &Options) -> serde_json::Value;
+
+    fn prepare(
+        &self,
+        model: &Model,
+        context: &Context,
+        options: &Options,
+    ) -> Result<(serde_json::Value, Option<crate::mind::model::RequestFrame>), String> {
+        if context
+            .tools
+            .iter()
+            .any(|tool| tool.strict == Some(crate::mind::model::ToolStrictness::Require))
+        {
+            return Err("this adapter does not support required strict tools".into());
+        }
+        Ok(self.request_observed(model, context, options))
+    }
 
     fn request_observed(
         &self,
@@ -114,5 +147,22 @@ mod tests {
     #[test]
     fn a_fresh_stream_remembers_nothing() {
         assert!(StreamState::default().scratch.is_null());
+    }
+
+    #[test]
+    fn credential_binding_is_never_serialized_or_accepted_from_callers() {
+        let options: Options = serde_json::from_value(serde_json::json!({
+            "continuation_binding":"forged", "__credential_binding":"forged"
+        }))
+        .expect("options");
+        assert!(options.continuation_binding.is_none());
+        let options = Options {
+            continuation_binding: Some("internal".into()),
+            ..options
+        };
+        assert_eq!(
+            serde_json::to_value(options).expect("options"),
+            serde_json::json!({})
+        );
     }
 }

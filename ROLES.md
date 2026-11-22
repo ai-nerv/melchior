@@ -206,6 +206,27 @@ fills it.
 
 Plus the family floor.
 
+`ask.context.messages` can carry a `system` message with one `tool_changes` content
+block: `{ "type": "tool_changes", "added": [tool], "removed": ["name"] }`. Each added
+tool uses the ordinary neutral declaration, including its optional strictness policy.
+When changes are present, `context.tools` is the initial tool state, not the final state.
+Replay removes names before adding or replacing declarations. This is an opt-in wire
+extension; a role that cannot decode the block must refuse it, not ignore it. It does
+not grant permission to execute a tool. Magi's ordinary session/journal does not yet
+produce or durably replay these entries; direct broker callers can supply them.
+
+Optional `capabilities.session_identity: true` advertises acceptance of
+`ask.wants.session_id`: an opaque, stable conversation identity, not the per-request
+`about` label. Its bound is 1–256 UTF-8 bytes with no control characters; absent means
+no identity. Magi only sends it to roles explicitly advertising support, replacing any
+configured value with a host-owned SHA-256 identifier scoped to project, memory socket
+and current transcript. Separate agent transcripts do not share an identity even when
+they share a run ID. The current scribe transcript takes precedence after resume;
+unrecorded sessions use the configured transcript or journal ID. Helpers omit it.
+Changing the project or memory namespace changes the identity. The model role owns any
+further account/model/endpoint scoping and protocol-specific cache or routing fields.
+Acceptance does not promise cache hits, retention, or affinity on every protocol.
+
 `ask` refuses before sending once its run has spent `spend_cap_usd` (10 unless set; `0` or `false`
 for no cap). The refusal is `failed` with `why: "invalid"`, and a coordinator ends the turn with it
 rather than retrying.

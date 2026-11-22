@@ -1,0 +1,2799 @@
+{
+  "schema": 1,
+  "reference": {
+    "repository": "https://github.com/earendil-works/pi",
+    "revision": "5a7479a88390d947335a1a6609936897be0a7891",
+    "package_version": "1.6.0",
+    "registry": "packages/ai/src/providers/all.ts",
+    "registry_sha256": "1b184fc2a5099b2005154be51a3a81074dba739b8d83b58849835aff22c43952",
+    "observed_at": "2026-11-20",
+    "model_catalog": {
+      "package": "@earendil-works/pi-ai",
+      "version": "1.6.0",
+      "tarball": "https://registry.npmjs.org/@earendil-works/pi-ai/-/pi-ai-1.6.0.tgz",
+      "sha256": "d68312ec574bc959cb7fee26da4f4876d067aed9bbbe76e876359e60d2294747",
+      "integrity": "sha512-9hL+eygFDEiFp//cydeUfmFsKmEqpmvsNPb10Y1W8+m5K9O+sx1hMStfu6nukrBD5sl6mP4RykCYBBNEgsVLfw==",
+      "source_commit": null,
+      "provenance": "Published release data; npm metadata does not declare gitHead.",
+      "records": {
+        "chat": 1698,
+        "classifier": 81,
+        "image": 74
+      }
+    }
+  },
+  "providers": [
+    {
+      "id": "amazon-bedrock",
+      "source": {
+        "path": "packages/ai/src/providers/amazon-bedrock.ts",
+        "sha256": "e32611e8d2d4e71ee5d0ba426da60c0aecf42d1bc34ccc3d0d49ce877c621a8c"
+      },
+      "baseline": "missing",
+      "apis": [
+        "bedrock-converse-stream"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": null,
+        "strategy": "provider-specific"
+      },
+      "auth": {
+        "methods": [
+          "bearer-token",
+          "aws-credential-chain"
+        ],
+        "environment": [
+          "AWS_BEARER_TOKEN_BEDROCK",
+          "AWS_PROFILE",
+          "AWS_ACCESS_KEY_ID",
+          "AWS_SECRET_ACCESS_KEY",
+          "AWS_SESSION_TOKEN",
+          "AWS_REGION",
+          "AWS_DEFAULT_REGION",
+          "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+          "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+          "AWS_WEB_IDENTITY_TOKEN_FILE"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/amazon-bedrock.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/amazon-bedrock.json",
+          "sha256": "28e7726b709dcef16af6108728ced704238c3b6641089723cb453f77c6913ab1",
+          "apis": [
+            "bedrock-converse-stream"
+          ],
+          "records": {
+            "chat": 208
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "ant-ling",
+      "source": {
+        "path": "packages/ai/src/providers/ant-ling.ts",
+        "sha256": "20ba100f8a9150f809fc42bf60f1d23840cc358d636793f1ec9fddf0e9feb2a7"
+      },
+      "baseline": "missing",
+      "apis": [
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://api.ant-ling.com/v1",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "ANT_LING_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/ant-ling.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/ant-ling.json",
+          "sha256": "ed14c342f8142261c3d8af9749d0084a85b6b900c8c37c68759f0d2d19574a8f",
+          "apis": [
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 3
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "anthropic",
+      "source": {
+        "path": "packages/ai/src/providers/anthropic.ts",
+        "sha256": "433ed7ad9d512fbfb80553c047ff18f02654e3e43dd6b9723953220077e6220a"
+      },
+      "baseline": "existing-partial",
+      "apis": [
+        "anthropic-messages"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://api.anthropic.com",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key",
+          "bearer-token",
+          "oauth",
+          "workload-identity"
+        ],
+        "environment": [
+          "ANTHROPIC_API_KEY",
+          "ANTHROPIC_OAUTH_TOKEN",
+          "ANTHROPIC_AUTH_TOKEN",
+          "ANTHROPIC_FEDERATION_RULE_ID",
+          "ANTHROPIC_ORGANIZATION_ID",
+          "ANTHROPIC_IDENTITY_TOKEN_FILE",
+          "ANTHROPIC_SERVICE_ACCOUNT_ID",
+          "ANTHROPIC_WORKSPACE_ID"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/anthropic.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/anthropic.json",
+          "sha256": "ebd207ed51603e2060b870bef72c86e9de02d3a14f78bd9813f2de0db27dbdef",
+          "apis": [
+            "anthropic-messages"
+          ],
+          "records": {
+            "chat": 18
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "google",
+      "source": {
+        "path": "packages/ai/src/providers/google.ts",
+        "sha256": "2d807d5f9273ede8c23970fe0414883ab362c677df80e4603d30b621232a2036"
+      },
+      "baseline": "existing-partial",
+      "apis": [
+        "google-generative-ai"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "GEMINI_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/google.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/google.json",
+          "sha256": "69b4331aef09263c13edbf44e03c48a2b9721c663c693495bd2594028857939c",
+          "apis": [
+            "google-generative-ai"
+          ],
+          "records": {
+            "chat": 26
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "google-vertex",
+      "source": {
+        "path": "packages/ai/src/providers/google-vertex.ts",
+        "sha256": "5e321e6d5b80824752ca96e7c9aba8a3fccce722a1793a40d5341a0406ef4878"
+      },
+      "baseline": "missing",
+      "apis": [
+        "google-vertex"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": null,
+        "strategy": "provider-specific"
+      },
+      "auth": {
+        "methods": [
+          "api-key",
+          "google-adc",
+          "service-account"
+        ],
+        "environment": [
+          "GOOGLE_CLOUD_API_KEY",
+          "GOOGLE_CLOUD_PROJECT",
+          "GCLOUD_PROJECT",
+          "GOOGLE_CLOUD_LOCATION",
+          "GOOGLE_APPLICATION_CREDENTIALS"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/google-vertex.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/google-vertex.json",
+          "sha256": "3b444f3ddfa48dcea61e52a2c9da2bc57fcbdbbb4bb223b73aa5032bde035e6e",
+          "apis": [
+            "google-vertex"
+          ],
+          "records": {
+            "chat": 17
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "openai",
+      "source": {
+        "path": "packages/ai/src/providers/openai.ts",
+        "sha256": "899573159312b94f4ae53a3af25d3b92c86b583f7635dd3c14d95395b46f4644"
+      },
+      "baseline": "existing-partial",
+      "apis": [
+        "openai-decisions",
+        "openai-responses"
+      ],
+      "operations": [
+        "chat",
+        "classifier"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://api.openai.com/v1",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key",
+          "oauth"
+        ],
+        "environment": [
+          "OPENAI_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/openai.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/openai.json",
+          "sha256": "5f10dc275b50b6bcefa065281620ffc1134c2cc12388f68e7620530b7bbad021",
+          "apis": [
+            "openai-decisions",
+            "openai-responses"
+          ],
+          "records": {
+            "chat": 47,
+            "classifier": 1
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "classification",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "azure",
+      "source": {
+        "path": "packages/ai/src/providers/azure.ts",
+        "sha256": "6eca38c6ef2adcf814d3fab93c580a520240d90eac750609761b3e581d2f8545"
+      },
+      "baseline": "missing",
+      "apis": [
+        "azure-openai-responses",
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": null,
+        "strategy": "provider-specific"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "AZURE_OPENAI_API_KEY",
+          "AZURE_OPENAI_BASE_URL",
+          "AZURE_OPENAI_RESOURCE_NAME",
+          "AZURE_OPENAI_DEPLOYMENT_NAME_MAP",
+          "AZURE_OPENAI_API_VERSION"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/azure.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/azure.json",
+          "sha256": "e691df3cb8160d1f0a2740278b68e1abee9aee2ab1a2ea9088b28824350ff2a1",
+          "apis": [
+            "azure-openai-responses",
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 48
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "openai-codex",
+      "source": {
+        "path": "packages/ai/src/providers/openai-codex.ts",
+        "sha256": "c63a59ad55921466182f2033240178fca715faf09dd7fd9878533829ca90a70f"
+      },
+      "baseline": "missing",
+      "apis": [
+        "openai-codex-responses"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://chatgpt.com/backend-api",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "oauth"
+        ],
+        "environment": []
+      },
+      "models": {
+        "source": "packages/ai/src/providers/openai-codex.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/openai-codex.json",
+          "sha256": "3508571266bc2f2bc325d56340102c50313e9ed6c8ec427662e8fd491fb701df",
+          "apis": [
+            "openai-codex-responses"
+          ],
+          "records": {
+            "chat": 10
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "radius",
+      "source": {
+        "path": "packages/ai/src/providers/radius.ts",
+        "sha256": "40acce75f4f5c99cbeb03247cbf0fbdde9e911b097af3c25132cdf1f75346c32"
+      },
+      "baseline": "missing",
+      "apis": [
+        "pi-messages"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": null,
+        "strategy": "provider-specific"
+      },
+      "auth": {
+        "methods": [
+          "api-key",
+          "oauth"
+        ],
+        "environment": [
+          "RADIUS_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/radius.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/radius.json",
+          "sha256": "6dca243532ab8925bf028a2116e365bbfdc9ccc93674e233c9b7e0bcfa564904",
+          "apis": [
+            "pi-messages"
+          ],
+          "records": {
+            "chat": 39
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "account-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "typesafe",
+      "source": {
+        "path": "packages/ai/src/providers/typesafe.ts",
+        "sha256": "24e2b1f19118486e0064e252c3860eba41fade01a2e50147bf7406d00c6f4ba8"
+      },
+      "baseline": "missing",
+      "apis": [
+        "typesafe-system-one"
+      ],
+      "operations": [
+        "classifier"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": null,
+        "strategy": "provider-specific"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "TYPESAFE_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/typesafe.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/typesafe.json",
+          "sha256": "631b03f70597ad656e8f45a393ab46bd4137459b9b499708ac3d5d9d9decd3f2",
+          "apis": [
+            "typesafe-system-one"
+          ],
+          "records": {
+            "classifier": 1
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "classification",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "nvidia",
+      "source": {
+        "path": "packages/ai/src/providers/nvidia.ts",
+        "sha256": "73c981d27b364f83a32983d19f4ded346acf6af7eb4a653334622f891aedf860"
+      },
+      "baseline": "missing",
+      "apis": [
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "NVIDIA_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/nvidia.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/nvidia.json",
+          "sha256": "e1492f6f7b6ddbb4c841349c78f3cbe969ead9709a5da33a90aab1486848e004",
+          "apis": [
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 12
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "deepseek",
+      "source": {
+        "path": "packages/ai/src/providers/deepseek.ts",
+        "sha256": "4d4ac9870d3dcdb13a90627a95598314459f5cc2f8a122f802fab3b0d2840fee"
+      },
+      "baseline": "existing-partial",
+      "apis": [
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://api.deepseek.com",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "DEEPSEEK_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/deepseek.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/deepseek.json",
+          "sha256": "7396969d776ff29140ecf1b6e0038b3a97caf4ab8e0b8d5dffa845f3fd129ebc",
+          "apis": [
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 2
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "github-copilot",
+      "source": {
+        "path": "packages/ai/src/providers/github-copilot.ts",
+        "sha256": "483112d03aeaba3d14c6c1f7afcd805595f401b7d95d833489efae312ff7419f"
+      },
+      "baseline": "existing-partial",
+      "apis": [
+        "anthropic-messages",
+        "openai-completions",
+        "openai-responses",
+        "typesafe-system-one"
+      ],
+      "operations": [
+        "chat",
+        "classifier"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://api.individual.githubcopilot.com",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key",
+          "oauth"
+        ],
+        "environment": [
+          "COPILOT_GITHUB_TOKEN"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/github-copilot.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/github-copilot.json",
+          "sha256": "c689aaca7482ddd042651822cf7e97864059b118d18c452595360fa1daac8665",
+          "apis": [
+            "anthropic-messages",
+            "openai-completions",
+            "openai-responses",
+            "typesafe-system-one"
+          ],
+          "records": {
+            "chat": 35,
+            "classifier": 1
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "classification",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "xai",
+      "source": {
+        "path": "packages/ai/src/providers/xai.ts",
+        "sha256": "841c361fc5ebb2d91c3f6aa46ce008f354ea287cce36ed2105ae815b7e5e9831"
+      },
+      "baseline": "missing",
+      "apis": [
+        "openai-responses"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://api.x.ai/v1",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key",
+          "oauth"
+        ],
+        "environment": [
+          "XAI_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/xai.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/xai.json",
+          "sha256": "db408985a02980ba9d30f359b4f394a7d088cc75e26bd4bef30aecb43077771b",
+          "apis": [
+            "openai-responses"
+          ],
+          "records": {
+            "chat": 4
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "groq",
+      "source": {
+        "path": "packages/ai/src/providers/groq.ts",
+        "sha256": "a8bbced4fbc37370892fec68fb7f03cf634d08d134d9f003fa63edb5a8b60873"
+      },
+      "baseline": "missing",
+      "apis": [
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://api.groq.com/openai/v1",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "GROQ_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/groq.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/groq.json",
+          "sha256": "087df37206e9eed8b10f1e558e4c496289bef60074b7e8afba4f20fb102b4ec2",
+          "apis": [
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 7
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "cerebras",
+      "source": {
+        "path": "packages/ai/src/providers/cerebras.ts",
+        "sha256": "457fc35499abea92be4ad7add4f08502d069293380be61bf05b11ae5352bce4f"
+      },
+      "baseline": "missing",
+      "apis": [
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://api.cerebras.ai/v1",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "CEREBRAS_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/cerebras.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/cerebras.json",
+          "sha256": "0936faaf112d8ded0a05c3eabfc1755cabb3ae46e6397a89f3e4e264613abde9",
+          "apis": [
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 2
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "openrouter",
+      "source": {
+        "path": "packages/ai/src/providers/openrouter.ts",
+        "sha256": "42e9f9f45305a9a5d955b81070aa6bede77ea04463059ed89bcfe6b07fd4cdf2"
+      },
+      "baseline": "existing-partial",
+      "apis": [
+        "anthropic-messages",
+        "openai-completions",
+        "typesafe-system-one"
+      ],
+      "operations": [
+        "chat",
+        "classifier"
+      ],
+      "excluded_operations": [
+        "image-generation"
+      ],
+      "endpoint": {
+        "base_url": null,
+        "strategy": "provider-specific"
+      },
+      "auth": {
+        "methods": [
+          "api-key",
+          "oauth"
+        ],
+        "environment": [
+          "OPENROUTER_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/openrouter.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/openrouter.json",
+          "sha256": "66b7baa1b38c48e1b966a76cc035ade8a523ee082d532b32a33a8791c49768b9",
+          "apis": [
+            "anthropic-messages",
+            "openai-completions",
+            "openrouter-images",
+            "typesafe-system-one"
+          ],
+          "records": {
+            "chat": 417,
+            "classifier": 44,
+            "image": 74
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "account-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "classification",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "vercel-ai-gateway",
+      "source": {
+        "path": "packages/ai/src/providers/vercel-ai-gateway.ts",
+        "sha256": "f469f498e7de52915525d3ac645ae8c73bdb6dee7624e7ab68d139c7e91cc279"
+      },
+      "baseline": "missing",
+      "apis": [
+        "anthropic-messages",
+        "typesafe-system-one"
+      ],
+      "operations": [
+        "chat",
+        "classifier"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://ai-gateway.vercel.sh",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "AI_GATEWAY_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/vercel-ai-gateway.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/vercel-ai-gateway.json",
+          "sha256": "8ec124d6a2b3c7b86eec0da83e35a6c154755fdc0d855114baef291905e44411",
+          "apis": [
+            "anthropic-messages",
+            "typesafe-system-one"
+          ],
+          "records": {
+            "chat": 305,
+            "classifier": 27
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "classification",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "zai",
+      "source": {
+        "path": "packages/ai/src/providers/zai.ts",
+        "sha256": "489a48539c3abc291315dad6f8b7c5554f5f3f9bf8b2a11a60d4ab2cbd3c2f74"
+      },
+      "baseline": "existing-partial",
+      "apis": [
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://api.z.ai/api/coding/paas/v4",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "ZAI_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/zai.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/zai.json",
+          "sha256": "787dac21e0cedab618d353f6f22368ecd0c7aeff8153d35e3f46f27198211645",
+          "apis": [
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 7
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "zai-coding-cn",
+      "source": {
+        "path": "packages/ai/src/providers/zai-coding-cn.ts",
+        "sha256": "89ff82b1f7b1a7e3427498598ce03574d76217f1c38b0d1731be82b6d8ff87a7"
+      },
+      "baseline": "missing",
+      "apis": [
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "ZAI_CODING_CN_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/zai-coding-cn.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/zai-coding-cn.json",
+          "sha256": "f3e8311e1059b4d50ee7799a8f7f98c6f1d940f5dac57e864f23a90b9a3fed73",
+          "apis": [
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 4
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "mistral",
+      "source": {
+        "path": "packages/ai/src/providers/mistral.ts",
+        "sha256": "dfcd087d7317d6a6cd1acf701547567435f5eaf0c1cc1d8eb89eed7e977c2fb3"
+      },
+      "baseline": "missing",
+      "apis": [
+        "mistral-conversations"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://api.mistral.ai",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "MISTRAL_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/mistral.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/mistral.json",
+          "sha256": "8d55ee40805775b6f3cf7af58644dde3d210f5b6740d26bb92e2cf4c29c1dc8b",
+          "apis": [
+            "mistral-conversations"
+          ],
+          "records": {
+            "chat": 34
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "minimax",
+      "source": {
+        "path": "packages/ai/src/providers/minimax.ts",
+        "sha256": "d571a6a8b5a47daf40b034a2dae4ac902a252fbd44b073c4caee8eeb1d7035b5"
+      },
+      "baseline": "missing",
+      "apis": [
+        "anthropic-messages"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://api.minimax.io/anthropic",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "MINIMAX_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/minimax.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/minimax.json",
+          "sha256": "1e0459dda3858ea24151182106fc4179b95f43a0a8dffc1c3d2e7db4c2d9206e",
+          "apis": [
+            "anthropic-messages"
+          ],
+          "records": {
+            "chat": 4
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "minimax-cn",
+      "source": {
+        "path": "packages/ai/src/providers/minimax-cn.ts",
+        "sha256": "ae3170234556ef355f7cffcfc666888992ae50caa8daf07352f22bac69cca0ba"
+      },
+      "baseline": "missing",
+      "apis": [
+        "anthropic-messages"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://api.minimaxi.com/anthropic",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "MINIMAX_CN_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/minimax-cn.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/minimax-cn.json",
+          "sha256": "fa15d1f67a07046d38e191af9bd97ed922ba45a99a11af4ad281151cc6b762aa",
+          "apis": [
+            "anthropic-messages"
+          ],
+          "records": {
+            "chat": 4
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "moonshotai",
+      "source": {
+        "path": "packages/ai/src/providers/moonshotai.ts",
+        "sha256": "2e269cca0231ebdbd2a58848ab3d19b0a43697e132b48a679e3c1b0cd4897665"
+      },
+      "baseline": "missing",
+      "apis": [
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://api.moonshot.ai/v1",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "MOONSHOT_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/moonshotai.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/moonshotai.json",
+          "sha256": "5485a0e821a48f8a4a6ba88e355d438abc12284332e0f94226f0c2c1b2d1c328",
+          "apis": [
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 6
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "moonshotai-cn",
+      "source": {
+        "path": "packages/ai/src/providers/moonshotai-cn.ts",
+        "sha256": "da8ec0ed30a2cf42972cead61a93b1fcb64380095f9d062ee4ed9e4807ebd5bc"
+      },
+      "baseline": "missing",
+      "apis": [
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://api.moonshot.cn/v1",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "MOONSHOT_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/moonshotai-cn.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/moonshotai-cn.json",
+          "sha256": "88c8343ec62fb19b169f71ed1b1bc9dfb7ab54f14c77b7ed2d230f998de5ab4b",
+          "apis": [
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 6
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "huggingface",
+      "source": {
+        "path": "packages/ai/src/providers/huggingface.ts",
+        "sha256": "51c4af194c9989ab033c5b3303831ec9e2df999f51d9fa40ab6d28f632e8ff43"
+      },
+      "baseline": "missing",
+      "apis": [
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://router.huggingface.co/v1",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "HF_TOKEN"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/huggingface.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/huggingface.json",
+          "sha256": "c03ec1c80856b805dd67253026376c8931683c014809a0e4b86e21c1a3978968",
+          "apis": [
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 87
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "fireworks",
+      "source": {
+        "path": "packages/ai/src/providers/fireworks.ts",
+        "sha256": "72dbb53e3bb8b0bc6c42dd7937ec11dd0126efe3176f11153b1d599a0c7776af"
+      },
+      "baseline": "missing",
+      "apis": [
+        "anthropic-messages",
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://api.fireworks.ai/inference",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "FIREWORKS_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/fireworks.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/fireworks.json",
+          "sha256": "71811ef203ad9e7284b6aa6647dedc665847a96a793cb8f364967256e3b6c647",
+          "apis": [
+            "anthropic-messages",
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 27
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "together",
+      "source": {
+        "path": "packages/ai/src/providers/together.ts",
+        "sha256": "cbf232b1bfe5753bba855f0a95e2c4d180db8155121effcbdffc955fe090738c"
+      },
+      "baseline": "missing",
+      "apis": [
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://api.together.ai/v1",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "TOGETHER_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/together.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/together.json",
+          "sha256": "d2d3a8dfbcfdf8295ba386f32f5e10665615eb4c1a8b51978e75372a9d487339",
+          "apis": [
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 16
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "baseten",
+      "source": {
+        "path": "packages/ai/src/providers/baseten.ts",
+        "sha256": "c3833be0c64c4d5c96810403e23e966bb779bf2c045619b6fbac18ff27ac92f5"
+      },
+      "baseline": "missing",
+      "apis": [
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://inference.baseten.co/v1",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "BASETEN_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/baseten.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/baseten.json",
+          "sha256": "35c097072e72dd429800e57ce23aa5f80bf992add147f0bb865a355442a962d7",
+          "apis": [
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 15
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "opencode",
+      "source": {
+        "path": "packages/ai/src/providers/opencode.ts",
+        "sha256": "49ae87fcc03c8a7a62191e336a3b45d5f87349816ced8f9fa5a890463fe4e0cf"
+      },
+      "baseline": "missing",
+      "apis": [
+        "anthropic-messages",
+        "google-generative-ai",
+        "openai-completions",
+        "openai-responses",
+        "typesafe-system-one"
+      ],
+      "operations": [
+        "chat",
+        "classifier"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": null,
+        "strategy": "provider-specific"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "OPENCODE_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/opencode.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/opencode.json",
+          "sha256": "f9a51a893dee152c7db972a237b3fdc8bd328ff430b23b5bb163cb29ae3eca25",
+          "apis": [
+            "anthropic-messages",
+            "google-generative-ai",
+            "openai-completions",
+            "openai-responses",
+            "typesafe-system-one"
+          ],
+          "records": {
+            "chat": 84,
+            "classifier": 2
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "classification",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "opencode-go",
+      "source": {
+        "path": "packages/ai/src/providers/opencode-go.ts",
+        "sha256": "aee7367398cf29698af3048a0a8b42cae4650c2325a9ffaae047ef60a4f6a8c5"
+      },
+      "baseline": "missing",
+      "apis": [
+        "anthropic-messages",
+        "google-generative-ai",
+        "openai-completions",
+        "openai-responses"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": null,
+        "strategy": "provider-specific"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "OPENCODE_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/opencode-go.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/opencode-go.json",
+          "sha256": "5e620954b0dd6a2fba6566557f2624d0f40f78fa55e5cfebb57953d944e2dc15",
+          "apis": [
+            "anthropic-messages",
+            "google-generative-ai",
+            "openai-completions",
+            "openai-responses"
+          ],
+          "records": {
+            "chat": 33
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "kimi-coding",
+      "source": {
+        "path": "packages/ai/src/providers/kimi-coding.ts",
+        "sha256": "7b74ceaa07c4b90fbafccaeff5085bc6493bce28a04097540a3589f23cbc14bd"
+      },
+      "baseline": "missing",
+      "apis": [
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://api.kimi.com/coding/v1",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key",
+          "oauth"
+        ],
+        "environment": [
+          "KIMI_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/kimi-coding.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/kimi-coding.json",
+          "sha256": "81311aa08818538e203f985d89631f0c6a49623141532fa893db8059e8f82753",
+          "apis": [
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 6
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "meta",
+      "source": {
+        "path": "packages/ai/src/providers/meta.ts",
+        "sha256": "71fdf9ee2c1cdeda61913088e019cc8e8618977611b3c5ccbf6219d4817e771c"
+      },
+      "baseline": "missing",
+      "apis": [
+        "openai-responses"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://api.meta.ai/v1",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key",
+          "oauth"
+        ],
+        "environment": [
+          "META_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/meta.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/meta.json",
+          "sha256": "6ccc391fc86586638b4a2f26420f0e4763fccce04d746665cbd55f477124bb3b",
+          "apis": [
+            "openai-responses"
+          ],
+          "records": {
+            "chat": 7
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "cloudflare-workers-ai",
+      "source": {
+        "path": "packages/ai/src/providers/cloudflare-workers-ai.ts",
+        "sha256": "ad4d97721b01048d10b3e7ea6d2d0755dcd087f6623c1497c6f06c70c8511711"
+      },
+      "baseline": "missing",
+      "apis": [
+        "cloudflare-workers-ai-system-one",
+        "openai-completions"
+      ],
+      "operations": [
+        "chat",
+        "classifier"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": null,
+        "strategy": "provider-specific"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "CLOUDFLARE_API_KEY",
+          "CLOUDFLARE_ACCOUNT_ID"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/cloudflare-workers-ai.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/cloudflare-workers-ai.json",
+          "sha256": "f59052d13ed79e39bfbe5c66f8e39254708e4ad6f8643ae26cd43de91d501835",
+          "apis": [
+            "cloudflare-workers-ai-system-one",
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 20,
+            "classifier": 5
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "classification",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "cloudflare-ai-gateway",
+      "source": {
+        "path": "packages/ai/src/providers/cloudflare-ai-gateway.ts",
+        "sha256": "6f19bdcb965750aa1367f1c09eb883da16526644ad3a3cbcb60da8b53ca418ff"
+      },
+      "baseline": "missing",
+      "apis": [
+        "anthropic-messages",
+        "openai-completions",
+        "openai-responses"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": null,
+        "strategy": "provider-specific"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "CLOUDFLARE_API_KEY",
+          "CLOUDFLARE_ACCOUNT_ID",
+          "CLOUDFLARE_GATEWAY_ID"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/cloudflare-ai-gateway.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/cloudflare-ai-gateway.json",
+          "sha256": "37de906c100a4c4ff457235dc44675ee90f90a306ab9b50e1d556f3cebddc503",
+          "apis": [
+            "anthropic-messages",
+            "openai-completions",
+            "openai-responses"
+          ],
+          "records": {
+            "chat": 63
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "qwen-token-plan",
+      "source": {
+        "path": "packages/ai/src/providers/qwen-token-plan.ts",
+        "sha256": "e4cf5dd0c16ea1f47efecc97c86f76d84c532b675ccee9e6f7fa1350a038a06e"
+      },
+      "baseline": "missing",
+      "apis": [
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "QWEN_TOKEN_PLAN_TEAM_API_KEY",
+          "QWEN_TOKEN_PLAN_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/qwen-token-plan.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/qwen-token-plan.json",
+          "sha256": "600e61f7dfad9833ea1c2c31018d2bd544297ad3158b96953c8a70f9ed6ec693",
+          "apis": [
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 20
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "qwen-token-plan-cn",
+      "source": {
+        "path": "packages/ai/src/providers/qwen-token-plan-cn.ts",
+        "sha256": "541821f5f3f262912eb4fe5c0c55a8777583e3c21f5419d8db85c4013e77e1b2"
+      },
+      "baseline": "missing",
+      "apis": [
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "QWEN_TOKEN_PLAN_TEAM_CN_API_KEY",
+          "QWEN_TOKEN_PLAN_CN_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/qwen-token-plan-cn.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/qwen-token-plan-cn.json",
+          "sha256": "e0baa915644eea7b2c59c525a1660465e55bea51577ff9cc2e0863ad46b70328",
+          "apis": [
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 20
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "qwen-token-plan-individual",
+      "source": {
+        "path": "packages/ai/src/providers/qwen-token-plan-individual.ts",
+        "sha256": "736688c0ac2a46fa3489535c958aed175762010acd23f8d2cc0d2d0165a49573"
+      },
+      "baseline": "missing",
+      "apis": [
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "QWEN_TOKEN_PLAN_INDIVIDUAL_API_KEY",
+          "QWEN_TOKEN_PLAN_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/qwen-token-plan-individual.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/qwen-token-plan-individual.json",
+          "sha256": "dbfa5f80b40db0907795d573bff41c69183480d3938fbd3dd50c9f76bcfe0c0e",
+          "apis": [
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 13
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "qwen-token-plan-individual-cn",
+      "source": {
+        "path": "packages/ai/src/providers/qwen-token-plan-individual-cn.ts",
+        "sha256": "784c51bdd128b2fa6ed716070abc6515f32dbc96d7026efd61d4afb0a311d1b2"
+      },
+      "baseline": "missing",
+      "apis": [
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "QWEN_TOKEN_PLAN_INDIVIDUAL_CN_API_KEY",
+          "QWEN_TOKEN_PLAN_CN_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/qwen-token-plan-individual-cn.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/qwen-token-plan-individual-cn.json",
+          "sha256": "dd23bb588bb8a7d5c03865eb037a0f95bb47448811f820c50a4022f86867b809",
+          "apis": [
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 13
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "xiaomi",
+      "source": {
+        "path": "packages/ai/src/providers/xiaomi.ts",
+        "sha256": "d0d20dbcbcecca8b02948df1506ffa474461565546f7c24dfce44aebebef2344"
+      },
+      "baseline": "missing",
+      "apis": [
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://api.xiaomimimo.com/v1",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "XIAOMI_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/xiaomi.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/xiaomi.json",
+          "sha256": "65bc04b2ab6c9e97594de34bcea4ef7e45befd87901b4208d1ea4142b93f0561",
+          "apis": [
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 3
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "xiaomi-token-plan-cn",
+      "source": {
+        "path": "packages/ai/src/providers/xiaomi-token-plan-cn.ts",
+        "sha256": "255528bca12e929f0f683bcbf5a6b8ef0de779bb484b128bdda23bf2fb80caa8"
+      },
+      "baseline": "missing",
+      "apis": [
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "XIAOMI_TOKEN_PLAN_CN_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/xiaomi-token-plan-cn.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/xiaomi-token-plan-cn.json",
+          "sha256": "e69f9704b450dbb34b6db61a7b224dab5e5a91a39af3e505ecca4db8bfdc04f0",
+          "apis": [
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 2
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "xiaomi-token-plan-ams",
+      "source": {
+        "path": "packages/ai/src/providers/xiaomi-token-plan-ams.ts",
+        "sha256": "59d03fc70eca720f8ca9a9f676aedaf241524dac26c179a78e2e30aabe116e0f"
+      },
+      "baseline": "missing",
+      "apis": [
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://token-plan-ams.xiaomimimo.com/v1",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "XIAOMI_TOKEN_PLAN_AMS_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/xiaomi-token-plan-ams.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/xiaomi-token-plan-ams.json",
+          "sha256": "34fe47b0a79fec7843a01d542cb64b736e651a3e6691cc851183e5ce3eae0118",
+          "apis": [
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 2
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "xiaomi-token-plan-sgp",
+      "source": {
+        "path": "packages/ai/src/providers/xiaomi-token-plan-sgp.ts",
+        "sha256": "536da73a1588741c6a70809b5e94ab5a1ba2b8e81f24116e3ed734d6bc60b5e8"
+      },
+      "baseline": "missing",
+      "apis": [
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "excluded_operations": [],
+      "endpoint": {
+        "base_url": "https://token-plan-sgp.xiaomimimo.com/v1",
+        "strategy": "provider-default-with-model-overrides"
+      },
+      "auth": {
+        "methods": [
+          "api-key"
+        ],
+        "environment": [
+          "XIAOMI_TOKEN_PLAN_SGP_API_KEY"
+        ]
+      },
+      "models": {
+        "source": "packages/ai/src/providers/xiaomi-token-plan-sgp.models.ts",
+        "status": "pending-review",
+        "catalog": {
+          "path": "package/dist/providers/data/xiaomi-token-plan-sgp.json",
+          "sha256": "fd28cc293208617127ff888873772b7b52160538caa07ca3af641f3208d3ad20",
+          "apis": [
+            "openai-completions"
+          ],
+          "records": {
+            "chat": 2
+          }
+        }
+      },
+      "discovery": {
+        "strategy": "bundled-or-provider-specific",
+        "status": "pending-review"
+      },
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "handoff",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    }
+  ],
+  "retained": [
+    {
+      "id": "ollama",
+      "apis": [
+        "openai-completions"
+      ],
+      "operations": [
+        "chat"
+      ],
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "text",
+        "tool-loop",
+        "usage",
+        "cancellation",
+        "errors",
+        "discovery",
+        "capabilities",
+        "handoff"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    },
+    {
+      "id": "decisions",
+      "apis": [
+        "decisions"
+      ],
+      "operations": [
+        "classifier"
+      ],
+      "required_cases": [
+        "catalog",
+        "authentication",
+        "classification",
+        "usage",
+        "cancellation",
+        "errors",
+        "capabilities"
+      ],
+      "live": {
+        "status": "not-run",
+        "receipts": []
+      }
+    }
+  ]
+}

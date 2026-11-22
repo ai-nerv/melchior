@@ -111,12 +111,12 @@ fn what_an_ask_cost_is_what_the_provider_said_else_the_model_s_rates() {
         ..Cost::default()
     };
     assert_eq!(
-        cost(spent(150, 1_000, 1_000), rates),
+        cost(spent(150, 1_000, 1_000), &rates),
         150,
         "the provider's word"
     );
-    assert_eq!(cost(spent(0, 1_000_000, 100_000), rates), 4_500_000);
-    assert_eq!(cost(spent(0, 1_000_000, 100_000), Cost::default()), 0);
+    assert_eq!(cost(spent(0, 1_000_000, 100_000), &rates), 4_500_000);
+    assert_eq!(cost(spent(0, 1_000_000, 100_000), &Cost::default()), 0);
 }
 
 #[test]
@@ -152,8 +152,8 @@ fn cached_rate_presence_keeps_meter_and_cap_conservative() {
             cache_read: 1_000_000,
             ..Usage::default()
         };
-        assert_eq!(cost(measured, rates), expected, "{raw}");
-        let mut meter = Meter::new(Some(ledger.clone()), rates);
+        assert_eq!(cost(measured, &rates), expected, "{raw}");
+        let mut meter = Meter::new(Some(ledger.clone()), rates.clone());
         for _ in 0..3 {
             meter.heard(measured);
         }
@@ -168,7 +168,7 @@ fn cached_rate_presence_keeps_meter_and_cap_conservative() {
                     cost_micros: 7,
                     ..measured
                 },
-                rates
+                &rates
             ),
             7
         );

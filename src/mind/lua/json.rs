@@ -61,6 +61,24 @@ pub fn table<'gc>(ctx: Context<'gc>, types: Table<'gc>) -> Table<'gc> {
     });
     json.set(ctx, "decode", decode).ok();
 
+    let decode_value = Callback::from_fn_with(&ctx, types, |types, ctx, _exec, mut stack| {
+        let text: Value = stack.consume(ctx)?;
+        let value = match text {
+            Value::String(text) if text.as_bytes().len() <= crate::framing::MOST => {
+                serde_json::from_slice::<serde_json::Value>(text.as_bytes()).ok()
+            }
+            _ => None,
+        };
+        stack.replace(
+            ctx,
+            value.as_ref().map_or(Value::Nil, |value| {
+                crate::mind::lua::convert::exact(ctx, *types, value)
+            }),
+        );
+        Ok(CallbackReturn::Return)
+    });
+    json.set(ctx, "decode_value", decode_value).ok();
+
     let encode = Callback::from_fn(&ctx, |ctx, _exec, mut stack| {
         let value: Value = stack.consume(ctx)?;
         match json_from_lua(ctx, value)

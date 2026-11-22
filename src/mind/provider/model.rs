@@ -15,6 +15,8 @@ pub enum Api {
     /// OpenAI's Chat Completions, and the twenty-odd vendors that copy it.
     #[serde(rename = "openai-completions")]
     OpenAiCompletions,
+    /// Mistral's native chat completion dialect.
+    MistralConversations,
     /// OpenAI's Responses API.
     #[serde(rename = "openai-responses")]
     OpenAiResponses,
@@ -43,6 +45,7 @@ impl Api {
         match self {
             Self::AnthropicMessages => "anthropic-messages",
             Self::OpenAiCompletions => "openai-completions",
+            Self::MistralConversations => "mistral-conversations",
             Self::OpenAiResponses => "openai-responses",
             Self::AzureOpenAiResponses => "azure-openai-responses",
             Self::OpenAiCodexResponses => "openai-codex-responses",
@@ -56,10 +59,11 @@ impl Api {
 
     /// Every protocol magi knows.
     #[must_use]
-    pub const fn all() -> [Self; 10] {
+    pub const fn all() -> [Self; 11] {
         [
             Self::AnthropicMessages,
             Self::OpenAiCompletions,
+            Self::MistralConversations,
             Self::OpenAiResponses,
             Self::AzureOpenAiResponses,
             Self::OpenAiCodexResponses,
@@ -92,12 +96,20 @@ pub struct Model {
     /// Which protocol it speaks. Filled in from the provider for the same reason.
     #[serde(default = "default_api")]
     pub api: Api,
+    /// Base URL passed to this model's protocol instead of the provider's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Request headers overriding non-authentication protocol and provider headers.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
     /// Whether it can reason.
     #[serde(default)]
     pub reasoning: bool,
     /// What it accepts.
     #[serde(default = "default_input")]
     pub input: Vec<Modality>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_limits: Option<crate::mind::model::InputLimits>,
     /// Tokens it can hold.
     pub context_window: u64,
     /// Tokens it will produce in one turn.
@@ -151,8 +163,11 @@ mod tests {
             name: "M".into(),
             provider: "p".into(),
             api: Api::OpenAiCompletions,
+            base_url: None,
+            headers: BTreeMap::new(),
             reasoning: false,
             input: vec![Modality::Text],
+            input_limits: None,
             context_window: 1000,
             max_tokens: 100,
             cost: Cost::default(),

@@ -45,15 +45,21 @@ impl Provider {
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .expect("refresh fixture");
-                let mut bytes = [0; 4096];
-                let n = stream.read(&mut bytes).expect("refresh fixture");
-                let request = String::from_utf8_lossy(&bytes[..n]);
+                let mut bytes = Vec::new();
+                while !bytes.ends_with(b"\r\n\r\n") {
+                    assert!(bytes.len() < 65536);
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).expect("request header");
+                    bytes.push(byte[0]);
+                }
+                let request = String::from_utf8_lossy(&bytes);
                 let first = request.lines().next().expect("request");
                 assert!(
                     first.starts_with("GET /v1/models ")
                         || first.starts_with("GET /v1/models?sort=most-popular ")
+                        || first.starts_with("GET /v1/models/user ")
                 );
-                paths.lock().expect("requests").push(first.to_owned());
+                paths.lock().expect("requests").push(request.into_owned());
                 count.fetch_add(1, Ordering::SeqCst);
                 let (status, body) = reply.lock().expect("refresh fixture").clone();
                 let body = body.to_string();
@@ -83,6 +89,10 @@ impl Drop for Provider {
 }
 
 fn list(dir: &Scratch, refresh: bool) -> Value {
+    list_with(dir, refresh, &[])
+}
+
+fn list_with(dir: &Scratch, refresh: bool, vars: &[(&str, &str)]) -> Value {
     let mut command = Command::new(env!("CARGO_BIN_EXE_melchior"));
     command
         .env_clear()
@@ -92,11 +102,14 @@ fn list(dir: &Scratch, refresh: bool) -> Value {
         .env("XDG_CACHE_HOME", dir.join("cache"))
         .env("XDG_DATA_HOME", dir.join("data"))
         .env("XDG_RUNTIME_DIR", dir.join("runtime"))
+        .envs(vars.iter().copied())
         .args(["models", "--json"]);
     if refresh {
         command.arg("--refresh");
     }
     let out = command.output().expect("model listing");
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("private-sentinel"));
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("private-sentinel"));
     assert!(out.status.success());
     let reply: Value = serde_json::from_slice(&out.stdout).expect("JSON reply");
     assert_eq!(reply["ok"], true, "{reply}");
@@ -121,7 +134,7 @@ fn refresh_bypasses_fresh_cache_and_empty_success_removes_models() {
         dir.join("providers.lua"),
         format!(
             r#"
-melchior.provider("openrouter", {{ discover = false, models = {{}} }})
+melchior.provider("openrouter", {{ name = "Disabled fixture", api = "openai-completions", auth = {{ kind = "none" }} }})
 melchior.provider("ollama", {{ name = "Fixture", api = "openai-completions",
   base_url = "{}", auth = {{ kind = "none" }}, discover = true }})
 "#,
@@ -148,12 +161,21 @@ melchior.provider("ollama", {{ name = "Fixture", api = "openai-completions",
     *server.response.lock().expect("refresh fixture") = (200, json!({"data":[]}));
     assert!(models(&list(&dir, true)).is_empty());
     assert!(models(&list(&dir, false)).is_empty());
-    let cached: Value = serde_json::from_slice(
-        &std::fs::read(dir.join("cache/melchior/models/ollama.json")).expect("refresh fixture"),
-    )
-    .expect("refresh fixture");
+    let path = std::fs::read_dir(dir.join("cache/melchior/models/v2"))
+        .expect("cache")
+        .next()
+        .expect("entry")
+        .expect("path")
+        .path();
+    let cached: Value = serde_json::from_slice(&std::fs::read(path).expect("refresh fixture"))
+        .expect("refresh fixture");
     assert_eq!(cached, json!([]));
 }
+
+#[path = "model_refresh/deadline.rs"]
+mod deadline;
+#[path = "model_refresh/identity.rs"]
+mod identity;
 
 #[test]
 fn openrouter_refresh_carries_prices_and_weekly_positions_through_cache_and_wire() {
@@ -163,9 +185,10 @@ fn openrouter_refresh_carries_prices_and_weekly_positions_through_cache_and_wire
         dir.join("providers.lua"),
         format!(
             r#"
-melchior.provider("ollama", {{ discover = false, models = {{}} }})
+melchior.provider("ollama", {{ name = "Disabled fixture", api = "openai-completions", auth = {{ kind = "none" }} }})
 melchior.provider("openrouter", {{ name = "Fixture", api = "openai-completions",
-  base_url = "{}", auth = {{ kind = "none" }}, discover = true, details = "openrouter" }})
+  base_url = "{}", auth = {{ kind = "none" }}, discover = true, details = "openrouter",
+  compat = {{ supports_reasoning_effort = true, thinking_format = "openrouter" }} }})
 "#,
             server.url
         ),
@@ -197,7 +220,8 @@ melchior.provider("openrouter", {{ name = "Fixture", api = "openai-completions",
     assert_eq!(
         popular["capabilities"],
         json!({
-            "input":["text","image","video"], "output":["text"], "thinking":["low","high","xhigh"]
+            "session_identity":true,"input":["text","image","video"], "output":["text"], "thinking":["low","high","xhigh"],
+            "thinking_levels":["off","low","high","xhigh"]
         })
     );
     assert_eq!(popular["vision"], true);
@@ -234,7 +258,8 @@ melchior.provider("openrouter", {{ name = "Fixture", api = "openai-completions",
     assert_eq!(
         find(&updated, "openrouter/popular")["capabilities"],
         json!({
-            "input":["text","audio"], "output":["audio"], "thinking":["medium"]
+            "session_identity":true,"input":["text","audio"], "output":["audio"], "thinking":["medium"],
+            "thinking_levels":["off","medium"]
         })
     );
     let updated = find(&updated, "openrouter/popular");

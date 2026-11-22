@@ -60,20 +60,15 @@ async fn real_binary_output_recovery_resets_partial_answers_and_retains_paid_usa
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = Scratch::new("mel-budget", "wire");
     std::fs::create_dir_all(dir.join("cfg"))?;
-    std::fs::create_dir_all(dir.join("cache/melchior/models"))?;
     melchior::places::ensure(&dir.join("r"))?;
-    for provider in ["openrouter", "ollama"] {
-        std::fs::write(
-            dir.join(format!("cache/melchior/models/{provider}.json")),
-            "[]",
-        )?;
-    }
+    let offline = include_str!("fixtures/offline-providers.lua");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     std::fs::write(
         dir.join("cfg/providers.lua"),
         format!(
             r#"
+{offline}
 melchior.provider("fixture", {{name="Fixture", api="openai-completions",
  base_url="http://{address}", auth={{kind="none"}},
  models={{{{id="one",name="One",context_window=8000,max_tokens=900}}}}}})
@@ -239,20 +234,15 @@ async fn real_binary_preserves_typed_input_unknown_and_auth_terminal_failures()
     ] {
         let dir = Scratch::new("mel-overflow", "wire");
         std::fs::create_dir_all(dir.join("cfg/plugin"))?;
-        std::fs::create_dir_all(dir.join("cache/melchior/models"))?;
         melchior::places::ensure(&dir.join("r"))?;
-        for provider in ["openrouter", "ollama"] {
-            std::fs::write(
-                dir.join(format!("cache/melchior/models/{provider}.json")),
-                "[]",
-            )?;
-        }
+        let offline = include_str!("fixtures/offline-providers.lua");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         std::fs::write(
             dir.join("cfg/providers.lua"),
             format!(
                 r#"
+{offline}
 melchior.provider("fixture", {{name="Fixture", api="{api}",
  base_url="http://{address}", auth={{kind="none"}},
  models={{{{id="one",name="One",context_window=8000,max_tokens=900}}}}}})
